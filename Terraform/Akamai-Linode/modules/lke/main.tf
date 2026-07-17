@@ -28,8 +28,8 @@ resource "linode_lke_cluster" "lke-cluster" {
          # Prevent accidental deletion of the cluster. This is a safety measure to avoid accidental deletion of the cluster.
          lifecycle {
 
-                  prevent_destroy = false
-                  
+                  prevent_destroy = true
+
          }
 }
 
