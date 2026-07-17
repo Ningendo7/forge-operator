@@ -1,9 +1,53 @@
 apiVersion: forge.ningendo7.github.io/v1alpha1
 kind: Application
 metadata:
-  labels:
-    app.kubernetes.io/name: forge-operator
-    app.kubernetes.io/managed-by: kustomize
   name: application-sample
 spec:
-  # TODO(user): Add fields here
+  image: nginx:1.27
+  replicas: 2
+  container:
+    port: 8080
+    configMapName: application-sample-config
+    secretName: application-sample-secret
+    configMountPath: /etc/application/config
+    secretMountPath: /etc/application/secret
+  config:
+    name: application-sample-config
+    data:
+      APP_ENV: production
+      APP_PORT: "8080"
+  secret:
+    name: application-sample-secret
+    stringData:
+      API_KEY: change-me
+    type: Opaque
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+  ingress:
+    host: example.com
+    path: /
+    pathType: Prefix
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt
+  autoscaling:
+    minReplicas: 2
+    maxReplicas: 5
+    cpuUtilization: 70
+  pdb:
+    minAvailable: 1
+  storage:
+    provider: aws-s3
+    bucket: my-example-bucket
+    region: us-east-1
+    endpoint: https://s3.us-east-1.amazonaws.com
+    secretName: application-sample-storage
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

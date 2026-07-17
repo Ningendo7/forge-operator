@@ -58,13 +58,39 @@ spec:
                 - maxReplicas
                 - minReplicas
                 type: object
+              config:
+                description: ConfigMap configuration.
+                properties:
+                  data:
+                    additionalProperties:
+                      type: string
+                    description: Data stored in the ConfigMap.
+                    type: object
+                  name:
+                    description: Name of the ConfigMap to reconcile.
+                    type: string
+                type: object
               container:
                 description: Container configuration.
                 properties:
+                  configMapName:
+                    description: ConfigMap name to mount as configuration.
+                    type: string
+                  configMountPath:
+                    description: Mount path for the config volume.
+                    type: string
                   port:
+                    default: 8080
                     description: Container port.
                     format: int32
+                    minimum: 1
                     type: integer
+                  secretMountPath:
+                    description: Mount path for the secret volume.
+                    type: string
+                  secretName:
+                    description: Secret name to mount as secrets.
+                    type: string
                 type: object
               env:
                 description: Environment variables.
@@ -229,17 +255,49 @@ spec:
                 type: string
               image:
                 description: Container image to deploy.
+                minLength: 1
                 type: string
               ingress:
                 description: Ingress configuration.
                 properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: Annotations for the ingress resource.
+                    type: object
+                  className:
+                    description: ClassName for the ingress controller.
+                    type: string
                   host:
                     description: Hostname for ingress.
+                    type: string
+                  path:
+                    description: Path for the ingress rule.
+                    type: string
+                  pathType:
+                    description: PathType for the ingress rule.
                     type: string
                 required:
                 - host
                 type: object
+              pdb:
+                description: Pod Disruption Budget configuration.
+                properties:
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Maximum unavailable pods.
+                    x-kubernetes-int-or-string: true
+                  minAvailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: Minimum available pods.
+                    x-kubernetes-int-or-string: true
+                type: object
               replicas:
+                default: 1
                 description: Number of replicas.
                 format: int32
                 type: integer
@@ -302,18 +360,41 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              secret:
+                description: Secret configuration.
+                properties:
+                  name:
+                    description: Name of the Secret to reconcile.
+                    type: string
+                  stringData:
+                    additionalProperties:
+                      type: string
+                    description: String data stored in the Secret.
+                    type: object
+                  type:
+                    description: Secret type.
+                    type: string
+                type: object
               service:
                 description: Kubernetes Service configuration.
                 properties:
                   port:
-                    description: Service port.
+                    default: 80
+                    description: Service port exposed to clients.
                     format: int32
+                    minimum: 1
+                    type: integer
+                  targetPort:
+                    description: |-
+                      TargetPort is the port the application container listens on.
+                      When omitted, it defaults to the container port from spec.container.port.
+                    format: int32
+                    minimum: 1
                     type: integer
                   type:
+                    default: ClusterIP
                     description: Service type.
                     type: string
-                required:
-                - port
                 type: object
               storage:
                 description: Object storage configuration.
@@ -321,11 +402,20 @@ spec:
                   bucket:
                     description: Bucket name.
                     type: string
+                  endpoint:
+                    description: Endpoint for the object storage service.
+                    type: string
                   provider:
-                    description: 'Storage provider: aws or akamai.'
+                    description: 'Storage provider: aws-s3 or akamai-object-storage.'
+                    enum:
+                    - aws-s3
+                    - akamai-object-storage
                     type: string
                   region:
                     description: Cloud region.
+                    type: string
+                  secretName:
+                    description: Secret name containing access credentials.
                     type: string
                 required:
                 - bucket

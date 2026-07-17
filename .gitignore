@@ -28,3 +28,26 @@ go.work
 
 # Kubeconfig might contain secrets
 *.kubeconfig
+
+# Terraform sensitive and local artifacts
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+backend.tfvars
+
+# Local-only variable files often contain secrets
+*.tfvars
+*.tfvars.json
+!*.example.tfvars
+
+# CLI and local override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Local CLI config may include credentials
+.terraformrc
+terraform.rc

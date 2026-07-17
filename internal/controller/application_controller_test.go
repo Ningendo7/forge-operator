@@ -54,7 +54,9 @@ var _ = Describe("Application Controller", func() {
 						Name:      resourceName,
 						Namespace: resourceNamespace,
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: forgev1alpha1.ApplicationSpec{
+						Image: "nginx:latest",
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

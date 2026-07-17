@@ -1,121 +1,98 @@
 # forge-operator
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+forge-operator is a Kubebuilder-based Kubernetes operator for managing application workloads through a single Application custom resource. It reconciles a Deployment, Service, ConfigMap, Secret, optional Ingress, optional PodDisruptionBudget, and optional HorizontalPodAutoscaler based on the spec you declare.
 
-## Getting Started
+## What it manages
+
+The operator is designed to support a production-like deployment workflow for a containerized application with:
+
+- a Deployment driven by the Application image and replica count
+- a Service exposing the container port
+- a ConfigMap and Secret mounted into the pod
+- optional ingress routing
+- optional autoscaling and disruption budgets
+- optional storage credentials for S3 or Akamai-style object storage
+
+## CRD shape at a glance
+
+The Application spec currently supports:
+
+- image, replicas, and resources
+- container port and mount paths
+- service type/port/targetPort
+- ingress host, path, class, and annotations
+- autoscaling min/max replicas and CPU target
+- PDB minAvailable/maxUnavailable
+- storage provider, bucket, region, endpoint, and secretName
+- config and secret data blocks
+
+## Getting started
 
 ### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
+- Go 1.24+
+- Docker
+- kubectl
+- a reachable Kubernetes cluster
+
+### Build and deploy
+
+1. Build and push the image:
 
 ```sh
-make docker-build docker-push IMG=<some-registry>/forge-operator:tag
+make docker-build docker-push IMG=<registry>/forge-operator:tag
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
-
-**Install the CRDs into the cluster:**
+2. Install the CRDs:
 
 ```sh
 make install
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+3. Deploy the controller:
 
 ```sh
-make deploy IMG=<some-registry>/forge-operator:tag
+make deploy IMG=<registry>/forge-operator:tag
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
-
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+4. Apply the sample:
 
 ```sh
 kubectl apply -k config/samples/
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
+### Example Application manifest
 
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
+A representative manifest is provided in [config/samples/forge_v1alpha1_application.yaml](config/samples/forge_v1alpha1_application.yaml).
+
+### Cleanup
 
 ```sh
 kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
 make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
 make undeploy
 ```
 
-## Project Distribution
+## Sample configuration notes
 
-Following the options to release and provide this solution to the users.
+- The operator uses the Application name as the default owner and naming basis for generated resources.
+- If you set storage config, the operator will reconcile a Secret containing storage connection data for the application.
+- If you supply ingress settings, a Kubernetes Ingress resource is created for the application service.
+- If you supply autoscaling settings, an HPA is created targeting the generated Deployment.
 
-### By providing a bundle with all YAML files
+## Development
 
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/forge-operator:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
+Regenerate manifests and deepcopy code after changing API types:
 
 ```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/forge-operator/<tag or branch>/dist/install.yaml
+make manifests generate
 ```
 
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
+Run the controller tests:
 
 ```sh
-kubebuilder edit --plugins=helm/v2-alpha
+go test ./internal/controller/...
 ```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
 
 ## License
 

@@ -23,6 +23,22 @@ func (r *ApplicationReconciler) ensureDesiredState(
 		return err
 	}
 
+	if err := r.reconcileSecret(ctx, application); err != nil {
+		return err
+	}
+
+	if err := r.reconcileStorage(ctx, application); err != nil {
+		return err
+	}
+
+	if err := r.reconcileIngress(ctx, application); err != nil {
+		return err
+	}
+
+	if err := r.reconcilePDB(ctx, application); err != nil {
+		return err
+	}
+
 	if err := r.reconcileHPA(ctx, application); err != nil {
 		return err
 	}

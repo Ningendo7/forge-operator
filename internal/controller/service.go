@@ -31,9 +31,9 @@ func (r *ApplicationReconciler) desiredService(
 		servicePort = application.Spec.Service.Port
 	}
 
-	targetPort := application.Spec.Container.Port
-	if targetPort == 0 {
-		targetPort = 8080
+	targetPort := int32(8080)
+	if application.Spec.Container.Port != 0 {
+		targetPort = application.Spec.Container.Port
 	}
 	if application.Spec.Service.TargetPort != nil {
 		targetPort = *application.Spec.Service.TargetPort

@@ -79,7 +79,12 @@ func (r *ApplicationReconciler) desiredDeployment(
 							Image: application.Spec.Image,
 							Ports: []corev1.ContainerPort{
 								{
-									ContainerPort: application.Spec.Container.Port,
+									ContainerPort: func() int32 {
+										if application.Spec.Container.Port != 0 {
+											return application.Spec.Container.Port
+										}
+										return 8080
+									}(),
 								},
 							},
 							Resources: application.Spec.Resources,

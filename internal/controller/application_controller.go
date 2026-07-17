@@ -20,13 +20,18 @@ import (
 	"context"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 )
+
+const applicationFinalizer = "forge.ningendo7.github.io/finalizer"
 
 // ApplicationReconciler reconciles a Application object
 type ApplicationReconciler struct {
@@ -51,7 +56,7 @@ func (r *ApplicationReconciler) Reconcile(
 	ctx context.Context,
 	req ctrl.Request,
 ) (ctrl.Result, error) {
-	
+
 	logger := logf.FromContext(ctx)
 	logger.Info("Reconciling Application", "name", req.Name, "namespace", req.Namespace)
 
@@ -63,11 +68,58 @@ func (r *ApplicationReconciler) Reconcile(
 		return ctrl.Result{}, err
 	}
 
-	if err := r.ensureDesiredState(ctx, application); err != nil {
+	if err := r.ensureFinalizer(ctx, application); err != nil {
 		return ctrl.Result{}, err
 	}
 
+	if application.DeletionTimestamp != nil {
+		return ctrl.Result{}, nil
+	}
+
+	if err := r.setCondition(ctx, application, "Progressing", metav1.ConditionTrue, "Reconciling", "Reconciling the desired application resources"); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if err := r.ensureDesiredState(ctx, application); err != nil {
+		_ = r.setCondition(ctx, application, "Ready", metav1.ConditionFalse, "ReconcileError", err.Error())
+		_ = r.setCondition(ctx, application, "Degraded", metav1.ConditionTrue, "ReconcileError", err.Error())
+		return ctrl.Result{}, err
+	}
+
+	_ = r.setCondition(ctx, application, "Ready", metav1.ConditionTrue, "Reconciled", "The desired resources are reconciled")
+	_ = r.setCondition(ctx, application, "Progressing", metav1.ConditionFalse, "Reconciled", "Reconciliation completed")
+	_ = r.setCondition(ctx, application, "Degraded", metav1.ConditionFalse, "Reconciled", "Reconciliation completed")
+
 	return ctrl.Result{}, nil
+}
+
+func (r *ApplicationReconciler) ensureFinalizer(ctx context.Context, application *forgev1alpha1.Application) error {
+	if application.DeletionTimestamp != nil {
+		if controllerutil.ContainsFinalizer(application, applicationFinalizer) {
+			controllerutil.RemoveFinalizer(application, applicationFinalizer)
+			return r.Update(ctx, application)
+		}
+		return nil
+	}
+
+	if !controllerutil.ContainsFinalizer(application, applicationFinalizer) {
+		controllerutil.AddFinalizer(application, applicationFinalizer)
+		return r.Update(ctx, application)
+	}
+
+	return nil
+}
+
+func (r *ApplicationReconciler) setCondition(ctx context.Context, application *forgev1alpha1.Application, conditionType string, status metav1.ConditionStatus, reason, message string) error {
+	meta.SetStatusCondition(&application.Status.Conditions, metav1.Condition{
+		Type:               conditionType,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: application.Generation,
+		LastTransitionTime: metav1.Now(),
+	})
+	return r.Status().Update(ctx, application)
 }
 
 // SetupWithManager sets up the controller with the Manager.
