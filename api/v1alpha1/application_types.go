@@ -24,8 +24,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// StorageProvider represents the supported object storage backends.
+//  +kubebuilder:validation:Enum=aws-s3;akamai-object-storage
+type StorageProvider string
+
+const (
+	ProviderAWSS3               StorageProvider = "aws-s3"
+	ProviderAkamaiObjectStorage StorageProvider = "akamai-object-storage"
+)
 
 // ApplicationSpec defines the desired state of Application
 type ApplicationSpec struct {
@@ -105,6 +111,10 @@ type ApplicationStatus struct {
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
 // ContainerSpec defines container settings.
@@ -230,8 +240,7 @@ type AutoscalingSpec struct {
 // StorageSpec defines object storage settings.
 type StorageSpec struct {
 	// Storage provider: aws-s3 or akamai-object-storage.
-	// +kubebuilder:validation:Enum=aws-s3;akamai-object-storage
-	Provider string `json:"provider"`
+	Provider StorageProvider `json:"provider"`
 
 	// Bucket name.
 	Bucket string `json:"bucket"`
@@ -251,6 +260,9 @@ type StorageSpec struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Image",type="string",JSONPath=".spec.image"
+// +kubebuilder:printcolumn:name="Replicas",type="integer",JSONPath=".spec.replicas"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // Application is the Schema for the applications API
 type Application struct {
