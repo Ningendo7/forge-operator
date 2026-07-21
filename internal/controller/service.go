@@ -40,6 +40,11 @@ func (r *ApplicationReconciler) desiredService(
 	}
 
 	return &corev1.Service{
+
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Service",
+			APIVersion: "v1",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      application.Name,
 			Namespace: application.Namespace,
@@ -49,25 +54,12 @@ func (r *ApplicationReconciler) desiredService(
 			Type:     serviceType,
 			Selector: labels,
 			Ports: []corev1.ServicePort{{
+				Name:       "http",
 				Port:       servicePort,
 				TargetPort: intstr.FromInt(int(targetPort)),
 			}},
 		},
 	}
-}
-
-func (r *ApplicationReconciler) getService(
-	ctx context.Context,
-	key client.ObjectKey,
-) (*corev1.Service, error) {
-
-	var existing corev1.Service
-
-	if err := r.Get(ctx, key, &existing); err != nil {
-		return nil, err
-	}
-
-	return &existing, nil
 }
 
 func (r *ApplicationReconciler) reconcileService(
@@ -80,40 +72,23 @@ func (r *ApplicationReconciler) reconcileService(
 
 	desired := r.desiredService(application)
 
-	existing, err := r.getService(ctx, client.ObjectKey{
-		Name:      desired.Name,
-		Namespace: desired.Namespace,
-	})
-
-	if apierrors.IsNotFound(err) {
-		logger.Info("Creating Service", "name", desired.Name)
-		if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
-			return err
-		}
-		return r.Create(ctx, desired)
-	} else if err != nil {
-		return err
+	if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference for Service: %w", err)
 	}
 
-	if !metav1.IsControlledBy(existing, application) {
-		if err := controllerutil.SetControllerReference(application, existing, r.Scheme); err != nil {
-			return err
-		}
+	err := r.Patch(
+		ctx,
+		desired,
+		client.Apply,
+		client.ForceOwnership,
+		client.FieldOwner("forge-operator"),
+	)
+	if err != nil {
+		logger.Error(err, "failed to apply Service", "name", desired.Name)
+		return fmt.Errorf("failed to server-side apply Service: %w", err)
 	}
 
-	patch := client.MergeFrom(existing.DeepCopy())
-
-	existing.Labels = desired.Labels
-	existing.Spec.Type = desired.Spec.Type
-	existing.Spec.Selector = desired.Spec.Selector
-	existing.Spec.Ports = desired.Spec.Ports
-
-	if err := r.Patch(ctx, existing, patch); err != nil {
-		logger.Error(err, "failed to patch Service", "name", existing.Name)
-		return err
-	}
-
-	logger.Info("Updated Service", "name", existing.Name)
+	logger.Info("Successfully reconciled Service", "name", desired.Name)
 
 	return nil
 }
