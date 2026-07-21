@@ -18,6 +18,11 @@ func (r *ApplicationReconciler) desiredConfigMap(
 	name := configMapNameFor(application)
 
 	return &corev1.ConfigMap{
+
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ConfigMap",
+			APIVersion: "v1",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: application.Namespace,
@@ -32,57 +37,32 @@ func (r *ApplicationReconciler) desiredConfigMap(
 	}
 }
 
-func (r *ApplicationReconciler) getConfigMap(
-	ctx context.Context,
-	key client.ObjectKey,
-) (*corev1.ConfigMap, error) {
-	var existing corev1.ConfigMap
-	if err := r.Get(ctx, key, &existing); err != nil {
-		return nil, err
-	}
-	return &existing, nil
-}
-
 func (r *ApplicationReconciler) reconcileConfigMap(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
 ) error {
+
 	logger := logf.FromContext(ctx)
 	logger.Info("Reconciling ConfigMap")
 
 	desired := r.desiredConfigMap(application)
 
-	existing, err := r.getConfigMap(ctx, client.ObjectKey{
-		Name:      desired.Name,
-		Namespace: desired.Namespace,
-	})
-
-	if apierrors.IsNotFound(err) {
-		logger.Info("Creating ConfigMap", "name", desired.Name)
-		if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
-			return err
-		}
-		return r.Create(ctx, desired)
-	} else if err != nil {
-		return err
+	if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference for ConfigMap: %w", err)
 	}
 
-	if !metav1.IsControlledBy(existing, application) {
-		if err := controllerutil.SetControllerReference(application, existing, r.Scheme); err != nil {
-			return err
-		}
+	err := r.Patch(
+		ctx, 
+		desired, 
+		client.Apply, 
+		client.FieldOwner("forge-operator"),
+		client.ForceOwnership,
+	)
+	if err != nil {
+		logger.Error(err, "Failed to apply ConfigMap", "name", desired.Name)
+		return fmt.Errorf("failed to server-side apply ConfigMap: %w", err)
 	}
 
-	patch := client.MergeFrom(existing.DeepCopy())
-
-	existing.Labels = desired.Labels
-	existing.Data = desired.Data
-
-	if err := r.Patch(ctx, existing, patch); err != nil {
-		logger.Error(err, "failed to patch ConfigMap", "name", existing.Name)
-		return err
-	}
-
-	logger.Info("Updated ConfigMap", "name", existing.Name)
+	logger.Info("Successfully reconciled ConfigMap", "name", desired.Name)
 	return nil
 }

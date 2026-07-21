@@ -12,7 +12,10 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-func (r *ApplicationReconciler) desiredSecret(application *forgev1alpha1.Application) *corev1.Secret {
+func (r *ApplicationReconciler) desiredSecret(
+	application *forgev1alpha1.Application,
+) *corev1.Secret {
+
 	labels := map[string]string{"app": application.Name}
 	name := application.Name + "-secret"
 	secretType := corev1.SecretTypeOpaque
@@ -29,6 +32,10 @@ func (r *ApplicationReconciler) desiredSecret(application *forgev1alpha1.Applica
 	}
 
 	return &corev1.Secret{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Secret",
+			APIVersion: "v1",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: application.Namespace,
@@ -39,7 +46,10 @@ func (r *ApplicationReconciler) desiredSecret(application *forgev1alpha1.Applica
 	}
 }
 
-func (r *ApplicationReconciler) desiredStorage(application *forgev1alpha1.Application) *corev1.Secret {
+func (r *ApplicationReconciler) desiredStorage(
+	application *forgev1alpha1.Application,
+) *corev1.Secret {
+
 	if application.Spec.Storage == nil {
 		return nil
 	}
@@ -50,6 +60,10 @@ func (r *ApplicationReconciler) desiredStorage(application *forgev1alpha1.Applic
 	}
 
 	return &corev1.Secret{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Secret",
+			APIVersion: "v1",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: application.Namespace,
@@ -65,15 +79,11 @@ func (r *ApplicationReconciler) desiredStorage(application *forgev1alpha1.Applic
 	}
 }
 
-func (r *ApplicationReconciler) getSecret(ctx context.Context, key client.ObjectKey) (*corev1.Secret, error) {
-	var existing corev1.Secret
-	if err := r.Get(ctx, key, &existing); err != nil {
-		return nil, err
-	}
-	return &existing, nil
-}
+func (r *ApplicationReconciler) reconcileSecret(
+	ctx context.Context, 
+	application *forgev1alpha1.Application,
+) error {
 
-func (r *ApplicationReconciler) reconcileSecret(ctx context.Context, application *forgev1alpha1.Application) error {
 	if application.Spec.Secret == nil {
 		return nil
 	}
@@ -82,38 +92,32 @@ func (r *ApplicationReconciler) reconcileSecret(ctx context.Context, application
 	logger.Info("Reconciling Secret")
 
 	desired := r.desiredSecret(application)
-	existing, err := r.getSecret(ctx, client.ObjectKey{Name: desired.Name, Namespace: desired.Namespace})
-	if apierrors.IsNotFound(err) {
-		logger.Info("Creating Secret", "name", desired.Name)
-		if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
-			return err
-		}
-		return r.Create(ctx, desired)
-	} else if err != nil {
-		return err
+
+	if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference for Secret: %w", err)
 	}
 
-	if !metav1.IsControlledBy(existing, application) {
-		if err := controllerutil.SetControllerReference(application, existing, r.Scheme); err != nil {
-			return err
-		}
+	err := r.Patch(
+		ctx, 
+		desired, 
+		client.Apply, 
+		client.FieldOwner("forge-operator"),
+		client.ForceOwnership,
+	)
+	if err != nil {
+		logger.Error(err, "Failed to apply Secret", "name", desired.Name)
+		return fmt.Errorf("failed to server-side apply Secret: %w", err)
 	}
 
-	patch := client.MergeFrom(existing.DeepCopy())
-	existing.Labels = desired.Labels
-	existing.StringData = desired.StringData
-	existing.Type = desired.Type
-
-	if err := r.Patch(ctx, existing, patch); err != nil {
-		logger.Error(err, "failed to patch Secret", "name", existing.Name)
-		return err
-	}
-
-	logger.Info("Updated Secret", "name", existing.Name)
+	logger.Info("Successfully reconciled Secret", "name", desired.Name)
 	return nil
 }
 
-func (r *ApplicationReconciler) reconcileStorage(ctx context.Context, application *forgev1alpha1.Application) error {
+func (r *ApplicationReconciler) reconcileStorageSecret(
+	ctx context.Context, 
+	application *forgev1alpha1.Application,
+) error {
+
 	if application.Spec.Storage == nil {
 		return nil
 	}
@@ -126,28 +130,22 @@ func (r *ApplicationReconciler) reconcileStorage(ctx context.Context, applicatio
 		return nil
 	}
 
-	existing, err := r.getSecret(ctx, client.ObjectKey{Name: desired.Name, Namespace: desired.Namespace})
-	if apierrors.IsNotFound(err) {
-		logger.Info("Creating Storage Secret", "name", desired.Name)
-		if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
-			return err
-		}
-		return r.Create(ctx, desired)
-	} else if err != nil {
-		return err
+	if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference for Storage Secret: %w", err)
 	}
 
-	patch := client.MergeFrom(existing.DeepCopy())
-	existing.Labels = desired.Labels
-	existing.StringData = desired.StringData
-	existing.Type = desired.Type
-
-	if err := r.Patch(ctx, existing, patch); err != nil {
-		logger.Error(err, "failed to patch Storage Secret", "name", existing.Name)
-		return err
+	err := r.Patch(
+		ctx, 
+		desired, 
+		client.Apply, 
+		client.FieldOwner("forge-operator"),
+		client.ForceOwnership,
+	)
+	if err != nil {
+		logger.Error(err, "Failed to apply Storage Secret", "name", desired.Name)
+		return fmt.Errorf("failed to server-side apply Storage Secret: %w", err)
 	}
 
-	logger.Info("Updated Storage Secret", "name", existing.Name)
+	logger.Info("Successfully reconciled Storage Secret", "name", desired.Name)
 	return nil
 }
-
