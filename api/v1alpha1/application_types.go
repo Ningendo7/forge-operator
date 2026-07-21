@@ -200,6 +200,7 @@ type IngressSpec struct {
 
 	// PathType for the ingress rule.
 	// +optional
+	// +kubebuilder:default:=Prefix
 	PathType *networkingv1.PathType `json:"pathType,omitempty"`
 
 	// ClassName for the ingress controller.
@@ -209,9 +210,14 @@ type IngressSpec struct {
 	// Annotations for the ingress resource.
 	// +optional
 	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// TLS configuration for the ingress resource.
+	// +optional
+	TLS []networkingv1.IngressTLS `json:"tls,omitempty"`
 }
 
 // PDBSpec defines Pod Disruption Budget settings.
+// +kubebuilder:validation:XValidation:rule="!(has(self.minAvailable) && has(self.maxUnavailable))",message="cannot set both minAvailable and maxUnavailable"
 type PDBSpec struct {
 	// Minimum available pods.
 	// +optional
@@ -223,6 +229,7 @@ type PDBSpec struct {
 }
 
 // AutoscalingSpec defines HPA settings.
+// +kubebuilder:validation:XValidation:rule="self.maxReplicas >= self.minReplicas",message="maxReplicas must be greater than or equal to minReplicas"
 type AutoscalingSpec struct {
 	// Minimum replicas.
 	// +kubebuilder:validation:Minimum=1
@@ -260,6 +267,7 @@ type StorageSpec struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status"
 // +kubebuilder:printcolumn:name="Image",type="string",JSONPath=".spec.image"
 // +kubebuilder:printcolumn:name="Replicas",type="integer",JSONPath=".spec.replicas"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

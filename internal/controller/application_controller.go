@@ -42,6 +42,11 @@ type ApplicationReconciler struct {
 // +kubebuilder:rbac:groups=forge.ningendo7.github.io,resources=applications,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=forge.ningendo7.github.io,resources=applications/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=forge.ningendo7.github.io,resources=applications/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services;configmaps;secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -68,43 +73,38 @@ func (r *ApplicationReconciler) Reconcile(
 		return ctrl.Result{}, err
 	}
 
+	if application.DeletionTimestamp != nil {
+		return r.handleDeletion(ctx, application)
+	}
+
 	if err := r.ensureFinalizer(ctx, application); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	if application.DeletionTimestamp != nil {
-		return ctrl.Result{}, nil
-	}
-
-	if err := r.setCondition(ctx, application, "Progressing", metav1.ConditionTrue, "Reconciling", "Reconciling the desired application resources"); err != nil {
+	if err := ensureDesiredState(ctx, application); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	if err := r.ensureDesiredState(ctx, application); err != nil {
-		_ = r.setCondition(ctx, application, "Ready", metav1.ConditionFalse, "ReconcileError", err.Error())
-		_ = r.setCondition(ctx, application, "Degraded", metav1.ConditionTrue, "ReconcileError", err.Error())
-		return ctrl.Result{}, err
-	}
-
-	_ = r.setCondition(ctx, application, "Ready", metav1.ConditionTrue, "Reconciled", "The desired resources are reconciled")
-	_ = r.setCondition(ctx, application, "Progressing", metav1.ConditionFalse, "Reconciled", "Reconciliation completed")
-	_ = r.setCondition(ctx, application, "Degraded", metav1.ConditionFalse, "Reconciled", "Reconciliation completed")
-
-	return ctrl.Result{}, nil
-}
+	r.updateStatus
 
 func (r *ApplicationReconciler) ensureFinalizer(ctx context.Context, application *forgev1alpha1.Application) error {
 	if application.DeletionTimestamp != nil {
 		if controllerutil.ContainsFinalizer(application, applicationFinalizer) {
+
+			if err := r.cleanupExternalResources(ctx, application); err != nil {
+				return err
+			}
+
 			controllerutil.RemoveFinalizer(application, applicationFinalizer)
-			return r.Update(ctx, application)
+			return ctrl.Result{}, r.Update(ctx, application)
 		}
-		return nil
+
+		return ctrl.Result{}, nil
 	}
 
 	if !controllerutil.ContainsFinalizer(application, applicationFinalizer) {
 		controllerutil.AddFinalizer(application, applicationFinalizer)
-		return r.Update(ctx, application)
+		return ctrl.Result{}, r.Update(ctx, application)
 	}
 
 	return nil
@@ -126,6 +126,13 @@ func (r *ApplicationReconciler) setCondition(ctx context.Context, application *f
 func (r *ApplicationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&forgev1alpha1.Application{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
+		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.Secret{}).
+		Owns(&networkingv1.Ingress{}).
+		Owns(&autoscalingv1.HorizontalPodAutoscaler{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		Named("application").
 		Complete(r)
 }

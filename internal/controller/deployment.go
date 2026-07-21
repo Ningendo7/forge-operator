@@ -41,6 +41,52 @@ func secretMountPathFor(application *forgev1alpha1.Application) string {
 	return "/etc/" + application.Name + "/secret"
 }
 
+func (r *ApplicationReconciler) buildVolumeAndMounts(
+	application *forgev1alpha1.Application,
+) ([]corev1.Volume, []corev1.VolumeMount) {
+
+	var volumes []corev1.Volume
+	var volumeMounts []corev1.VolumeMount
+
+	// ConfigMap Volume only if ConfigMapName is specified
+	if application.Spec.Container.ConfigMapName != "" {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "config",
+			MountPath: configMountPathFor(application),
+			ReadOnly:  true,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: "config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: configMapNameFor(application),
+					},
+				},
+			},
+		})
+	}
+
+	// Secret Volume only if SecretName is specified
+	if application.Spec.Container.SecretName != "" {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "secret",
+			MountPath: secretMountPathFor(application),
+			ReadOnly:  true,
+		})
+		volumes = append(volumes, corev1.Volume{
+			Name: "secret",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: secretNameFor(application),
+				},
+			},
+		})
+	}
+
+	return volumes, volumeMounts
+}
+
 func (r *ApplicationReconciler) desiredDeployment(
 	application *forgev1alpha1.Application,
 ) *appsv1.Deployment {
@@ -49,15 +95,21 @@ func (r *ApplicationReconciler) desiredDeployment(
 		"app": application.Name,
 	}
 
-	var replicas int32
+	var replicas int32 = 1
 
-	if application.Spec.Replicas == nil {
-		replicas = 1
-	} else {
+	if application.Spec.Replicas != nil {
 		replicas = *application.Spec.Replicas
 	}
 
+	volumes, volumeMounts := r.buildVolumeAndMounts(application)
+
 	return &appsv1.Deployment{
+
+		// Needed for Server-Side Apply to work correctly
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      application.Name + "-deployment",
 			Namespace: application.Namespace,
@@ -88,40 +140,10 @@ func (r *ApplicationReconciler) desiredDeployment(
 								},
 							},
 							Resources: application.Spec.Resources,
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "config",
-									MountPath: configMountPathFor(application),
-									ReadOnly:  true,
-								},
-								{
-									Name:      "secret",
-									MountPath: secretMountPathFor(application),
-									ReadOnly:  true,
-								},
-							},
+							VolumeMounts: volumeMounts,
 						},
 					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "config",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: configMapNameFor(application),
-									},
-								},
-							},
-						},
-						{
-							Name: "secret",
-							VolumeSource: corev1.VolumeSource{
-								Secret: &corev1.SecretVolumeSource{
-									SecretName: secretNameFor(application),
-								},
-							},
-						},
-					},
+					Volumes: volumes,
 				},
 			},
 		},
@@ -150,52 +172,29 @@ func (r *ApplicationReconciler) reconcileDeployment(
 ) error {
 
 	logger := logf.FromContext(ctx)
-	logger.Info("Reconciling Deployment")
+	logger.Info("Reconciling Deployment via Server-Side Apply")
+
 	desired := r.desiredDeployment(application)
 
-	// fetch existing deployment
-	existing, err := r.getDeployment(ctx, client.ObjectKey{
-		Name:      desired.Name,
-		Namespace: desired.Namespace,
-	})
-
-	// create if not found
-	if apierrors.IsNotFound(err) {
-		logger.Info("Creating Deployment", "name", desired.Name)
-
-		if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
-			return err
-		}
-
-		return r.Create(ctx, desired)
-
-	} else if err != nil {
-		return err
+	if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference: %w", err)
 	}
 
-	if !metav1.IsControlledBy(existing, application) {
-		if err := controllerutil.SetControllerReference(application, existing, r.Scheme); err != nil {
-			return err
-		}
+	// Use Server-Side Apply to create or update the Deployment
+
+	err := r.Patch(
+		ctx, 
+		desired, 
+		client.Apply, 
+		client.ForceOwnership, 
+		client.FieldOwner("forge-operator"),
+	)
+	if err != nil {
+		logger.Error(err, "failed to apply Deployment", "name", desired.Name)
+		return fmt.Errorf("failed to server-side apply Deployment: %w", err)
 	}
 
-	patch := client.MergeFrom(existing.DeepCopy())
-
-	existing.Labels = desired.Labels
-	existing.Spec.Selector = desired.Spec.Selector
-	existing.Spec.Template.ObjectMeta.Labels = desired.Spec.Template.ObjectMeta.Labels
-	existing.Spec.Replicas = desired.Spec.Replicas
-	existing.Spec.Template.Spec.Containers[0].Image = desired.Spec.Template.Spec.Containers[0].Image
-	existing.Spec.Template.Spec.Containers[0].Ports = desired.Spec.Template.Spec.Containers[0].Ports
-	existing.Spec.Template.Spec.Containers[0].VolumeMounts = desired.Spec.Template.Spec.Containers[0].VolumeMounts
-	existing.Spec.Template.Spec.Volumes = desired.Spec.Template.Spec.Volumes
-
-	if err := r.Patch(ctx, existing, patch); err != nil {
-		logger.Error(err, "failed to patch Deployment", "name", existing.Name)
-		return err
-	}
-
-	logger.Info("Updated Deployment", "name", existing.Name)
+	logger.Info("Successfully reconciled Deployment", "name", desired.Name)
 	return nil
 
 }
