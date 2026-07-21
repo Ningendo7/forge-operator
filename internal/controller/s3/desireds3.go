@@ -8,6 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -26,6 +27,10 @@ func (m *Manager) ReconcileBucket(
 
 	if err := m.ensureLifecyclePolicy(ctx); err != nil {
 		return fmt.Errorf("failed to ensure lifecycle policy: %w", err)
+	}
+
+	if err := m.ReconcileAppIRSA(ctx); err != nil {
+		return fmt.Errorf("failed to reconcile app IRSA: %w", err)
 	}
 
 	return nil
@@ -121,7 +126,7 @@ func (m *Manager) ensureLifecyclePolicy(
 		LifecycleConfiguration: &s3types.BucketLifecycleConfiguration{
 			Rules: []s3types.LifecycleRule{
 				{
-					ID:     aws.String("CleanupIncompleteMultipartUpload"),
+					ID:     aws.String("StandardLifecycleRule"),
 					Status: s3types.ExpirationStatusEnabled,
 					Filter: &s3types.LifecycleRuleFilterMemberPrefix{
 						Value: "",
@@ -129,22 +134,8 @@ func (m *Manager) ensureLifecyclePolicy(
 					AbortIncompleteMultipartUpload: &s3types.AbortIncompleteMultipartUpload{
 						DaysAfterInitiation: aws.Int32(7),
 					},
-				},
-				{
-					ID:     aws.String("ExpireOldNoncurrentVersions"),
-					Status: s3types.ExpirationStatusEnabled,
-					Filter: &s3types.LifecycleRuleFilterMemberPrefix{
-						Value: "",
-					},
 					NoncurrentVersionExpiration: &s3types.NoncurrentVersionExpiration{
 						Days: aws.Int32(30),
-					},
-				},
-				{
-					ID:     aws.String("TransitionToStandardIA"),
-					Status: s3types.ExpirationStatusEnabled,
-					Filter: &s3types.LifecycleRuleFilterMemberPrefix{
-						Value: "",
 					},
 					Transitions: []s3types.Transition{
 						{
@@ -165,4 +156,115 @@ func (m *Manager) ensureLifecyclePolicy(
 	log.FromContext(ctx).Info(fmt.Sprintf("Lifecycle policy set for bucket %s", m.bucket))
 	return nil
 
+}
+
+func (m *Manager) ReconcileAppIRSA(
+	ctx context.Context,
+) error {
+
+	roleName := fmt.Sprintf("app-irsa-%s", m.app.Name)
+
+	// Clean up oidcUrl so it works safely in IAM Condition keys
+    	oidcHost := strings.TrimPrefix(m.oidcUrl, "https://")
+
+	trustPolicy := fmt.Sprintf(`{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Effect": "Allow",
+			"Principal": {
+				"Federated": "%s"
+			},
+			"Action": "sts:AssumeRoleWithWebIdentity",
+			"Condition": {
+				"StringEquals": {
+					"%s:sub": "system:serviceaccount:%s:%s",
+					"%s:aud": "sts.amazonaws.com"
+				}
+			}
+		}]
+	}`, m.oidcArn, oidcHost, m.app.Namespace, m.app.Spec.ServiceAccountName, oidcHost)
+
+	// Ensure the IAM role exists
+	var roleArn string
+	getRoleOut, err := m.iamclient.GetRole(ctx, &iam.GetRoleInput{
+		RoleName: aws.String(roleName),
+	})
+	if err != nil {
+		var notFoundErr *iamtypes.NoSuchEntityException
+		if errors.As(err, &notFoundErr) {
+			// Assume the role does not exist and create it
+			createRoleOut, err := m.iamclient.CreateRole(ctx, &iam.CreateRoleInput{
+				RoleName:                 aws.String(roleName),
+				AssumeRolePolicyDocument: aws.String(trustPolicy),
+			})
+			if err != nil {
+				return fmt.Errorf("failed to create app IRSA role %s: %w", roleName, err)
+			}
+			roleArn = aws.ToString(createRoleOut.Role.Arn)
+		} else {
+			return fmt.Errorf("failed to get app IRSA role %s: %w", roleName, err)
+		}
+	} else {
+		roleArn = aws.ToString(getRoleOut.Role.Arn)
+	}
+
+	// Attach Bucket Access Policy to the Role
+	s3Policy := fmt.Sprintf(`{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Effect": "Allow",
+			"Action": [
+				"s3:ListBucket",
+				"s3:GetObject",
+				"s3:PutObject",
+				"s3:DeleteObject"
+			],
+			"Resource": [
+				"arn:aws:s3:::%s",
+				"arn:aws:s3:::%s/*"
+			]
+		}]
+	}`, m.bucket, m.bucket)
+
+	_, err = m.iamclient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
+		RoleName:       aws.String(roleName),
+		PolicyName:     aws.String("S3BucketAccessPolicy"),
+		PolicyDocument: aws.String(s3Policy),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to attach S3 bucket access policy to role %s: %w", roleName, err)
+	}
+
+	log.FromContext(ctx).Info(fmt.Sprintf("App IRSA role %s reconciled successfully with S3 bucket access", roleName))
+	
+
+	// Annotate the App/s ServiceAccount
+	sa := &corev1.ServiceAccount{}
+	err = m.k8sClient.Get(ctx, types.NamespacedName{
+		Name:      m.app.Spec.ServiceAccountName,
+		Namespace: m.app.Namespace,
+	}, sa)
+	if err != nil {
+		return fmt.Errorf("failed to get ServiceAccount %s/%s: %w", m.app.Namespace, m.app.Spec.ServiceAccountName, err)
+	}
+
+	if sa.Annotations == nil {
+		sa.Annotations = make(map[string]string)
+	}
+
+	// Check if the annotation already exists to prevent unnecessary writes
+	if sa.Annotations["eks.amazonaws.com/role-arn"] != roleArn {
+		sa.Annotations["eks.amazonaws.com/role-arn"] = roleArn
+		if err := m.k8sClient.Update(ctx, sa); err != nil {
+			return fmt.Errorf("failed to annotate ServiceAccount %s/%s with role ARN: %w", m.app.Namespace, m.app.Spec.ServiceAccountName, err)
+		}
+
+		log.FromContext(ctx).Info(fmt.Sprintf("Annotated ServiceAccount %s/%s with role ARN %s", m.app.Namespace, m.app.Spec.ServiceAccountName, roleArn))
+	} else {
+		log.FromContext(ctx).Info(fmt.Sprintf("ServiceAccount %s/%s already annotated with role ARN %s", m.app.Namespace, m.app.Spec.ServiceAccountName, roleArn))
+	}
+
+	return nil
 }
