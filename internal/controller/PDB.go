@@ -3,10 +3,10 @@ package controller
 import (
 
 	"context"
+	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	policyv1 "k8s.io/api/policy/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -19,43 +19,32 @@ func (r *ApplicationReconciler) desiredPDB(
 ) *policyv1.PodDisruptionBudget {
 
 	labels := map[string]string{"app": application.Name}
-	name := application.Name
 
-	pdb := &policyv1.PodDisruptionBudget{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: application.Namespace,
-			Labels:    labels,
-		},
-		Spec: policyv1.PodDisruptionBudgetSpec{
-			Selector: &metav1.LabelSelector{MatchLabels: labels},
-		},
+	pdbSpec := policyv1.PodDisruptionBudgetSpec{
+		Selector: &metav1.LabelSelector{MatchLabels: labels},
 	}
 
 	if application.Spec.PDB != nil {
 		if application.Spec.PDB.MinAvailable != nil {
-			pdb.Spec.MinAvailable = application.Spec.PDB.MinAvailable
-		}
-		if application.Spec.PDB.MaxUnavailable != nil {
-			pdb.Spec.MaxUnavailable = application.Spec.PDB.MaxUnavailable
+			pdbSpec.MinAvailable = application.Spec.PDB.MinAvailable
+		} else if application.Spec.PDB.MaxUnavailable != nil {
+			// minAvailable and maxUnavailable are mutually exclusive, so we only set one of them
+			pdbSpec.MaxUnavailable = application.Spec.PDB.MaxUnavailable
 		}
 	}
 
-	return pdb
-}
-
-func (r *ApplicationReconciler) getPDB(
-	ctx context.Context, 
-	key client.ObjectKey,
-) (*policyv1.PodDisruptionBudget, error) {
-
-	var existing policyv1.PodDisruptionBudget
-
-	if err := r.Get(ctx, key, &existing); err != nil {
-		return nil, err
+	return &policyv1.PodDisruptionBudget{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "PodDisruptionBudget",
+			APIVersion: "policy/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      application.Name + "-pdb",
+			Namespace: application.Namespace,
+			Labels:    labels,
+		},
+		Spec: pdbSpec,
 	}
-
-	return &existing, nil
 }
 
 func (r *ApplicationReconciler) reconcilePDB(
@@ -72,36 +61,22 @@ func (r *ApplicationReconciler) reconcilePDB(
 
 	desired := r.desiredPDB(application)
 
-	existing, err := r.getPDB(ctx, client.ObjectKey{
-		Name: 		desired.Name, 
-		Namespace: 	desired.Namespace,
-})
-	if apierrors.IsNotFound(err) {
-		logger.Info("Creating PodDisruptionBudget", "name", desired.Name)
-		if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
-			return err
-		}
-		return r.Create(ctx, desired)
-		
-	} else if err != nil {
-		return err
+	if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference for PodDisruptionBudget: %w", err)
 	}
 
-	if !metav1.IsControlledBy(existing, application) {
-		if err := controllerutil.SetControllerReference(application, existing, r.Scheme); err != nil {
-			return err
-		}
+	err := r.Patch(
+		ctx, 
+		desired, 
+		client.Apply, 
+		client.FieldOwner("forge-operator"),
+		client.ForceOwnership,
+	)
+	if err != nil {
+		logger.Error(err, "Failed to apply PodDisruptionBudget", "name", desired.Name)
+		return fmt.Errorf("failed to apply PodDisruptionBudget: %w", err)
 	}
 
-	patch := client.MergeFrom(existing.DeepCopy())
-	existing.Labels = desired.Labels
-	existing.Spec = desired.Spec
-
-	if err := r.Patch(ctx, existing, patch); err != nil {
-		logger.Error(err, "failed to patch PodDisruptionBudget", "name", existing.Name)
-		return err
-	}
-
-	logger.Info("Updated PodDisruptionBudget", "name", existing.Name)
+	logger.Info("Successfully reconciled PodDisruptionBudget", "name", desired.Name)
 	return nil
 }

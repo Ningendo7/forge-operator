@@ -6,7 +6,6 @@ import (
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -16,6 +15,7 @@ import (
 func (r *ApplicationReconciler) desiredHPA(
 	application *forgev1alpha1.Application,
 ) *autoscalingv2.HorizontalPodAutoscaler {
+
 	if application.Spec.Autoscaling == nil {
 		return nil
 	}
@@ -47,9 +47,16 @@ func (r *ApplicationReconciler) desiredHPA(
 	}
 
 	return &autoscalingv2.HorizontalPodAutoscaler{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "HorizontalPodAutoscaler",
+			APIVersion: "autoscaling/v2",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      application.Name + "-hpa",
 			Namespace: application.Namespace,
+			Labels: map[string]string{
+				"app": application.Name,
+			},
 		},
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
@@ -75,20 +82,6 @@ func (r *ApplicationReconciler) desiredHPA(
 	}
 }
 
-func (r *ApplicationReconciler) getHPA(
-	ctx context.Context,
-	key client.ObjectKey,
-) (*autoscalingv2.HorizontalPodAutoscaler, error) {
-
-	var existing autoscalingv2.HorizontalPodAutoscaler
-
-	if err := r.Get(ctx, key, &existing); err != nil {
-		return nil, err
-	}
-
-	return &existing, nil
-}
-
 func (r *ApplicationReconciler) reconcileHPA(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
@@ -103,42 +96,23 @@ func (r *ApplicationReconciler) reconcileHPA(
 		return nil
 	}
 
-	existing, err := r.getHPA(ctx, client.ObjectKey{
-		Name:      desired.Name,
-		Namespace: desired.Namespace,
-	})
-
-	if apierrors.IsNotFound(err) {
-		logger.Info("Creating HPA", "name", desired.Name)
-
-		if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
-			return err
-		}
-
-		return r.Create(ctx, desired)
-	} else if err != nil {
-		return err
+	if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference for HPA: %w", err)
 	}
 
-	if !metav1.IsControlledBy(existing, application) {
-		if err := controllerutil.SetControllerReference(application, existing, r.Scheme); err != nil {
-			return err
-		}
+	err := r.Patch(
+		ctx,
+		desired,
+		client.Apply,
+		client.FieldOwner("forge-operator"),
+		client.ForceOwnership,
+	)
+	if err != nil {
+		logger.Error(err, "Failed to apply HPA", "name", desired.Name)
+		return fmt.Errorf("failed to server-side apply HPA: %w", err)
 	}
 
-	patch := client.MergeFrom(existing.DeepCopy())
-
-	existing.Spec.ScaleTargetRef = desired.Spec.ScaleTargetRef
-	existing.Spec.MinReplicas = desired.Spec.MinReplicas
-	existing.Spec.MaxReplicas = desired.Spec.MaxReplicas
-	existing.Spec.Metrics = desired.Spec.Metrics
-
-	if err := r.Patch(ctx, existing, patch); err != nil {
-		logger.Error(err, "Failed to patch HPA", "name", existing.Name)
-		return err
-	}
-
-	logger.Info("Updated HPA", "name", existing.Name)
+	logger.Info("Successfully reconciled HPA", "name", desired.Name)
 
 	return nil
 }
