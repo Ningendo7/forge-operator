@@ -25,12 +25,12 @@ import (
 )
 
 // StorageProvider represents the supported object storage backends.
-//  +kubebuilder:validation:Enum=aws-s3;akamai-object-storage
+//  +kubebuilder:validation:Enum=AWS;Akamai
 type StorageProvider string
 
 const (
-	ProviderAWSS3               StorageProvider = "aws-s3"
-	ProviderAkamaiObjectStorage StorageProvider = "akamai-object-storage"
+	ProviderAWSS3               StorageProvider = "AWS"
+	ProviderAkamaiObjectStorage StorageProvider = "Akamai"
 )
 
 // ApplicationSpec defines the desired state of Application
@@ -246,7 +246,7 @@ type AutoscalingSpec struct {
 
 // StorageSpec defines object storage settings.
 type StorageSpec struct {
-	// Storage provider: aws-s3 or akamai-object-storage.
+	// Storage provider: AWS S3 or Akamai Object Storage.
 	Provider StorageProvider `json:"provider"`
 
 	// Bucket name.
@@ -263,8 +263,25 @@ type StorageSpec struct {
 	// Secret name containing access credentials.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
+
+	// AWS-specific configuration (populated only if Provider == AWS).
+	AWS *AWSStorageSpec `json:"aws,omitempty"`
+
+	// Akamai-specific configuration (populated only if Provider == Akamai).
+	Akamai *AkamaiStorageSpec `json:"akamai,omitempty"`
+
 }
 
+type AWSStorageStatus struct {
+	// IAM Role ARN provisioned for the application to access the S3 bucket.
+	RoleARN string `json:"roleARN,omitempty"`
+}
+
+type AkamaiStorageStatus struct {
+
+	// AccessKeySecretRef points to the k8s Secret containing the Akamai access key.
+	AccessKeySecretRef string `json:"accessKeySecretRef,omitempty"`
+}
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status"

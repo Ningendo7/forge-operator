@@ -49,6 +49,13 @@ func (m *Manager) ensureBucketExists(
 		return nil
 	}
 
+	// Check for typed 404 NotFound struct firs
+	var notFoundErr *s3types.NotFound
+	if errors.As(err, &notFoundErr) {
+		log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s does not exist, creating...", m.bucket))
+		return m.CreateBucket(ctx)
+	}
+
 	var responseErr *awshttp.ResponseError
 	if errors.As(err, &responseErr) {
 
@@ -166,6 +173,7 @@ func (m *Manager) ReconcileAppIRSA(
 
 	// Clean up oidcUrl so it works safely in IAM Condition keys
     	oidcHost := strings.TrimPrefix(m.oidcUrl, "https://")
+	oidcHost = strings.TrimSuffix(oidcHost, "/") // Remove trailing slash if present
 
 	trustPolicy := fmt.Sprintf(`{
 	"Version": "2012-10-17",
@@ -207,6 +215,15 @@ func (m *Manager) ReconcileAppIRSA(
 		}
 	} else {
 		roleArn = aws.ToString(getRoleOut.Role.Arn)
+		// Update the existing trust policy if it has changed
+		_, err = m.iamclient.UpdateAssumeRolePolicy(ctx, &iam.UpdateAssumeRolePolicyInput{
+			RoleName:       aws.String(roleName),
+			PolicyDocument: aws.String(trustPolicy),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to update trust policy for app IRSA role %s: %w", roleName, err)
+		}
+		
 	}
 
 	// Attach Bucket Access Policy to the Role

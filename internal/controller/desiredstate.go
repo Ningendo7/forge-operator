@@ -5,8 +5,7 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
-	"github.com/Ningendo7/forge-operator/internal/controller/s3"
-	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
+	
 )
 
 func (r *ApplicationReconciler) ensureDesiredState(
@@ -45,19 +44,6 @@ func (r *ApplicationReconciler) ensureDesiredState(
 
 	if err := r.reconcileHPA(ctx, application); err != nil {
 		return err
-	}
-
-	// Storage reconciliation
-	if application.Spec.Storage != nil {
-
-		storageManager, err := s3storage.NewManager(ctx, r.Client, application)
-		if err != nil {
-			return fmt.Errorf("failed to create S3 storage manager: %w", err)
-		}
-
-		if err := storageManager.ReconcileBucket(ctx); err != nil {
-			return fmt.Errorf("failed to reconcile S3 bucket: %w", err)
-		}
 	}
 
 	return nil

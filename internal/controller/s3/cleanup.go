@@ -11,7 +11,21 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
-// 
+// Helper to check for missing bucket errors in AWS SDK v2. This is necessary because the AWS SDK v2 does not provide a direct way to check for a "NoSuchBucket" error, and the error can be wrapped in different types.
+func isNotFoundError(err error) bool {
+	var noSuchBucketErr *s3types.NoSuchBucket
+	if errors.As(err, &noSuchBucketErr) {
+		return true
+	}
+
+	var responseErr *awshttp.ResponseError
+	if errors.As(err, &responseErr) && responseErr.HTTPStatusCode() == 404 {
+		return true
+	}
+
+	return false
+}
+
 func (m *Manager) CleanupBucket(
 	ctx context.Context,
 ) error {
@@ -84,7 +98,7 @@ func (m *Manager) deleteAllObjectVersions(
 				end = len(objectsToDelete)
 			}
 
-			_, err := m.s3client.DeleteObjects(ctx, &s3sdk.DeleteObjectsInput{
+			out, err := m.s3client.DeleteObjects(ctx, &s3sdk.DeleteObjectsInput{
 				Bucket: aws.String(m.bucket),
 				Delete: &s3types.Delete{
 					Objects: objectsToDelete[i:end],
@@ -92,11 +106,40 @@ func (m *Manager) deleteAllObjectVersions(
 				},
 			})
 			if err != nil {
-				return fmt.Errorf("failed to delete objects version in bucket %s: %w", m.bucket, err)
+				return fmt.Errorf("failed batch delete call in bucket %s: %w", m.bucket, err)
+			}
+
+			// Catch per-object errors in the response:
+			if len(out.Errors) > 0 {
+				return fmt.Errorf("failed to delete %d objects in bucket %s (first error: %v)", len(out.Errors), m.bucket, aws.ToString(out.Errors[0].Message))
 			}
 		}
 	}
 
+	return nil
+}
+
+func (m *Manager) abortMultipartUploads(
+	ctx context.Context,
+) error {
+
+	uploads, err := m.s3client.ListMultipartUploads(ctx, &s3sdk.ListMultipartUploadsInput{
+		Bucket: aws.String(m.bucket),
+	})
+	if err != nil {
+		if isNotFoundError(err) {
+			return nil // Bucket does not exist, nothing to abort
+		}
+		return fmt.Errorf("failed to list multipart uploads in bucket %s: %w", m.bucket, err)
+	}
+
+	for _, upload := range uploads.Uploads {
+		_, _ := m.s3client.AbortMultipartUpload(ctx, &s3sdk.AbortMultipartUploadInput{
+			Bucket:   aws.String(m.bucket),
+			Key:      upload.Key,
+			UploadId: upload.UploadId,
+		})
+	}
 	return nil
 }
 
@@ -108,8 +151,7 @@ func (m *Manager) deleteBucket(
 		Bucket: aws.String(m.bucket),
 	})
 	if err != nil {
-		var noSuchBucketErr *s3types.NoSuchBucket
-		if errors.As(err, &noSuchBucketErr) {
+		if isNotFoundError(err) {
 			return nil // Bucket does not exist, nothing to delete
 		}
 		return fmt.Errorf("failed to delete bucket %s: %w", m.bucket, err)
@@ -125,7 +167,7 @@ func (m *Manager) cleanupAppIRSA(
 	roleName := fmt.Sprintf("app-irsa-%s", m.app.Name)
 
 	// Delete the inline policy attached to the role
-	_, err = m.iamclient.DeleteRolePolicy(ctx, &iam.DeleteRolePolicyInput{
+	_, err := m.iamclient.DeleteRolePolicy(ctx, &iam.DeleteRolePolicyInput{
 		RoleName:   aws.String(roleName),
 		PolicyName: aws.String(fmt.Sprintf("app-irsa-policy-%s", m.app.Name)),
 	})

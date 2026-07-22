@@ -59,6 +59,18 @@ func (r *ApplicationReconciler) desiredStorage(
 		name = application.Spec.Storage.SecretName
 	}
 
+	secretData := map[string]string{
+		"provider": application.Spec.Storage.Provider,
+		"bucket":   application.Spec.Storage.Bucket,
+		"region":   application.Spec.Storage.Region,
+		"endpoint": application.Spec.Storage.Endpoint,
+	}
+
+	// Inject AWS IRSA Role if present in status
+	if application.Status.Storage != nil && application.Status.Storage.IRSA != nil {
+		secretData["role_arn"] = application.Status.Storage.IRSA.RoleARN
+	}
+
 	return &corev1.Secret{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Secret",
@@ -70,12 +82,7 @@ func (r *ApplicationReconciler) desiredStorage(
 			Labels:    map[string]string{"app": application.Name},
 		},
 		Type: corev1.SecretTypeOpaque,
-		StringData: map[string]string{
-			"provider": application.Spec.Storage.Provider,
-			"bucket":   application.Spec.Storage.Bucket,
-			"region":   application.Spec.Storage.Region,
-			"endpoint": application.Spec.Storage.Endpoint,
-		},
+		StringData: secretData,
 	}
 }
 
@@ -102,7 +109,7 @@ func (r *ApplicationReconciler) reconcileSecret(
 		return nil
 	}
 
-	
+
 	logger.Info("Reconciling Secret")
 
 	desired := r.desiredSecret(application)
@@ -182,4 +189,38 @@ func (r *ApplicationReconciler) reconcileStorageSecret(
 
 	logger.Info("Successfully reconciled Storage Secret", "name", desired.Name)
 	return nil
+}
+
+// findApplicationsForSecret maps a Secret event to any Application referencing it in spec.storage.secretName
+func (r *ApplicationReconciler) findApplicationsForSecret(
+	ctx context.Context, 
+	obj client.Object,
+) []reconcile.Request {
+
+	secret, ok := obj.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+
+	// 1. List all Applications in the same namespace as the Secret
+	var appList forgev1alpha1.ApplicationList
+	if err := r.List(ctx, &appList, client.InNamespace(secret.Namespace)); err != nil {
+		return nil
+	}
+
+	var requests []reconcile.Request
+
+	// 2. Check if any Application references this Secret in its spec
+	for _, app := range appList.Items {
+		if app.Spec.Storage != nil && app.Spec.Storage.SecretName == secret.Name {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      app.Name,
+					Namespace: app.Namespace,
+				},
+			})
+		}
+	}
+
+	return requests
 }

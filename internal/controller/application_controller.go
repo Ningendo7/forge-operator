@@ -67,59 +67,30 @@ func (r *ApplicationReconciler) Reconcile(
 
 	application := &forgev1alpha1.Application{}
 	if err := r.Get(ctx, req.NamespacedName, application); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, nil
-		}
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	isDeleting, err := r.handleFinalizer(ctx, application)
+	if err != nil {
+		logger.Error(err, "Error handling finalizer for Application", "name", req.Name, "namespace", req.Namespace)
 		return ctrl.Result{}, err
 	}
 
-	if application.DeletionTimestamp != nil {
-		return r.handleDeletion(ctx, application)
-	}
-
-	if err := r.ensureFinalizer(ctx, application); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	if err := ensureDesiredState(ctx, application); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	r.updateStatus
-
-func (r *ApplicationReconciler) ensureFinalizer(ctx context.Context, application *forgev1alpha1.Application) error {
-	if application.DeletionTimestamp != nil {
-		if controllerutil.ContainsFinalizer(application, applicationFinalizer) {
-
-			if err := r.cleanupExternalResources(ctx, application); err != nil {
-				return err
-			}
-
-			controllerutil.RemoveFinalizer(application, applicationFinalizer)
-			return ctrl.Result{}, r.Update(ctx, application)
-		}
-
+	if isDeleting {
+		// If the application is being deleted, no further processing is needed
 		return ctrl.Result{}, nil
 	}
 
-	if !controllerutil.ContainsFinalizer(application, applicationFinalizer) {
-		controllerutil.AddFinalizer(application, applicationFinalizer)
-		return ctrl.Result{}, r.Update(ctx, application)
+	if err := r.ensureDesiredState(ctx, application); err != nil {
+		logger.Error(err, "Failed to reconcile desired state", "name", req.Name, "namespace", req.Namespace)
+		return ctrl.Result{}, err
 	}
 
-	return nil
-}
+	if err := r.updateStatus(ctx, application); err != nil {
+		return ctrl.Result{}, err
+	}
 
-func (r *ApplicationReconciler) setCondition(ctx context.Context, application *forgev1alpha1.Application, conditionType string, status metav1.ConditionStatus, reason, message string) error {
-	meta.SetStatusCondition(&application.Status.Conditions, metav1.Condition{
-		Type:               conditionType,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: application.Generation,
-		LastTransitionTime: metav1.Now(),
-	})
-	return r.Status().Update(ctx, application)
+	return ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -133,6 +104,10 @@ func (r *ApplicationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&networkingv1.Ingress{}).
 		Owns(&autoscalingv1.HorizontalPodAutoscaler{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findApplicationsForSecret),
+		).
 		Named("application").
 		Complete(r)
 }
