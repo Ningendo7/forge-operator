@@ -60,11 +60,25 @@ func (r *ApplicationReconciler) reconcileIngress(
 	application *forgev1alpha1.Application,
 ) error {
 
+	logger := logf.FromContext(ctx)
+
+	// Handle Toggling Ingress: If the Ingress is disabled, we should delete it if it exists.
 	if application.Spec.Ingress == nil {
+		ing := &networkingv1.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      application.Name,
+				Namespace: application.Namespace,
+			},
+		}
+		if err := r.Delete(ctx, ing); client.IgnoreNotFound(err) != nil {
+			logger.Error(err, "Failed to delete disabled Ingress", "name", ing.Name)
+			return fmt.Errorf("failed to delete disabled Ingress: %w", err)
+		}
+		
+		logger.Info("Successfully deleted disabled Ingress", "name", ing.Name)
 		return nil
 	}
 
-	logger := logf.FromContext(ctx)
 	logger.Info("Reconciling Ingress")
 
 	desired := r.desiredIngress(application)

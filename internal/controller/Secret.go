@@ -84,11 +84,25 @@ func (r *ApplicationReconciler) reconcileSecret(
 	application *forgev1alpha1.Application,
 ) error {
 
-	if application.Spec.Secret == nil {
+	logger := logf.FromContext(ctx)
+
+	if application.Spec.Secret == nil || len(application.Spec.Secret.Data) == 0 {
+		sec := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      secretNameFor(application),
+				Namespace: application.Namespace,
+			},
+		}
+		if err := r.Delete(ctx, sec); client.IgnoreNotFound(err) != nil {
+			logger.Error(err, "Failed to delete disabled Secret", "name", sec.Name)
+			return fmt.Errorf("failed to delete disabled Secret: %w", err)
+		}
+
+		logger.Info("Successfully deleted disabled Secret", "name", sec.Name)
 		return nil
 	}
 
-	logger := logf.FromContext(ctx)
+	
 	logger.Info("Reconciling Secret")
 
 	desired := r.desiredSecret(application)
@@ -118,11 +132,31 @@ func (r *ApplicationReconciler) reconcileStorageSecret(
 	application *forgev1alpha1.Application,
 ) error {
 
+	logger := logf.FromContext(ctx)
+
+	secretName := application.Name + "-storage"
+	if application.Spec.Storage != nil && application.Spec.Storage.SecretName != "" {
+		secretName = application.Spec.Storage.SecretName
+	}
+
+	// Handle Toggling Storage Secret: If the Storage is disabled, we should delete the secret if it exists.
 	if application.Spec.Storage == nil {
+		sec := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      secretName,
+				Namespace: application.Namespace,
+			},
+		}
+		if err := r.Delete(ctx, sec); client.IgnoreNotFound(err) != nil {
+			logger.Error(err, "Failed to delete disabled Storage Secret", "name", sec.Name)
+			return fmt.Errorf("failed to delete disabled Storage Secret: %w", err)
+		}
+
+		logger.Info("Successfully deleted disabled Storage Secret", "name", sec.Name)
 		return nil
 	}
 
-	logger := logf.FromContext(ctx)
+
 	logger.Info("Reconciling Storage Secret")
 
 	desired := r.desiredStorage(application)

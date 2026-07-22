@@ -52,11 +52,25 @@ func (r *ApplicationReconciler) reconcilePDB(
 	application *forgev1alpha1.Application,
 ) error {
 
+	logger := logf.FromContext(ctx)
+
+	// Handle Toggling PDB: If the PDB is disabled, we should delete it if it exists
 	if application.Spec.PDB == nil {
+		pdb := &policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      application.Name + "-pdb",
+				Namespace: application.Namespace,
+			},
+		}
+		if err := r.Delete(ctx, pdb); client.IgnoreNotFound(err) != nil {
+			logger.Error(err, "Failed to delete disabled PDB", "name", pdb.Name)
+			return fmt.Errorf("failed to delete disabled PDB: %w", err)
+		}
+
+		logger.Info("Successfully deleted disabled PDB", "name", pdb.Name)
 		return nil
 	}
 
-	logger := logf.FromContext(ctx)
 	logger.Info("Reconciling PodDisruptionBudget")
 
 	desired := r.desiredPDB(application)

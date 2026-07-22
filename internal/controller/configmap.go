@@ -43,6 +43,25 @@ func (r *ApplicationReconciler) reconcileConfigMap(
 ) error {
 
 	logger := logf.FromContext(ctx)
+
+	// Handle Toggling ConfigMap: If the ConfigMap is disabled, we should delete it if it exists
+	if application.Spec.ConfigMap == nil || len(application.Spec.ConfigMap.Data) == 0 {
+		cm := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      configMapNameFor(application),
+				Namespace: application.Namespace,
+			},
+		}
+		if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
+			logger.Error(err, "Failed to delete disabled ConfigMap", "name", cm.Name)
+			return fmt.Errorf("failed to delete disabled ConfigMap: %w", err)
+		}
+
+		logger.Info("Successfully deleted disabled ConfigMap", "name", cm.Name)
+		return nil
+	}
+
+	
 	logger.Info("Reconciling ConfigMap")
 
 	desired := r.desiredConfigMap(application)

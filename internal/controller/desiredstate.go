@@ -22,6 +22,10 @@ func (r *ApplicationReconciler) ensureDesiredState(
 		return err
 	}
 
+	if err := r.reconcileStorage(ctx, application); err != nil {
+		return err
+	}
+
 	if err := r.reconcileService(ctx, application); err != nil {
 		return err
 	}

@@ -88,13 +88,28 @@ func (r *ApplicationReconciler) reconcileHPA(
 ) error {
 
 	logger := logf.FromContext(ctx)
+
+	// Handle Toggling HPA: If the HPA is disabled, we should delete it if it exists.
+	if application.Spec.Autoscaling == nil || desired == nil {
+		hpa := &autoscalingv2.HorizontalPodAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      application.Name + "-hpa",
+				Namespace: application.Namespace,
+			},
+		}
+		if err := r.Delete(ctx, hpa); client.IgnoreNotFound(err) != nil {
+			logger.Error(err, "Failed to delete disabled HPA", "name", hpa.Name)
+			return fmt.Errorf("failed to delete disabled HPA: %w", err)
+		}
+		logger.Info("Successfully deleted disabled HPA", "name", hpa.Name)
+		return nil
+	}
+
+
 	logger.Info("Reconciling HPA")
 
 	desired := r.desiredHPA(application)
 
-	if desired == nil {
-		return nil
-	}
 
 	if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
 		return fmt.Errorf("failed to set controller reference for HPA: %w", err)
