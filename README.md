@@ -1,12 +1,24 @@
 # forge-operator
 
-forge-operator is a Kubernetes operator built with Kubebuilder that manages application runtime resources from a single Application custom resource.
+forge-operator is a Kubebuilder-based Kubernetes operator that reconciles application runtime infrastructure from a single custom resource.
 
-This repository is in active development. Core reconciliation for application workloads is implemented. Parts of the Terraform infrastructure stack are still in progress.
+Repository status: active development.
 
-## Scope
+## Current Snapshot
 
-For each Application resource, the controller reconciles:
+As of 2026-07-23, this repository contains a functional reconciliation architecture with ongoing refactors in API/storage layers and Terraform expansion.
+
+Primary API source:
+
+- [api/v1alpha1/application_types.go](api/v1alpha1/application_types.go)
+
+Primary controller entrypoint:
+
+- [internal/controller/application_controller.go](internal/controller/application_controller.go)
+
+## What The Operator Reconciles
+
+From an Application resource, the controller attempts to reconcile:
 
 - Deployment
 - Service
@@ -15,84 +27,91 @@ For each Application resource, the controller reconciles:
 - Ingress (optional)
 - HorizontalPodAutoscaler (optional)
 - PodDisruptionBudget (optional)
-- Storage credential Secret (optional, provider-backed configuration)
+- Storage resources and storage Secret (provider dependent)
 
-## Status
+Current reconciliation sequencing is defined in:
 
-Implemented now:
+- [internal/controller/desiredstate.go](internal/controller/desiredstate.go)
 
-- Application CRD with validation/default markers
-- Controller finalizer flow
-- Reconciliation for Deployment, Service, ConfigMap, Secret, Ingress, HPA, and PDB
-- Storage configuration handling through Secrets
-- Sample manifest covering full spec surface
+## API Surface
 
-Still in progress:
+The Application spec currently models:
 
-- Terraform IRSA module under Terraform/AWS/modules/irsa
-- Terraform monitoring module under Terraform/AWS/modules/monitoring
-- End-to-end infrastructure integration hardening across environments
+- Workload: image, replicas, resources, env
+- Container wiring: port, config and secret mount references
+- Networking: service and ingress configuration
+- Reliability: autoscaling and PDB configuration
+- Storage: provider, bucket, endpoint/region, secret references, provider-specific blocks
 
-## Application CRD
-
-The API is defined in [api/v1alpha1/application_types.go](api/v1alpha1/application_types.go).
-
-High-level spec areas:
-
-- Workload: image, replicas, resources, environment variables
-- Container wiring: container port, config and secret mount references
-- Networking: service and optional ingress (including annotations and TLS)
-- Reliability: optional autoscaling and pod disruption budget
-- Storage: optional object storage provider configuration
-
-Sample resource:
+Sample CR:
 
 - [config/samples/forge_v1alpha1_application.yaml](config/samples/forge_v1alpha1_application.yaml)
 
-## Local Development
+## Implementation Matrix
+
+Operator components:
+
+- Reconciler framework and finalizer handling: implemented
+- Status management helpers: implemented in status package
+- AWS-oriented storage manager path under s3 controller package: present
+- Akamai object storage controller path: scaffold directory exists, implementation pending
+
+Terraform components under [Terraform/AWS](Terraform/AWS):
+
+- modules/vpc: implemented baseline
+- modules/networking: implemented baseline
+- modules/iam: implemented baseline
+- modules/eks: implemented baseline, includes addon resources
+- modules/irsa: implemented
+- modules/monitoring: pending implementation
+- environments/dev: active composition
+- environments/prod: not yet populated
+
+## Known Active Gaps
+
+This branch currently includes in-progress code that may not pass a full Go build/test run until refactor work is completed.
+
+Observed at repository level:
+
+- Generated deepcopy output and API structs are not fully synchronized
+- New storage code requires additional Go module dependencies in go.mod
+- Some API/provider naming and status struct paths are in transition
+
+If you are consuming this repository externally, treat the operator and Terraform as release-candidate quality only after CI is green on your target branch.
+
+## Development Workflow
 
 Prerequisites:
 
 - Go 1.24+
 - Docker
 - kubectl
-- Access to a Kubernetes cluster (or local test cluster)
+- Access to a Kubernetes cluster
 
-Generate CRDs and code:
+Common targets:
 
 ```sh
 make manifests
 make generate
-```
-
-Run unit tests:
-
-```sh
 make test
-```
-
-Run controller locally:
-
-```sh
+make build
 make run
 ```
 
-## Build and Deploy
-
-Build and push image:
+Container image build and push:
 
 ```sh
 make docker-build docker-push IMG=<registry>/forge-operator:<tag>
 ```
 
-Install CRDs and deploy controller:
+Install and deploy controller:
 
 ```sh
 make install
 make deploy IMG=<registry>/forge-operator:<tag>
 ```
 
-Apply sample Application:
+Apply sample:
 
 ```sh
 kubectl apply -k config/samples/
@@ -106,25 +125,13 @@ make undeploy
 make uninstall
 ```
 
-## Terraform
-
-Terraform layout is under Terraform/AWS:
-
-- modules/vpc, modules/networking, modules/iam, modules/eks are active
-- modules/irsa and modules/monitoring are placeholders in progress
-- environments/dev contains environment composition files
-
-Until IRSA and monitoring are completed, treat Terraform as a working baseline and validate plans per environment before production rollout.
-
 ## Contributing
-
-When changing API types, always regenerate manifests and deepcopy code before committing.
 
 Before opening a PR:
 
-- Run make manifests
-- Run make generate
-- Run make test
+- Keep generated artifacts current (manifests/deepcopy)
+- Run format, vet, and tests locally
+- Document any intentionally deferred work in code comments or PR notes
 
 ## License
 
