@@ -13,6 +13,10 @@ func (r *ApplicationReconciler) ensureDesiredState(
 	application *forgev1alpha1.Application,
 ) error {
 
+	if err := r.reconcileServiceAccount(ctx, application); err != nil {
+		return err
+	}
+	
 	if err := r.reconcileConfigMap(ctx, application); err != nil {
 		return err
 	}

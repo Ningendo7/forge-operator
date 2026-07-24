@@ -83,6 +83,8 @@ type ApplicationSpec struct {
 
 	// Environment variables.
 	// +optional
+
+	ServiceAccount *ServiceAccountSpec `json:"serviceAccount,omitempty"`
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
 	// Resource requests and limits.
@@ -242,6 +244,16 @@ type AutoscalingSpec struct {
 	// Target CPU utilization percentage.
 	// +optional
 	CPUUtilization *int32 `json:"cpuUtilization,omitempty"`
+}
+
+type ServiceAccountSpec struct {
+	// Name of an existing ServiceAccount to use.
+	// if empty and create is true, a new ServiceAccount will be created.
+	// +optional
+	Name string `json:"name,omitempty"`
+	// Create a new ServiceAccount if it doesn't exist.
+	//Defaults to true
+	Create *bool `json:"create,omitempty"`
 }
 
 // StorageSpec defines object storage settings.

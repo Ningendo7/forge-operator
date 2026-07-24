@@ -2,11 +2,11 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -87,6 +87,40 @@ func (r *ApplicationReconciler) buildVolumeAndMounts(
 	return volumes, volumeMounts
 }
 
+func (r *ApplicationReconciler) desiredPodSpec(
+	application *forgev1alpha1.Application,
+) corev1.PodSpec {
+
+	volumes, volumeMounts := r.buildVolumeAndMounts(application)
+
+	port := int32(8080)
+	if application.Spec.Container.Port != 0 {
+		port = application.Spec.Container.Port
+	}
+
+		podSpec := corev1.PodSpec{
+
+		Containers: []corev1.Container{
+			{
+				Name:  application.Name,
+				Image: application.Spec.Image,
+				Ports: []corev1.ContainerPort{
+					{
+						ContainerPort: port,
+					},
+				},
+				Resources: application.Spec.Resources,
+				VolumeMounts: volumeMounts,
+			},
+		},
+		Volumes: volumes,
+	}
+	if shouldCreateServiceAccount(application) {
+		podSpec.ServiceAccountName = serviceAccountNameFor(application)
+	}
+	return podSpec
+}
+
 func (r *ApplicationReconciler) desiredDeployment(
 	application *forgev1alpha1.Application,
 ) *appsv1.Deployment {
@@ -100,8 +134,6 @@ func (r *ApplicationReconciler) desiredDeployment(
 	if application.Spec.Replicas != nil {
 		replicas = *application.Spec.Replicas
 	}
-
-	volumes, volumeMounts := r.buildVolumeAndMounts(application)
 
 	return &appsv1.Deployment{
 
@@ -123,28 +155,7 @@ func (r *ApplicationReconciler) desiredDeployment(
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
 				},
-				Spec: corev1.PodSpec{
-
-					Containers: []corev1.Container{
-						{
-							Name:  application.Name,
-							Image: application.Spec.Image,
-							Ports: []corev1.ContainerPort{
-								{
-									ContainerPort: func() int32 {
-										if application.Spec.Container.Port != 0 {
-											return application.Spec.Container.Port
-										}
-										return 8080
-									}(),
-								},
-							},
-							Resources: application.Spec.Resources,
-							VolumeMounts: volumeMounts,
-						},
-					},
-					Volumes: volumes,
-				},
+				Spec: r.desiredPodSpec(application),
 			},
 		},
 	}
