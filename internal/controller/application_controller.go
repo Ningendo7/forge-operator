@@ -31,8 +31,6 @@ import (
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 )
 
-const applicationFinalizer = "forge.ningendo7.github.io/finalizer"
-
 // ApplicationReconciler reconciles a Application object
 type ApplicationReconciler struct {
 	client.Client

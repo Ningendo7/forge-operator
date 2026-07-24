@@ -17,6 +17,7 @@ import (
 type AKAMAIAPI interface {
 	GetObjectStorageBuckets(ctx context.Context, region, label string) (*linodego.ObjectStorageBucket, error)
 	CreateObjectStorageBucket(ctx context.Context, opts linodego.ObjectStorageBucketCreateOptions) (*linodego.ObjectStorageBucket, error)
+	UpdateObjectStorageBucket(ctx context.Context, region, label string, opts linodego.ObjectStorageBucketUpdateOptions) (*linodego.ObjectStorageBucket, error)
 	DeleteObjectStorageBucket(ctx context.Context, region, label string) error
 	ListObjectStorageKeys(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error)
 	CreateObjectStorageKey(ctx context.Context, opts linodego.ObjectStorageKeyCreateOptions) (*linodego.ObjectStorageKey, error)
