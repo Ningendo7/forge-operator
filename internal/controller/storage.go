@@ -50,7 +50,18 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 	application *forgev1alpha1.Application,
 ) error {
 
-	storageManager, err := s3storage.NewManager(ctx, r.Client, application)
+	// Initialize S3 Storage Manager with OIDC info for IRSA role creation
+
+	storageManager, err := s3storage.NewManager(
+		ctx, 
+		r.Client, 
+		application,
+		r.OIDCArn,
+		r.OIDCUrl,
+	
+	)
+
+
 	if err != nil {
 		s3storage.SetStorageNotReady(application, err)
 		_ = r.Status().Update(ctx, application)
@@ -58,7 +69,8 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 	}
 
 	// Reconcile Bucket and IRSA
-	if err := storageManager.ReconcileBucket(ctx); err != nil {
+	roleArn, err := storageManager.ReconcileBucket(ctx)
+	if err != nil {
 		s3storage.SetStorageNotReady(application, err)
 		_ = r.Status().Update(ctx, application)
 		return fmt.Errorf("failed to reconcile S3 bucket: %w", err)
@@ -70,7 +82,7 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 		Bucket:   application.Spec.Storage.Bucket,
 		Region:   application.Spec.Storage.Region,
 		AWS: 	 &forgev1alpha1.AWSStorageStatus{
-			RoleARN: fmt.Sprintf("arn:aws:iam::%s:role/app-irsa-%s", "YOUR_AWS_ACCOUNT_ID", application.Name),
+			RoleARN: roleArn,
 		},
 	}
 

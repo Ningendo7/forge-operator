@@ -151,21 +151,6 @@ func (r *ApplicationReconciler) desiredDeployment(
 
 }
 
-func (r *ApplicationReconciler) getDeployment(
-	ctx context.Context,
-	key client.ObjectKey,
-) (*appsv1.Deployment, error) {
-
-	var existing appsv1.Deployment
-
-	if err := r.Get(ctx, key, &existing); err != nil {
-		return nil, err
-	}
-
-	return &existing, nil
-
-}
-
 func (r *ApplicationReconciler) reconcileDeployment(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
