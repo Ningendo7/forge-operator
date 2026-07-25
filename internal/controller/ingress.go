@@ -43,9 +43,9 @@ func (r *ApplicationReconciler) desiredIngress(
 			APIVersion: "networking.k8s.io/v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      application.Name,
-			Namespace: application.Namespace,
-			Labels:    labels,
+			Name:        application.Name,
+			Namespace:   application.Namespace,
+			Labels:      labels,
 			Annotations: ingressSpec.Annotations,
 		},
 		Spec: networkingv1.IngressSpec{
@@ -56,7 +56,7 @@ func (r *ApplicationReconciler) desiredIngress(
 }
 
 func (r *ApplicationReconciler) reconcileIngress(
-	ctx context.Context, 
+	ctx context.Context,
 	application *forgev1alpha1.Application,
 ) error {
 
@@ -74,7 +74,7 @@ func (r *ApplicationReconciler) reconcileIngress(
 			logger.Error(err, "Failed to delete disabled Ingress", "name", ing.Name)
 			return fmt.Errorf("failed to delete disabled Ingress: %w", err)
 		}
-		
+
 		logger.Info("Successfully deleted disabled Ingress", "name", ing.Name)
 		return nil
 	}
@@ -88,9 +88,9 @@ func (r *ApplicationReconciler) reconcileIngress(
 	}
 
 	err := r.Patch(
-		ctx, 
-		desired, 
-		client.Apply, 
+		ctx,
+		desired,
+		client.Apply,
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	)

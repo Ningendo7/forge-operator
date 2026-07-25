@@ -12,14 +12,13 @@ import (
 )
 
 const (
-
-	TypeReady    = "Ready"
+	TypeReady       = "Ready"
 	TypeProgressing = "Progressing"
-	TypeDegraded = "Degraded"
+	TypeDegraded    = "Degraded"
 
 	ReasonReconciling = "Reconciling"
-	ReasonAvailable = "ReconcileSuccess"
-	ReasonFailed = "ReconcileFailed"
+	ReasonAvailable   = "ReconcileSuccess"
+	ReasonFailed      = "ReconcileFailed"
 )
 
 type StatusManager struct {
@@ -42,18 +41,18 @@ func (s *StatusManager) SetReconciling(
 ) error {
 
 	meta.SetStatusCondition(&application.Status.Conditions, metav1.Condition{
-		Type:    	  TypeProgressing,
-		Status:  	  metav1.ConditionTrue,
-		Reason:  	  ReasonReconciling,
-		Message: 	  message,
+		Type:               TypeProgressing,
+		Status:             metav1.ConditionTrue,
+		Reason:             ReasonReconciling,
+		Message:            message,
 		ObservedGeneration: application.Generation,
 	})
 
 	meta.SetStatusCondition(&application.Status.Conditions, metav1.Condition{
-		Type:    	  TypeReady,
-		Status:  	  metav1.ConditionFalse,
-		Reason:  	  ReasonReconciling,
-		Message: 	  "Reconciliation in progress",
+		Type:               TypeReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             ReasonReconciling,
+		Message:            "Reconciliation in progress",
 		ObservedGeneration: application.Generation,
 	})
 
@@ -68,26 +67,26 @@ func (s *StatusManager) SetReady(
 ) error {
 
 	meta.SetStatusCondition(&application.Status.Conditions, metav1.Condition{
-		Type:    	  TypeReady,
-		Status:  	  metav1.ConditionTrue,
-		Reason:  	  ReasonAvailable,
-		Message: 	  message,
+		Type:               TypeReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             ReasonAvailable,
+		Message:            message,
 		ObservedGeneration: application.Generation,
 	})
 
 	meta.SetStatusCondition(&application.Status.Conditions, metav1.Condition{
-		Type:    	  TypeProgressing,
-		Status:  	  metav1.ConditionFalse,
-		Reason:  	  ReasonAvailable,
-		Message: 	  "Application is up to date and ready",
+		Type:               TypeProgressing,
+		Status:             metav1.ConditionFalse,
+		Reason:             ReasonAvailable,
+		Message:            "Application is up to date and ready",
 		ObservedGeneration: application.Generation,
 	})
 
 	meta.SetStatusCondition(&application.Status.Conditions, metav1.Condition{
-		Type:    	  TypeDegraded,
-		Status:  	  metav1.ConditionFalse,
-		Reason:  	  ReasonAvailable,
-		Message: 	  "No errors observed",
+		Type:               TypeDegraded,
+		Status:             metav1.ConditionFalse,
+		Reason:             ReasonAvailable,
+		Message:            "No errors observed",
 		ObservedGeneration: application.Generation,
 	})
 
@@ -101,18 +100,18 @@ func (s *StatusManager) SetFailed(
 ) error {
 
 	meta.SetStatusCondition(&application.Status.Conditions, metav1.Condition{
-		Type:    	  TypeDegraded,
-		Status:  	  metav1.ConditionTrue,
-		Reason:  	  ReasonFailed,
-		Message: 	  err.Error(),
+		Type:               TypeDegraded,
+		Status:             metav1.ConditionTrue,
+		Reason:             ReasonFailed,
+		Message:            err.Error(),
 		ObservedGeneration: application.Generation,
 	})
 
 	meta.SetStatusCondition(&application.Status.Conditions, metav1.Condition{
-		Type:    	  TypeReady,
-		Status:  	  metav1.ConditionFalse,
-		Reason:  	  ReasonFailed,
-		Message: 	  fmt.Sprintf("Reconciliation failed: %v", err),
+		Type:               TypeReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             ReasonFailed,
+		Message:            fmt.Sprintf("Reconciliation failed: %v", err),
 		ObservedGeneration: application.Generation,
 	})
 

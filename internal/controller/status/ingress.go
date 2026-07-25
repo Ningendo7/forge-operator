@@ -7,7 +7,6 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
 )
 
 // IsIngressReady verifies whether the ingress has recieved an IP or Hostname assignment

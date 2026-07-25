@@ -2,16 +2,16 @@ package s3storage
 
 import (
 	"context"
-	"fmt"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
-	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
-	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
+	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -102,7 +102,6 @@ func (m *Manager) CreateBucket(
 
 }
 
-
 func (m *Manager) ensureVersioning(
 	ctx context.Context,
 ) error {
@@ -175,7 +174,7 @@ func (m *Manager) ReconcileAppIRSA(
 	roleName := fmt.Sprintf("app-irsa-%s", m.app.Name)
 
 	// Clean up oidcUrl so it works safely in IAM Condition keys
-    	oidcHost := strings.TrimPrefix(m.OIDCProviderURL, "https://")
+	oidcHost := strings.TrimPrefix(m.OIDCProviderURL, "https://")
 	oidcHost = strings.TrimSuffix(oidcHost, "/") // Remove trailing slash if present
 
 	trustPolicy := fmt.Sprintf(`{
@@ -226,7 +225,7 @@ func (m *Manager) ReconcileAppIRSA(
 		if err != nil {
 			return fmt.Errorf("failed to update trust policy for app IRSA role %s: %w", roleName, err)
 		}
-		
+
 	}
 
 	// Attach Bucket Access Policy to the Role

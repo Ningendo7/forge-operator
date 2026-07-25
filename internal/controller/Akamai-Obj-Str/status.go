@@ -3,13 +3,12 @@ package akamaiobjstr
 import (
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 )
 
 const (
 	StorageReady = "StorageReady"
 
-	ReasonBucketProvisioned = "BucketProvisioned"
+	ReasonBucketProvisioned  = "BucketProvisioned"
 	ReasonProvisioningFailed = "ProvisioningFailed"
 	// ReasonBucketCleanup = "BucketCleanup"
 	// ReasonBucketCleanupFailed = "BucketCleanupFailed"
@@ -50,7 +49,7 @@ func SetStorageNotReady(
 	}
 
 	updateCondition(application, condition)
-}	
+}
 
 func updateCondition(
 	application *forgev1alpha1.Application,

@@ -27,5 +27,5 @@ func (s *StatusManager) IsPDBReady(
 	}
 
 	return true, fmt.Sprintf("PDB active and healthy"), nil
-	
+
 }

@@ -2,8 +2,8 @@ package s3storage
 
 import (
 	"context"
-	"fmt"
 	"errors"
+	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -53,11 +53,11 @@ func (m *Manager) deleteAllObjectVersions(
 ) error {
 
 	paginator := s3sdk.NewListObjectsVersionsPaginator(
-		m.s3client, 
+		m.s3client,
 		&s3sdk.ListObjectsVersionsInput{
 			Bucket: aws.String(m.bucket),
-			},
-		)
+		},
+	)
 
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)

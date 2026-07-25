@@ -21,8 +21,8 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/runtime"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -34,7 +34,7 @@ import (
 // ApplicationReconciler reconciles a Application object
 type ApplicationReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme          *runtime.Scheme
 	OIDCProviderARN string
 	OIDCProviderURL string
 }

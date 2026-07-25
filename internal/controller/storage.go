@@ -9,7 +9,7 @@ import (
 )
 
 func (r *ApplicationReconciler) reconcileStorage(
-	ctx context.Context, 
+	ctx context.Context,
 	application *forgev1alpha1.Application,
 ) error {
 
@@ -29,7 +29,7 @@ func (r *ApplicationReconciler) reconcileStorage(
 			return fmt.Errorf("failed to reconcile Akamai storage: %w", err)
 		}
 	case "MinIO", "minio", "Static":
-		
+
 	default:
 		err := fmt.Errorf("unsupported storage provider: %s", application.Spec.Storage.Provider)
 		s3storage.SetStorageNotReady(application, err)
@@ -46,22 +46,20 @@ func (r *ApplicationReconciler) reconcileStorage(
 }
 
 func (r *ApplicationReconciler) reconcileAWSStorage(
-	ctx context.Context, 
+	ctx context.Context,
 	application *forgev1alpha1.Application,
 ) error {
 
 	// Initialize S3 Storage Manager with OIDC info for IRSA role creation
 
 	storageManager, err := s3storage.NewManager(
-		ctx, 
-		r.Client, 
+		ctx,
+		r.Client,
 		application,
 		serviceAccountName(application),
 		r.OIDCArn,
 		r.OIDCUrl,
-	
 	)
-
 
 	if err != nil {
 		s3storage.SetStorageNotReady(application, err)
@@ -87,7 +85,7 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 		Provider: forgev1alpha1.StorageProviderAWS,
 		Bucket:   application.Spec.Storage.Bucket,
 		Region:   application.Spec.Storage.Region,
-		AWS: 	 &forgev1alpha1.AWSStorageStatus{
+		AWS: &forgev1alpha1.AWSStorageStatus{
 			RoleARN: roleArn,
 		},
 	}

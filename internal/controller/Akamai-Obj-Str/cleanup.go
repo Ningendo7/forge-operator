@@ -35,7 +35,7 @@ func (m *Manager) deleteApplicationAccessKey(
 ) error {
 
 	keyLabel := fmt.Sprintf("%s-key", m.app.Name)
-	
+
 	keyID, err := m.findAccessKeyIDByLabel(ctx, keyLabel)
 	if err != nil {
 		return fmt.Errorf("failed to locate access key '%s': %w", keyLabel, err)
@@ -61,7 +61,7 @@ func (m *Manager) findAccessKeyIDByLabel(
 	if err != nil {
 		return 0, err
 	}
-	
+
 	for _, k := range keys {
 		if k.Label == label {
 			return k.ID, nil

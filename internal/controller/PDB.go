@@ -1,7 +1,6 @@
 package controller
 
 import (
-
 	"context"
 	"fmt"
 
@@ -11,7 +10,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-
 )
 
 func (r *ApplicationReconciler) desiredPDB(
@@ -48,7 +46,7 @@ func (r *ApplicationReconciler) desiredPDB(
 }
 
 func (r *ApplicationReconciler) reconcilePDB(
-	ctx context.Context, 
+	ctx context.Context,
 	application *forgev1alpha1.Application,
 ) error {
 
@@ -80,9 +78,9 @@ func (r *ApplicationReconciler) reconcilePDB(
 	}
 
 	err := r.Patch(
-		ctx, 
-		desired, 
-		client.Apply, 
+		ctx,
+		desired,
+		client.Apply,
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	)

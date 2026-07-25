@@ -68,17 +68,17 @@ func (r *ApplicationReconciler) reconcileServiceAccount(
 	desired := r.desiredServiceAccount(application)
 
 	if err := controllerutil.SetControllerReference(
-		application, 
-		desired, 
+		application,
+		desired,
 		r.Scheme,
 	); err != nil {
 		return fmt.Errorf("failed to set controller reference for ServiceAccount: %w", err)
 	}
 
 	if err := r.Patch(
-		ctx, 
-		desired, 
-		client.Apply, 
+		ctx,
+		desired,
+		client.Apply,
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	); err != nil {
@@ -97,8 +97,8 @@ func (r *ApplicationReconciler) annotateServiceAccountWithIRSA(
 	desired := r.desiredServiceAccount(application)
 
 	if err := controllerutil.SetControllerReference(
-		application, 
-		desired, 
+		application,
+		desired,
 		r.Scheme,
 	); err != nil {
 		return fmt.Errorf("failed to set controller reference for ServiceAccount: %w", err)
@@ -110,9 +110,9 @@ func (r *ApplicationReconciler) annotateServiceAccountWithIRSA(
 	desired.Annotations["eks.amazonaws.com/role-arn"] = roleArn
 
 	if err := r.Patch(
-		ctx, 
-		desired, 
-		client.Apply, 
+		ctx,
+		desired,
+		client.Apply,
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	); err != nil {

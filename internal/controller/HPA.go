@@ -105,11 +105,9 @@ func (r *ApplicationReconciler) reconcileHPA(
 		return nil
 	}
 
-
 	logger.Info("Reconciling HPA")
 
 	desired := r.desiredHPA(application)
-
 
 	if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
 		return fmt.Errorf("failed to set controller reference for HPA: %w", err)

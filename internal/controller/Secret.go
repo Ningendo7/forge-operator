@@ -81,13 +81,13 @@ func (r *ApplicationReconciler) desiredStorage(
 			Namespace: application.Namespace,
 			Labels:    map[string]string{"app": application.Name},
 		},
-		Type: corev1.SecretTypeOpaque,
+		Type:       corev1.SecretTypeOpaque,
 		StringData: secretData,
 	}
 }
 
 func (r *ApplicationReconciler) reconcileSecret(
-	ctx context.Context, 
+	ctx context.Context,
 	application *forgev1alpha1.Application,
 ) error {
 
@@ -109,7 +109,6 @@ func (r *ApplicationReconciler) reconcileSecret(
 		return nil
 	}
 
-
 	logger.Info("Reconciling Secret")
 
 	desired := r.desiredSecret(application)
@@ -119,9 +118,9 @@ func (r *ApplicationReconciler) reconcileSecret(
 	}
 
 	err := r.Patch(
-		ctx, 
-		desired, 
-		client.Apply, 
+		ctx,
+		desired,
+		client.Apply,
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	)
@@ -135,7 +134,7 @@ func (r *ApplicationReconciler) reconcileSecret(
 }
 
 func (r *ApplicationReconciler) reconcileStorageSecret(
-	ctx context.Context, 
+	ctx context.Context,
 	application *forgev1alpha1.Application,
 ) error {
 
@@ -163,7 +162,6 @@ func (r *ApplicationReconciler) reconcileStorageSecret(
 		return nil
 	}
 
-
 	logger.Info("Reconciling Storage Secret")
 
 	desired := r.desiredStorage(application)
@@ -176,9 +174,9 @@ func (r *ApplicationReconciler) reconcileStorageSecret(
 	}
 
 	err := r.Patch(
-		ctx, 
-		desired, 
-		client.Apply, 
+		ctx,
+		desired,
+		client.Apply,
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	)
@@ -193,7 +191,7 @@ func (r *ApplicationReconciler) reconcileStorageSecret(
 
 // findApplicationsForSecret maps a Secret event to any Application referencing it in spec.storage.secretName
 func (r *ApplicationReconciler) findApplicationsForSecret(
-	ctx context.Context, 
+	ctx context.Context,
 	obj client.Object,
 ) []reconcile.Request {
 

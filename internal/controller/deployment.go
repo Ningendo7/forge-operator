@@ -98,7 +98,7 @@ func (r *ApplicationReconciler) desiredPodSpec(
 		port = application.Spec.Container.Port
 	}
 
-		podSpec := corev1.PodSpec{
+	podSpec := corev1.PodSpec{
 
 		Containers: []corev1.Container{
 			{
@@ -109,7 +109,7 @@ func (r *ApplicationReconciler) desiredPodSpec(
 						ContainerPort: port,
 					},
 				},
-				Resources: application.Spec.Resources,
+				Resources:    application.Spec.Resources,
 				VolumeMounts: volumeMounts,
 			},
 		},
@@ -179,10 +179,10 @@ func (r *ApplicationReconciler) reconcileDeployment(
 	// Use Server-Side Apply to create or update the Deployment
 
 	err := r.Patch(
-		ctx, 
-		desired, 
-		client.Apply, 
-		client.ForceOwnership, 
+		ctx,
+		desired,
+		client.Apply,
+		client.ForceOwnership,
 		client.FieldOwner("forge-operator"),
 	)
 	if err != nil {

@@ -61,7 +61,6 @@ func (r *ApplicationReconciler) reconcileConfigMap(
 		return nil
 	}
 
-	
 	logger.Info("Reconciling ConfigMap")
 
 	desired := r.desiredConfigMap(application)
@@ -71,9 +70,9 @@ func (r *ApplicationReconciler) reconcileConfigMap(
 	}
 
 	err := r.Patch(
-		ctx, 
-		desired, 
-		client.Apply, 
+		ctx,
+		desired,
+		client.Apply,
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	)

@@ -8,7 +8,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
 )
 
 func (s *StatusManager) IsDeploymentReady(
@@ -55,7 +54,7 @@ func (s *StatusManager) IsDeploymentReady(
 		msg := fmt.Sprintf("Waiting for pod availability: %d/%d available", deployment.Status.AvailableReplicas, desiredReplicas)
 		return false, msg, nil
 	}
-	
+
 	if deployment.Status.ReadyReplicas < desiredReplicas {
 
 		msg := fmt.Sprintf("Deployment pods are not ready: %d/%d ready", deployment.Status.ReadyReplicas, desiredReplicas)

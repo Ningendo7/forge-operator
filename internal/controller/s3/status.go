@@ -3,23 +3,23 @@ package s3storage
 import (
 	"fmt"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
 	StorageReady = "StorageReady"
 
-	ReasonBucketConfigured = "BucketConfigured"
+	ReasonBucketConfigured          = "BucketConfigured"
 	ReasonBucketConfigurationFailed = "BucketConfigurationFailed"
-	ReasonBucketCleanup = "BucketCleanup"
-	ReasonBucketCleanupFailed = "BucketCleanupFailed"
+	ReasonBucketCleanup             = "BucketCleanup"
+	ReasonBucketCleanupFailed       = "BucketCleanupFailed"
 
 	MaxErrorMessageLength = 250
 )
 
 func truncateMessage(
-	message string, 
+	message string,
 	maxLength int,
 ) string {
 	if len(message) > maxLength {
@@ -28,7 +28,7 @@ func truncateMessage(
 	return message
 }
 
-func SetStorageReady(app *forgev1alpha1.Application, 
+func SetStorageReady(app *forgev1alpha1.Application,
 	message string,
 ) {
 
@@ -39,12 +39,12 @@ func SetStorageReady(app *forgev1alpha1.Application,
 	app.Status.Storage = storageStatus
 
 	metav1.SetStatusCondition(
-		&app.Status.Conditions, 
+		&app.Status.Conditions,
 		metav1.Condition{
-			Type:    StorageReady,
-			Status:  metav1.ConditionTrue,
-			Reason:  ReasonBucketConfigured,
-			Message: message,
+			Type:               StorageReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             ReasonBucketConfigured,
+			Message:            message,
 			ObservedGeneration: app.Generation,
 		},
 	)
@@ -65,10 +65,10 @@ func SetStorageNotReady(
 	metav1.SetStatusCondition(
 		&app.Status.Conditions,
 		metav1.Condition{
-			Type:    StorageReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  ReasonBucketConfigurationFailed,
-			Message: msg,
+			Type:               StorageReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonBucketConfigurationFailed,
+			Message:            msg,
 			ObservedGeneration: app.Generation,
 		},
 	)
@@ -85,10 +85,10 @@ func SetStorageCleanupInProgress(
 	metav1.SetStatusCondition(
 		&app.Status.Conditions,
 		metav1.Condition{
-			Type:    StorageReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  ReasonBucketCleanup,
-			Message: "Storage cleanup in progress",
+			Type:               StorageReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonBucketCleanup,
+			Message:            "Storage cleanup in progress",
 			ObservedGeneration: app.Generation,
 		},
 	)
@@ -110,10 +110,10 @@ func SetStorageCleanupFailed(
 	metav1.SetStatusCondition(
 		&app.Status.Conditions,
 		metav1.Condition{
-			Type:    StorageReady,
-			Status:  metav1.ConditionFalse,
-			Reason:  ReasonBucketCleanupFailed,
-			Message: msg,
+			Type:               StorageReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonBucketCleanupFailed,
+			Message:            msg,
 			ObservedGeneration: app.Generation,
 		},
 	)

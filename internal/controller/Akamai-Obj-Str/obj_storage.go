@@ -59,8 +59,8 @@ func (m *Manager) ensureBucketExists(
 
 	// Bucket does not exist, create it
 	createOpts := linodego.ObjectStorageBucketCreateOptions{
-		Label:  m.bucket,
-		Region: m.region,
+		Label:         m.bucket,
+		Region:        m.region,
 		LifecycleRule: m.buildLifecycleRule(),
 	}
 
@@ -111,13 +111,13 @@ func (m *Manager) ensureAccessKey(
 	}
 	// Create a new scoped access key
 	perm := linodego.ObjectStorageKeyBucketAccess{
-		Bucket: m.bucket,
-		Region: m.region,
+		Bucket:     m.bucket,
+		Region:     m.region,
 		Permisions: "read_write",
 	}
 
 	createOpts := linodego.ObjectStorageKeyCreateOptions{
-		Label:   keyLabel,
+		Label:        keyLabel,
 		BucketAccess: &[]linodego.ObjectStorageKeyBucketAccess{perm},
 	}
 
@@ -143,9 +143,9 @@ func (m *Manager) buildLifecycleRule() *linodego.ObjectStorageBucketLifecycleRul
 	}
 
 	rule := linodego.ObjectStorageBucketLifecycleRule{
-		ID:     fmt.Sprintf("%s-lifecycle-rule", m.app.Name),
+		ID:      fmt.Sprintf("%s-lifecycle-rule", m.app.Name),
 		Enabled: true,
-		Prefix: m.storage.Lifecycle.Prefix,
+		Prefix:  m.storage.Lifecycle.Prefix,
 	}
 
 	if m.storage.Lifecycle.ExpirationDays > 0 {
@@ -155,3 +155,5 @@ func (m *Manager) buildLifecycleRule() *linodego.ObjectStorageBucketLifecycleRul
 	}
 
 	return &[]linodego.ObjectStorageBucketLifecycleRule{rule}
+
+}

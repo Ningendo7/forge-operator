@@ -3,17 +3,16 @@ package s3storage
 import (
 	"context"
 	"fmt"
-	
-	"github.com/aws/aws-sdk-go-v2/config"
+
+	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
+	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
-	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
-
 )
 
 // S3API defines the interface for interacting with AWS S3.
@@ -39,10 +38,10 @@ type IAMAPI interface {
 // Manager is responsible for managing S3 interactions for the Application controller.
 type Manager struct {
 	k8sClient client.Client
-	s3client S3API
+	s3client  S3API
 	iamclient IAMAPI
 
-	app *forgev1alpha1.Application
+	app     *forgev1alpha1.Application
 	storage *forgev1alpha1.StorageSpec
 
 	bucket string
@@ -55,8 +54,8 @@ type Manager struct {
 }
 
 func NewManager(
-	ctx context.Context, 
-	k8sClient client.Client, 
+	ctx context.Context,
+	k8sClient client.Client,
 	app *forgev1alpha1.Application,
 	serviceAccountName string,
 	oidcProviderARN string,
@@ -94,7 +93,7 @@ func NewManager(
 			return nil, fmt.Errorf("AWS credentials not found in secret %s", storage.SecretName)
 		}
 
-		sessionToken := string(secret.Data["AWS_SESSION_TOKEN"]) 
+		sessionToken := string(secret.Data["AWS_SESSION_TOKEN"])
 
 		cfgOptions = append(cfgOptions, config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(string(accessKeyBytes), string(secretKeyBytes), sessionToken),
@@ -116,16 +115,16 @@ func NewManager(
 	iamclient := iam.NewFromConfig(awsCfg)
 
 	return &Manager{
-		k8sClient: k8sClient,
-		s3client:  s3client,
-		iamclient: iamclient,
-		app:       app,
-		storage:   storage,
-		region:    region,
-		bucket:    storage.Bucket,
+		k8sClient:          k8sClient,
+		s3client:           s3client,
+		iamclient:          iamclient,
+		app:                app,
+		storage:            storage,
+		region:             region,
+		bucket:             storage.Bucket,
 		serviceAccountName: serviceAccountName,
-		OIDCProviderARN:  oidcProviderARN,
-		OIDCProviderURL:  oidcProviderURL,
+		OIDCProviderARN:    oidcProviderARN,
+		OIDCProviderURL:    oidcProviderURL,
 	}, nil
 
 }

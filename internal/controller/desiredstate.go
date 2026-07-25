@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
-	
 )
 
 func (r *ApplicationReconciler) ensureDesiredState(
@@ -16,7 +15,7 @@ func (r *ApplicationReconciler) ensureDesiredState(
 	if err := r.reconcileServiceAccount(ctx, application); err != nil {
 		return err
 	}
-	
+
 	if err := r.reconcileConfigMap(ctx, application); err != nil {
 		return err
 	}
@@ -36,7 +35,6 @@ func (r *ApplicationReconciler) ensureDesiredState(
 	if err := r.reconcileDeployment(ctx, application); err != nil {
 		return err
 	}
-
 
 	if err := r.reconcileIngress(ctx, application); err != nil {
 		return err

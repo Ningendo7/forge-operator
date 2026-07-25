@@ -4,13 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/linode/linodego"
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/linode/linodego"
 	"golang.org/x/oauth2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
 )
 
 // AKAMAIAPI defines the interface for interacting with Akamai / Linode
@@ -26,10 +25,10 @@ type AKAMAIAPI interface {
 
 // Manager is responsible for managing Akamai interactions for the Application controller.
 type Manager struct {
-	k8sClient client.Client
+	k8sClient    client.Client
 	akamaiClient AKAMAIAPI
 
-	app *forgev1alpha1.Application
+	app     *forgev1alpha1.Application
 	storage *forgev1alpha1.StorageSpec
 
 	bucket string
@@ -61,7 +60,7 @@ func NewManager(
 
 	var secret corev1.Secret
 	secretKey := types.NamespacedName{
-		Name: secretName, 
+		Name:      secretName,
 		Namespace: app.Namespace,
 	}
 

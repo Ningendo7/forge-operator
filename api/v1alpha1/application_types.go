@@ -25,7 +25,8 @@ import (
 )
 
 // StorageProvider represents the supported object storage backends.
-//  +kubebuilder:validation:Enum=AWS;Akamai
+//
+//	+kubebuilder:validation:Enum=AWS;Akamai
 type StorageProvider string
 
 const (
@@ -85,7 +86,7 @@ type ApplicationSpec struct {
 	// +optional
 
 	ServiceAccount *ServiceAccountSpec `json:"serviceAccount,omitempty"`
-	Env []corev1.EnvVar `json:"env,omitempty"`
+	Env            []corev1.EnvVar     `json:"env,omitempty"`
 
 	// Resource requests and limits.
 	// +optional
@@ -281,7 +282,6 @@ type StorageSpec struct {
 
 	// Akamai-specific configuration (populated only if Provider == Akamai).
 	Akamai *AkamaiStorageSpec `json:"akamai,omitempty"`
-
 }
 
 type AWSStorageStatus struct {
@@ -294,6 +294,7 @@ type AkamaiStorageStatus struct {
 	// AccessKeySecretRef points to the k8s Secret containing the Akamai access key.
 	AccessKeySecretRef string `json:"accessKeySecretRef,omitempty"`
 }
+
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status"

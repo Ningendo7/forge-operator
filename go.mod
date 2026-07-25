@@ -3,8 +3,16 @@ module github.com/Ningendo7/forge-operator
 go 1.26.0
 
 require (
+	github.com/aws/aws-sdk-go-v2 v1.43.0
+	github.com/aws/aws-sdk-go-v2/config v1.32.31
+	github.com/aws/aws-sdk-go-v2/credentials v1.19.30
+	github.com/aws/aws-sdk-go-v2/service/iam v1.56.0
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.0
+	github.com/linode/linodego v1.69.1
 	github.com/onsi/ginkgo/v2 v2.27.4
 	github.com/onsi/gomega v1.39.0
+	golang.org/x/oauth2 v0.36.0
+	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.0
 	k8s.io/client-go v0.36.0
 	sigs.k8s.io/controller-runtime v0.24.1
@@ -14,6 +22,20 @@ require (
 	cel.dev/expr v0.25.1 // indirect
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
+	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.14 // indirect
+	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.31 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.31 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.31 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.32 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.13 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.9.24 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.31 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.32 // indirect
+	github.com/aws/aws-sdk-go-v2/service/signin v1.5.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.33.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.38.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.45.0 // indirect
+	github.com/aws/smithy-go v1.27.3 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
@@ -42,7 +64,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/linode/linodego v1.69.1 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
@@ -72,7 +93,6 @@ require (
 	golang.org/x/exp v0.0.0-20251219203646-944ab1f22d93 // indirect
 	golang.org/x/mod v0.35.0 // indirect
 	golang.org/x/net v0.54.0 // indirect
-	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/term v0.43.0 // indirect
@@ -88,7 +108,6 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/ini.v1 v1.67.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	k8s.io/api v0.36.0 // indirect
 	k8s.io/apiextensions-apiserver v0.36.0 // indirect
 	k8s.io/apiserver v0.36.0 // indirect
 	k8s.io/component-base v0.36.0 // indirect
