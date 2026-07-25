@@ -17,23 +17,23 @@ import (
 
 func (m *Manager) ReconcileBucket(
 	ctx context.Context,
-) error {
+) (string, error) {
 
 	if err := m.ensureBucketExists(ctx); err != nil {
-		return fmt.Errorf("failed to ensure bucket exists: %w", err)
+		return "", fmt.Errorf("failed to ensure bucket exists: %w", err)
 	}
 
 	if err := m.ensureVersioning(ctx); err != nil {
-		return fmt.Errorf("failed to ensure versioning: %w", err)
+		return "", fmt.Errorf("failed to ensure versioning: %w", err)
 	}
 
 	if err := m.ensureLifecyclePolicy(ctx); err != nil {
-		return fmt.Errorf("failed to ensure lifecycle policy: %w", err)
+		return "", fmt.Errorf("failed to ensure lifecycle policy: %w", err)
 	}
 
 	roleArn, err := m.ReconcileAppIRSA(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to reconcile app IRSA: %w", err)
+		return "", fmt.Errorf("failed to reconcile app IRSA: %w", err)
 	}
 
 	return roleArn, nil

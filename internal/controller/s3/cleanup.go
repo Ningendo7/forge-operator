@@ -9,6 +9,9 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+
+	"github.com/aws/aws-sdk-go-v2/service/iam"
+	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 )
 
 // Helper to check for missing bucket errors in AWS SDK v2. This is necessary because the AWS SDK v2 does not provide a direct way to check for a "NoSuchBucket" error, and the error can be wrapped in different types.
@@ -52,9 +55,9 @@ func (m *Manager) deleteAllObjectVersions(
 	ctx context.Context,
 ) error {
 
-	paginator := s3sdk.NewListObjectsVersionsPaginator(
+	paginator := s3sdk.NewListObjectVersionsPaginator(
 		m.s3client,
-		&s3sdk.ListObjectsVersionsInput{
+		&s3sdk.ListObjectVersionsInput{
 			Bucket: aws.String(m.bucket),
 		},
 	)
@@ -134,7 +137,7 @@ func (m *Manager) abortMultipartUploads(
 	}
 
 	for _, upload := range uploads.Uploads {
-		_, _ := m.s3client.AbortMultipartUpload(ctx, &s3sdk.AbortMultipartUploadInput{
+		_, _ = m.s3client.AbortMultipartUpload(ctx, &s3sdk.AbortMultipartUploadInput{
 			Bucket:   aws.String(m.bucket),
 			Key:      upload.Key,
 			UploadId: upload.UploadId,
@@ -179,7 +182,7 @@ func (m *Manager) cleanupAppIRSA(
 	}
 
 	// Delete the role itself
-	_, err := m.iamclient.DeleteRole(ctx, &iam.DeleteRoleInput{
+	_, err = m.iamclient.DeleteRole(ctx, &iam.DeleteRoleInput{
 		RoleName: aws.String(roleName),
 	})
 

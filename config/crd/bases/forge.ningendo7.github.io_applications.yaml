@@ -14,7 +14,20 @@ spec:
     singular: application
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Available')].status
+      name: Ready
+      type: string
+    - jsonPath: .spec.image
+      name: Image
+      type: string
+    - jsonPath: .spec.replicas
+      name: Replicas
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Application is the Schema for the applications API
@@ -49,15 +62,20 @@ spec:
                   maxReplicas:
                     description: Maximum replicas.
                     format: int32
+                    minimum: 1
                     type: integer
                   minReplicas:
                     description: Minimum replicas.
                     format: int32
+                    minimum: 1
                     type: integer
                 required:
                 - maxReplicas
                 - minReplicas
                 type: object
+                x-kubernetes-validations:
+                - message: maxReplicas must be greater than or equal to minReplicas
+                  rule: self.maxReplicas >= self.minReplicas
               config:
                 description: ConfigMap configuration.
                 properties:
@@ -93,7 +111,6 @@ spec:
                     type: string
                 type: object
               env:
-                description: Environment variables.
                 items:
                   description: EnvVar represents an environment variable present in
                     a Container.
@@ -249,10 +266,6 @@ spec:
                   - name
                   type: object
                 type: array
-              foo:
-                description: foo is an example field of Application. Edit application_types.go
-                  to remove/update
-                type: string
               image:
                 description: Container image to deploy.
                 minLength: 1
@@ -275,10 +288,35 @@ spec:
                     description: Path for the ingress rule.
                     type: string
                   pathType:
+                    default: Prefix
                     description: PathType for the ingress rule.
                     type: string
-                required:
-                - host
+                  tls:
+                    description: TLS configuration for the ingress resource.
+                    items:
+                      description: IngressTLS describes the transport layer security
+                        associated with an ingress.
+                      properties:
+                        hosts:
+                          description: |-
+                            hosts is a list of hosts included in the TLS certificate. The values in
+                            this list must match the name/s used in the tlsSecret. Defaults to the
+                            wildcard host setting for the loadbalancer controller fulfilling this
+                            Ingress, if left unspecified.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                        secretName:
+                          description: |-
+                            secretName is the name of the secret used to terminate TLS traffic on
+                            port 443. Field is left optional to allow TLS routing based on SNI
+                            hostname alone. If the SNI host in a listener conflicts with the "Host"
+                            header field used by an IngressRule, the SNI host is used for termination
+                            and value of the "Host" header is used for routing.
+                          type: string
+                      type: object
+                    type: array
                 type: object
               pdb:
                 description: Pod Disruption Budget configuration.
@@ -296,6 +334,9 @@ spec:
                     description: Minimum available pods.
                     x-kubernetes-int-or-string: true
                 type: object
+                x-kubernetes-validations:
+                - message: cannot set both minAvailable and maxUnavailable
+                  rule: '!(has(self.minAvailable) && has(self.maxUnavailable))'
               replicas:
                 default: 1
                 description: Number of replicas.
@@ -396,9 +437,47 @@ spec:
                     description: Service type.
                     type: string
                 type: object
+              serviceAccount:
+                properties:
+                  create:
+                    description: |-
+                      Create a new ServiceAccount if it doesn't exist.
+                      Defaults to true
+                    type: boolean
+                  name:
+                    description: |-
+                      Name of an existing ServiceAccount to use.
+                      if empty and create is true, a new ServiceAccount will be created.
+                    type: string
+                type: object
               storage:
                 description: Object storage configuration.
                 properties:
+                  akamai:
+                    description: Akamai-specific configuration (populated only if
+                      Provider == Akamai).
+                    properties:
+                      accessKeySecretRef:
+                        description: Access key secret reference
+                        type: string
+                      endpoint:
+                        description: Optional endpoint override
+                        type: string
+                    type: object
+                  aws:
+                    description: AWS-specific configuration (populated only if Provider
+                      == AWS).
+                    properties:
+                      lifecycleRules:
+                        description: Optional lifecycle rules or other AWS-specific
+                          settings
+                        items:
+                          type: string
+                        type: array
+                      roleARN:
+                        description: IAM Role ARN for accessing S3
+                        type: string
+                    type: object
                   bucket:
                     description: Bucket name.
                     type: string
@@ -406,10 +485,10 @@ spec:
                     description: Endpoint for the object storage service.
                     type: string
                   provider:
-                    description: 'Storage provider: aws-s3 or akamai-object-storage.'
+                    description: 'Storage provider: AWS S3 or Akamai Object Storage.'
                     enum:
-                    - aws-s3
-                    - akamai-object-storage
+                    - AWS
+                    - Akamai
                     type: string
                   region:
                     description: Cloud region.
@@ -496,6 +575,11 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by the controller.
+                format: int64
+                type: integer
             type: object
         required:
         - spec

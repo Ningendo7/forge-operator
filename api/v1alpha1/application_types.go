@@ -284,15 +284,24 @@ type StorageSpec struct {
 	Akamai *AkamaiStorageSpec `json:"akamai,omitempty"`
 }
 
-type AWSStorageStatus struct {
-	// IAM Role ARN provisioned for the application to access the S3 bucket.
+// AWSStorageSpec defines AWS-specific storage configuration.
+type AWSStorageSpec struct {
+	// IAM Role ARN for accessing S3
 	RoleARN string `json:"roleARN,omitempty"`
+
+	// Optional lifecycle rules or other AWS-specific settings
+	// +optional
+	LifecycleRules []string `json:"lifecycleRules,omitempty"`
 }
 
-type AkamaiStorageStatus struct {
-
-	// AccessKeySecretRef points to the k8s Secret containing the Akamai access key.
+// AkamaiStorageSpec defines Akamai-specific storage configuration.
+type AkamaiStorageSpec struct {
+	// Access key secret reference
 	AccessKeySecretRef string `json:"accessKeySecretRef,omitempty"`
+
+	// Optional endpoint override
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // +kubebuilder:object:root=true
