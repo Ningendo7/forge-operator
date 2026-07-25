@@ -56,6 +56,7 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 		ctx, 
 		r.Client, 
 		application,
+		serviceAccountName(application),
 		r.OIDCArn,
 		r.OIDCUrl,
 	
@@ -74,6 +75,11 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 		s3storage.SetStorageNotReady(application, err)
 		_ = r.Status().Update(ctx, application)
 		return fmt.Errorf("failed to reconcile S3 bucket: %w", err)
+	}
+	if roleArn != "" {
+		if err := r.annotateServiceAccountWithIRSA(ctx, application, roleArn); err != nil {
+			return err
+		}
 	}
 
 	// Structured Status metdata

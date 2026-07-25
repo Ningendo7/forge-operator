@@ -35,8 +35,8 @@ import (
 type ApplicationReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-	OIDCArn string
-	OIDCUrl string
+	OIDCProviderARN string
+	OIDCProviderURL string
 }
 
 // +kubebuilder:rbac:groups=forge.ningendo7.github.io,resources=applications,verbs=get;list;watch;create;update;patch;delete

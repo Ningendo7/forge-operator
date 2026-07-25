@@ -87,3 +87,37 @@ func (r *ApplicationReconciler) reconcileServiceAccount(
 
 	return nil
 }
+
+func (r *ApplicationReconciler) annotateServiceAccountWithIRSA(
+	ctx context.Context,
+	application *forgev1alpha1.Application,
+	roleArn string,
+) error {
+
+	desired := r.desiredServiceAccount(application)
+
+	if err := controllerutil.SetControllerReference(
+		application, 
+		desired, 
+		r.Scheme,
+	); err != nil {
+		return fmt.Errorf("failed to set controller reference for ServiceAccount: %w", err)
+	}
+
+	if desired.Annotations == nil {
+		desired.Annotations = make(map[string]string)
+	}
+	desired.Annotations["eks.amazonaws.com/role-arn"] = roleArn
+
+	if err := r.Patch(
+		ctx, 
+		desired, 
+		client.Apply, 
+		client.FieldOwner("forge-operator"),
+		client.ForceOwnership,
+	); err != nil {
+		return fmt.Errorf("failed to apply ServiceAccount with IRSA annotation: %w", err)
+	}
+
+	return nil
+}

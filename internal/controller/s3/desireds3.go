@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"errors"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
+	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -29,11 +31,12 @@ func (m *Manager) ReconcileBucket(
 		return fmt.Errorf("failed to ensure lifecycle policy: %w", err)
 	}
 
-	if err := m.ReconcileAppIRSA(ctx); err != nil {
+	roleArn, err := m.ReconcileAppIRSA(ctx)
+	if err != nil {
 		return fmt.Errorf("failed to reconcile app IRSA: %w", err)
 	}
 
-	return nil
+	return roleArn, nil
 
 }
 func (m *Manager) ensureBucketExists(
@@ -167,12 +170,12 @@ func (m *Manager) ensureLifecyclePolicy(
 
 func (m *Manager) ReconcileAppIRSA(
 	ctx context.Context,
-) error {
+) (string, error) {
 
 	roleName := fmt.Sprintf("app-irsa-%s", m.app.Name)
 
 	// Clean up oidcUrl so it works safely in IAM Condition keys
-    	oidcHost := strings.TrimPrefix(m.oidcUrl, "https://")
+    	oidcHost := strings.TrimPrefix(m.OIDCProviderURL, "https://")
 	oidcHost = strings.TrimSuffix(oidcHost, "/") // Remove trailing slash if present
 
 	trustPolicy := fmt.Sprintf(`{
@@ -191,7 +194,7 @@ func (m *Manager) ReconcileAppIRSA(
 				}
 			}
 		}]
-	}`, m.oidcArn, oidcHost, m.app.Namespace, m.app.Spec.ServiceAccountName, oidcHost)
+	}`, m.OIDCProviderARN, oidcHost, m.app.Namespace, m.serviceAccountName, oidcHost)
 
 	// Ensure the IAM role exists
 	var roleArn string
@@ -255,33 +258,6 @@ func (m *Manager) ReconcileAppIRSA(
 	}
 
 	log.FromContext(ctx).Info(fmt.Sprintf("App IRSA role %s reconciled successfully with S3 bucket access", roleName))
-	
 
-	// Annotate the App/s ServiceAccount
-	sa := &corev1.ServiceAccount{}
-	err = m.k8sClient.Get(ctx, types.NamespacedName{
-		Name:      m.app.Spec.ServiceAccountName,
-		Namespace: m.app.Namespace,
-	}, sa)
-	if err != nil {
-		return fmt.Errorf("failed to get ServiceAccount %s/%s: %w", m.app.Namespace, m.app.Spec.ServiceAccountName, err)
-	}
-
-	if sa.Annotations == nil {
-		sa.Annotations = make(map[string]string)
-	}
-
-	// Check if the annotation already exists to prevent unnecessary writes
-	if sa.Annotations["eks.amazonaws.com/role-arn"] != roleArn {
-		sa.Annotations["eks.amazonaws.com/role-arn"] = roleArn
-		if err := m.k8sClient.Update(ctx, sa); err != nil {
-			return fmt.Errorf("failed to annotate ServiceAccount %s/%s with role ARN: %w", m.app.Namespace, m.app.Spec.ServiceAccountName, err)
-		}
-
-		log.FromContext(ctx).Info(fmt.Sprintf("Annotated ServiceAccount %s/%s with role ARN %s", m.app.Namespace, m.app.Spec.ServiceAccountName, roleArn))
-	} else {
-		log.FromContext(ctx).Info(fmt.Sprintf("ServiceAccount %s/%s already annotated with role ARN %s", m.app.Namespace, m.app.Spec.ServiceAccountName, roleArn))
-	}
-
-	return nil
+	return roleArn, nil
 }

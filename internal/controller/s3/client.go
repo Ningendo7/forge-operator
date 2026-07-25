@@ -48,16 +48,19 @@ type Manager struct {
 	bucket string
 	region string
 
-	oidcArn string // EKS OIDC provider ARN needed for trust policy
-	oidcUrl string // EKS OIDC provider (without https://)
+	serviceAccountName string // Name of the ServiceAccount to be used for IRSA
+
+	OIDCProviderARN string // EKS OIDC provider ARN needed for trust policy
+	OIDCProviderURL string // EKS OIDC provider (without https://)
 }
 
 func NewManager(
 	ctx context.Context, 
 	k8sClient client.Client, 
 	app *forgev1alpha1.Application,
-	oidcArn string,
-	oidcUrl string,
+	serviceAccountName string,
+	oidcProviderARN string,
+	oidcProviderURL string,
 ) (*Manager, error) {
 
 	storage := app.Spec.Storage
@@ -120,8 +123,9 @@ func NewManager(
 		storage:   storage,
 		region:    region,
 		bucket:    storage.Bucket,
-		oidcArn:  oidcArn,
-		oidcUrl:  oidcUrl,
+		serviceAccountName: serviceAccountName,
+		OIDCProviderARN:  oidcProviderARN,
+		OIDCProviderURL:  oidcProviderURL,
 	}, nil
 
 }
