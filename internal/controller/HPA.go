@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -87,6 +88,7 @@ func (r *ApplicationReconciler) reconcileHPA(
 	application *forgev1alpha1.Application,
 ) error {
 
+	desired := r.desiredHPA(application)
 	logger := logf.FromContext(ctx)
 
 	// Handle Toggling HPA: If the HPA is disabled, we should delete it if it exists.
@@ -106,8 +108,6 @@ func (r *ApplicationReconciler) reconcileHPA(
 	}
 
 	logger.Info("Reconciling HPA")
-
-	desired := r.desiredHPA(application)
 
 	if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
 		return fmt.Errorf("failed to set controller reference for HPA: %w", err)

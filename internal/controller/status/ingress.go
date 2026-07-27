@@ -22,17 +22,21 @@ func (s *StatusManager) IsIngressReady(
 		return false, fmt.Sprintf("Ingress %s %s not found:", namespace, name), client.IgnoreNotFound(err)
 	}
 
-	if ingress.Status.ObservedGeneration < ingress.Generation {
-		return false, fmt.Sprintf("Ingress rollout in progress: status generation (%d) lags spec generation %d", ingress.Status.ObservedGeneration, ingress.Generation), nil
+	lb := ingress.Status.LoadBalancer.Ingress
+	// Controller has NOT reconciled yet → lb == nil
+	if lb == nil {
+		return false, "Ingress pending controller reconciliation", nil
 	}
 
-	if len(ingress.Status.LoadBalancer.Ingress) == 0 {
-		return false, "Ingress pending IP/Hostname from controller", nil
+	// Controller has reconciled but no IP/Hostname assigned yet → lb == []
+	if len(lb) == 0 {
+		return false, "Ingress reconciled: (pending IP/Hostname from controller)", nil
 	}
 
-	endpoint := ingress.Status.LoadBalancer.Ingress[0].IP
+	// LB ingress exists → cloud ingress controllers
+	endpoint := lb[0].IP
 	if endpoint == "" {
-		endpoint = ingress.Status.LoadBalancer.Ingress[0].Hostname
+		endpoint = lb[0].Hostname
 	}
 
 	return true, fmt.Sprintf("Ingress assigned endpoint: %s", endpoint), nil

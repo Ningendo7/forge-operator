@@ -2,14 +2,16 @@ package controller
 
 import (
 	"context"
+	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 func (r *ApplicationReconciler) desiredSecret(
@@ -60,15 +62,29 @@ func (r *ApplicationReconciler) desiredStorage(
 	}
 
 	secretData := map[string]string{
-		"provider": application.Spec.Storage.Provider,
+		"provider": string(application.Spec.Storage.Provider),
 		"bucket":   application.Spec.Storage.Bucket,
 		"region":   application.Spec.Storage.Region,
 		"endpoint": application.Spec.Storage.Endpoint,
 	}
 
 	// Inject AWS IRSA Role if present in status
-	if application.Status.Storage != nil && application.Status.Storage.IRSA != nil {
-		secretData["role_arn"] = application.Status.Storage.IRSA.RoleARN
+	if application.Status.Storage != nil && application.Status.Storage.AWS != nil {
+		secretData["role_arn"] = application.Status.Storage.AWS.RoleARN
+	}
+
+	// Inject Akamai Object Storage credentials if present in status
+	if application.Status.Storage != nil && application.Status.Storage.Akamai != nil {
+		akamai := application.Status.Storage.Akamai
+		secretData["access_key"] = akamai.AccessKey
+
+		// only write secret data if we actually have it.
+		// This prevents overwriting the secret with empty values if the controller is restarted and the status is not yet populated.
+		if akamai.SecretKey != "" {
+			secretData["secret_key"] = akamai.SecretKey
+		}
+
+		secretData["endpoint"] = akamai.Endpoint
 	}
 
 	return &corev1.Secret{
@@ -93,7 +109,7 @@ func (r *ApplicationReconciler) reconcileSecret(
 
 	logger := logf.FromContext(ctx)
 
-	if application.Spec.Secret == nil || len(application.Spec.Secret.Data) == 0 {
+	if application.Spec.Secret == nil || len(application.Spec.Secret.StringData) == 0 {
 		sec := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      secretNameFor(application),

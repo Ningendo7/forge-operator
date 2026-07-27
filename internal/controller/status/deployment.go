@@ -50,7 +50,7 @@ func (s *StatusManager) IsDeploymentReady(
 		return false, msg, nil
 	}
 
-	if deployment.AvailableReplicas < desiredReplicas {
+	if deployment.Status.AvailableReplicas < desiredReplicas {
 		msg := fmt.Sprintf("Waiting for pod availability: %d/%d available", deployment.Status.AvailableReplicas, desiredReplicas)
 		return false, msg, nil
 	}

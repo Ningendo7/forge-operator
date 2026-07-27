@@ -17,26 +17,28 @@ import (
 
 func (m *Manager) ReconcileBucket(
 	ctx context.Context,
-) (string, error) {
+) (*StorageResult, error) {
 
 	if err := m.ensureBucketExists(ctx); err != nil {
-		return "", fmt.Errorf("failed to ensure bucket exists: %w", err)
+		return nil, fmt.Errorf("failed to ensure bucket exists: %w", err)
 	}
 
 	if err := m.ensureVersioning(ctx); err != nil {
-		return "", fmt.Errorf("failed to ensure versioning: %w", err)
+		return nil, fmt.Errorf("failed to ensure versioning: %w", err)
 	}
 
 	if err := m.ensureLifecyclePolicy(ctx); err != nil {
-		return "", fmt.Errorf("failed to ensure lifecycle policy: %w", err)
+		return nil, fmt.Errorf("failed to ensure lifecycle policy: %w", err)
 	}
 
 	roleArn, err := m.ReconcileAppIRSA(ctx)
 	if err != nil {
-		return "", fmt.Errorf("failed to reconcile app IRSA: %w", err)
+		return nil, fmt.Errorf("failed to reconcile app IRSA: %w", err)
 	}
 
-	return roleArn, nil
+	return &StorageResult{
+		RoleARN: roleArn,
+	}, nil
 
 }
 func (m *Manager) ensureBucketExists(
@@ -137,14 +139,14 @@ func (m *Manager) ensureLifecyclePolicy(
 				{
 					ID:     aws.String("StandardLifecycleRule"),
 					Status: s3types.ExpirationStatusEnabled,
-					Filter: &s3types.LifecycleRuleFilterMemberPrefix{
-						Value: "",
+					Filter: &s3types.LifecycleRuleFilter{
+						Prefix: aws.String(""),
 					},
 					AbortIncompleteMultipartUpload: &s3types.AbortIncompleteMultipartUpload{
 						DaysAfterInitiation: aws.Int32(7),
 					},
 					NoncurrentVersionExpiration: &s3types.NoncurrentVersionExpiration{
-						Days: aws.Int32(30),
+						NoncurrentDays: aws.Int32(30),
 					},
 					Transitions: []s3types.Transition{
 						{
@@ -209,11 +211,11 @@ func (m *Manager) ReconcileAppIRSA(
 				AssumeRolePolicyDocument: aws.String(trustPolicy),
 			})
 			if err != nil {
-				return fmt.Errorf("failed to create app IRSA role %s: %w", roleName, err)
+				return "", fmt.Errorf("failed to create app IRSA role %s: %w", roleName, err)
 			}
 			roleArn = aws.ToString(createRoleOut.Role.Arn)
 		} else {
-			return fmt.Errorf("failed to get app IRSA role %s: %w", roleName, err)
+			return "", fmt.Errorf("failed to get app IRSA role %s: %w", roleName, err)
 		}
 	} else {
 		roleArn = aws.ToString(getRoleOut.Role.Arn)
@@ -223,7 +225,7 @@ func (m *Manager) ReconcileAppIRSA(
 			PolicyDocument: aws.String(trustPolicy),
 		})
 		if err != nil {
-			return fmt.Errorf("failed to update trust policy for app IRSA role %s: %w", roleName, err)
+			return "", fmt.Errorf("failed to update trust policy for app IRSA role %s: %w", roleName, err)
 		}
 
 	}
@@ -253,7 +255,7 @@ func (m *Manager) ReconcileAppIRSA(
 		PolicyDocument: aws.String(s3Policy),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to attach S3 bucket access policy to role %s: %w", roleName, err)
+		return "", fmt.Errorf("failed to attach S3 bucket access policy to role %s: %w", roleName, err)
 	}
 
 	log.FromContext(ctx).Info(fmt.Sprintf("App IRSA role %s reconciled successfully with S3 bucket access", roleName))

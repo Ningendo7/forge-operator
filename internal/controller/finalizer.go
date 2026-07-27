@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -60,16 +61,34 @@ func (r *ApplicationReconciler) finalizeApplication(
 
 	if application.Spec.Storage != nil {
 		switch application.Spec.Storage.Provider {
-		case "AWS", "aws", "S3", "s3", forgev1alpha1.StorageProviderS3:
-			storageManager, err := s3storage.NewManager(ctx, r.Client, application)
+		case forgev1alpha1.ProviderAWSS3:
+			storageManager, err := s3storage.NewManager(
+				ctx,
+				r.Client,
+				application,
+				serviceAccountNameFor(application),
+				r.OIDCProviderARN,
+				r.OIDCProviderURL,
+			)
 			if err != nil {
 				return fmt.Errorf("failed to create storage manager for cleanup: %w", err)
 			}
-			if err := storageManager.DeleteBucket(ctx); err != nil {
+			if err := storageManager.CleanupBucket(ctx); err != nil {
 				return fmt.Errorf("failed to delete S3 bucket during cleanup: %w", err)
+			}
+		case forgev1alpha1.ProviderAkamaiObjectStorage:
+			storageManager, err := akamaiobjstr.NewManager(
+				ctx,
+				r.Client,
+				application,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to create Akamai storage manager for cleanup: %w", err)
+			}
+			if err := storageManager.DeleteBucket(ctx); err != nil {
+				return fmt.Errorf("failed to delete Akamai bucket during cleanup: %w", err)
 			}
 		}
 	}
-
 	return nil
 }

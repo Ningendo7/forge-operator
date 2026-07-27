@@ -23,8 +23,8 @@ func (s *StatusManager) IsHPAReady(
 		return false, fmt.Sprintf("HPA %s %s not found:", namespace, name), client.IgnoreNotFound(err)
 	}
 
-	if hpa.Status.ObservedGeneration < hpa.Generation {
-		return false, fmt.Sprintf("HPA rollout in progress: status generation (%d) lags spec generation %d", hpa.Status.ObservedGeneration, hpa.Generation), nil
+	if hpa.Status.ObservedGeneration != nil && *hpa.Status.ObservedGeneration < hpa.Generation {
+		return false, fmt.Sprintf("HPA rollout in progress: status generation (%d) lags spec generation %d", *hpa.Status.ObservedGeneration, hpa.Generation), nil
 	}
 
 	for _, cond := range hpa.Status.Conditions {

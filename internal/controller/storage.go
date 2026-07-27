@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 )
 
@@ -20,11 +21,11 @@ func (r *ApplicationReconciler) reconcileStorage(
 
 	// Provision Backend Cloud Storage Resources
 	switch application.Spec.Storage.Provider {
-	case "AWS", "aws", "S3", "s3", forgev1alpha1.StorageProviderAWS:
+	case forgev1alpha1.ProviderAWSS3:
 		if err := r.reconcileAWSStorage(ctx, application); err != nil {
 			return fmt.Errorf("failed to reconcile AWS storage: %w", err)
 		}
-	case "Akamai", "akamai", forgev1alpha1.StorageProviderAkamai:
+	case forgev1alpha1.ProviderAkamaiObjectStorage:
 		if err := r.reconcileAkamaiStorage(ctx, application); err != nil {
 			return fmt.Errorf("failed to reconcile Akamai storage: %w", err)
 		}
@@ -56,9 +57,9 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 		ctx,
 		r.Client,
 		application,
-		serviceAccountName(application),
-		r.OIDCArn,
-		r.OIDCUrl,
+		serviceAccountNameFor(application),
+		r.OIDCProviderARN,
+		r.OIDCProviderURL,
 	)
 
 	if err != nil {
@@ -68,25 +69,25 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 	}
 
 	// Reconcile Bucket and IRSA
-	roleArn, err := storageManager.ReconcileBucket(ctx)
+	result, err := storageManager.ReconcileBucket(ctx)
 	if err != nil {
 		s3storage.SetStorageNotReady(application, err)
 		_ = r.Status().Update(ctx, application)
 		return fmt.Errorf("failed to reconcile S3 bucket: %w", err)
 	}
-	if roleArn != "" {
-		if err := r.annotateServiceAccountWithIRSA(ctx, application, roleArn); err != nil {
+	if result.RoleARN != "" {
+		if err := r.annotateServiceAccountWithIRSA(ctx, application, result.RoleARN); err != nil {
 			return err
 		}
 	}
 
 	// Structured Status metdata
 	storageStatus := &forgev1alpha1.StorageStatus{
-		Provider: forgev1alpha1.StorageProviderAWS,
+		Provider: forgev1alpha1.ProviderAWSS3,
 		Bucket:   application.Spec.Storage.Bucket,
 		Region:   application.Spec.Storage.Region,
 		AWS: &forgev1alpha1.AWSStorageStatus{
-			RoleARN: roleArn,
+			RoleARN: result.RoleARN,
 		},
 	}
 
@@ -98,4 +99,56 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 
 	return nil
 
+}
+
+func (r *ApplicationReconciler) reconcileAkamaiStorage(
+	ctx context.Context,
+	application *forgev1alpha1.Application,
+) error {
+
+	// Initialize Akamai Storage Manager
+	storageManager, err := akamaiobjstr.NewManager(
+		ctx,
+		r.Client,
+		application,
+	)
+	if err != nil {
+		akamaiobjstr.SetStorageNotReady(application, err)
+		_ = r.Status().Update(ctx, application)
+		return fmt.Errorf("failed to create Akamai storage manager: %w", err)
+	}
+
+	// Reconcile Bucket and Access Key
+	result, err := storageManager.ReconcileBucket(ctx)
+	if err != nil {
+		akamaiobjstr.SetStorageNotReady(application, err)
+		_ = r.Status().Update(ctx, application)
+		return fmt.Errorf("failed to reconcile Akamai bucket: %w", err)
+	}
+
+	akamaiStatus := &forgev1alpha1.AkamaiStorageStatus{
+		AccessKey: result.AccessKey,
+		Endpoint:  result.Endpoint,
+	}
+	// Preserve existing secret key because akamai only returns it once
+	if result.SecretKey != "" {
+		akamaiStatus.SecretKey = result.SecretKey
+	} else if application.Status.Storage != nil && application.Status.Storage.Akamai != nil {
+		akamaiStatus.SecretKey = application.Status.Storage.Akamai.SecretKey
+	}
+
+	storageStatus := &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
+		Bucket:   application.Spec.Storage.Bucket,
+		Region:   application.Spec.Storage.Region,
+		Akamai:   akamaiStatus,
+	}
+
+	akamaiobjstr.SetStorageReady(application, storageStatus, "Akamai bucket and access key provisioned")
+
+	if err := r.Status().Update(ctx, application); err != nil {
+		return fmt.Errorf("failed to update storage status: %w", err)
+	}
+
+	return nil
 }

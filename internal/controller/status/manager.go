@@ -56,7 +56,7 @@ func (s *StatusManager) SetReconciling(
 		ObservedGeneration: application.Generation,
 	})
 
-	return s.updateStatus(ctx, application)
+	return s.UpdateStatus(ctx, application)
 
 }
 
@@ -90,7 +90,7 @@ func (s *StatusManager) SetReady(
 		ObservedGeneration: application.Generation,
 	})
 
-	return s.updateStatus(ctx, application)
+	return s.UpdateStatus(ctx, application)
 }
 
 func (s *StatusManager) SetFailed(
@@ -115,10 +115,10 @@ func (s *StatusManager) SetFailed(
 		ObservedGeneration: application.Generation,
 	})
 
-	return s.updateStatus(ctx, application)
+	return s.UpdateStatus(ctx, application)
 }
 
-func (s *StatusManager) updateStatus(
+func (s *StatusManager) UpdateStatus(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
 ) error {

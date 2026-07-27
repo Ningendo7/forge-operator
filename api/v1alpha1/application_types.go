@@ -56,7 +56,7 @@ type ApplicationSpec struct {
 
 	// ConfigMap configuration.
 	// +optional
-	Config *ConfigSpec `json:"config,omitempty"`
+	ConfigMap *ConfigSpec `json:"config,omitempty"`
 
 	// Secret configuration.
 	// +optional
@@ -118,6 +118,57 @@ type ApplicationStatus struct {
 	// ObservedGeneration is the most recent generation observed by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Storage represents the status of the requested object storage resources.
+	// +optional
+	Storage *StorageStatus `json:"storage,omitempty"`
+}
+
+// StorageStatus defines the observed state of the object storage backend.
+type StorageStatus struct {
+	// Provider indicates the active storage provider being used.
+	// +optional
+	Provider StorageProvider `json:"provider,omitempty"`
+
+	// Bucket is the name of the provisioned bucket.
+	// +optional
+	Bucket string `json:"bucket,omitempty"`
+
+	// Region is the cloud region where the bucket was provisioned.
+	// +optional
+	Region string `json:"region,omitempty"`
+
+	// AWS contains AWS-specific status information.
+	// +optional
+	AWS *AWSStorageStatus `json:"aws,omitempty"`
+
+	// Akamai contains Akamai-specific status information.
+	// +optional
+	Akamai *AkamaiStorageStatus `json:"akamai,omitempty"`
+
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// AWSStorageStatus defines AWS-specific status outputs.
+type AWSStorageStatus struct {
+	// RoleARN is the IAM Role ARN generated for IRSA.
+	// +optional
+	RoleARN string `json:"roleARN,omitempty"`
+}
+
+// AkamaiStorageStatus defines Akamai Object Storage status outputs.
+type AkamaiStorageStatus struct {
+	// Endpoint is the active S3-compatible host endpoint generated for the bucket.
+	// +optional
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// AccessKey is the generated access key for the bucket.
+	// +optional
+	AccessKey string `json:"accessKey,omitempty"`
+
+	// SecretKey is the generated secret key for the bucket.
+	// +optional
+	SecretKey string `json:"secretKey,omitempty"`
 }
 
 // ContainerSpec defines container settings.
@@ -286,8 +337,6 @@ type StorageSpec struct {
 
 // AWSStorageSpec defines AWS-specific storage configuration.
 type AWSStorageSpec struct {
-	// IAM Role ARN for accessing S3
-	RoleARN string `json:"roleARN,omitempty"`
 
 	// Optional lifecycle rules or other AWS-specific settings
 	// +optional

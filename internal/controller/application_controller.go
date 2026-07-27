@@ -19,16 +19,19 @@ package controller
 import (
 	"context"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
 )
 
 // ApplicationReconciler reconciles a Application object
@@ -37,6 +40,8 @@ type ApplicationReconciler struct {
 	Scheme          *runtime.Scheme
 	OIDCProviderARN string
 	OIDCProviderURL string
+
+	StatusManager *statusmanager.StatusManager
 }
 
 // +kubebuilder:rbac:groups=forge.ningendo7.github.io,resources=applications,verbs=get;list;watch;create;update;patch;delete
@@ -69,6 +74,10 @@ func (r *ApplicationReconciler) Reconcile(
 	if err := r.Get(ctx, req.NamespacedName, application); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	// Mark that reconciliation has started
+	if err := r.StatusManager.SetReconciling(ctx, application, "Reconciling Application resources"); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	isDeleting, err := r.handleFinalizer(ctx, application)
 	if err != nil {
@@ -86,7 +95,16 @@ func (r *ApplicationReconciler) Reconcile(
 		return ctrl.Result{}, err
 	}
 
-	if err := r.updateStatus(ctx, application); err != nil {
+	if err := r.StatusManager.UpdateStatus(ctx, application); err != nil {
+		if statusErr := r.StatusManager.SetFailed(ctx, application, err); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		logger.Error(err, "Failed to update Application status", "name", req.Name, "namespace", req.Namespace)
+		return ctrl.Result{}, err
+	}
+
+	logger.Info("Successfully reconciled Application", "name", req.Name, "namespace", req.Namespace)
+	if err := r.StatusManager.SetReady(ctx, application, "Application reconciled successfully"); err != nil {
 		return ctrl.Result{}, err
 	}
 

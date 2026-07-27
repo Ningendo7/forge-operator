@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -28,7 +29,9 @@ func truncateMessage(
 	return message
 }
 
-func SetStorageReady(app *forgev1alpha1.Application,
+func SetStorageReady(
+	app *forgev1alpha1.Application,
+	storageStatus *forgev1alpha1.StorageStatus,
 	message string,
 ) {
 
@@ -38,7 +41,7 @@ func SetStorageReady(app *forgev1alpha1.Application,
 
 	app.Status.Storage = storageStatus
 
-	metav1.SetStatusCondition(
+	apiMeta.SetStatusCondition(
 		&app.Status.Conditions,
 		metav1.Condition{
 			Type:               StorageReady,
@@ -62,7 +65,7 @@ func SetStorageNotReady(
 	if err != nil {
 		msg = fmt.Sprintf("Storage configuration failed: %v", truncateMessage(err.Error(), MaxErrorMessageLength))
 	}
-	metav1.SetStatusCondition(
+	apiMeta.SetStatusCondition(
 		&app.Status.Conditions,
 		metav1.Condition{
 			Type:               StorageReady,
@@ -82,7 +85,7 @@ func SetStorageCleanupInProgress(
 		return
 	}
 
-	metav1.SetStatusCondition(
+	apiMeta.SetStatusCondition(
 		&app.Status.Conditions,
 		metav1.Condition{
 			Type:               StorageReady,
@@ -107,7 +110,7 @@ func SetStorageCleanupFailed(
 		msg = fmt.Sprintf("Storage cleanup failed: %v", truncateMessage(err.Error(), MaxErrorMessageLength))
 	}
 
-	metav1.SetStatusCondition(
+	apiMeta.SetStatusCondition(
 		&app.Status.Conditions,
 		metav1.Condition{
 			Type:               StorageReady,

@@ -12,18 +12,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// AKAMAIAPI defines the interface for interacting with Akamai / Linode
+// AKAMAIAPI defines the interface for interacting with Linode Object Storage.
 type AKAMAIAPI interface {
-	GetObjectStorageBuckets(ctx context.Context, region, label string) (*linodego.ObjectStorageBucket, error)
+	ListObjectStorageBuckets(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageBucket, error)
+	GetObjectStorageBucket(ctx context.Context, clusterID string, bucket string) (*linodego.ObjectStorageBucket, error)
 	CreateObjectStorageBucket(ctx context.Context, opts linodego.ObjectStorageBucketCreateOptions) (*linodego.ObjectStorageBucket, error)
-	UpdateObjectStorageBucket(ctx context.Context, region, label string, opts linodego.ObjectStorageBucketUpdateOptions) (*linodego.ObjectStorageBucket, error)
-	DeleteObjectStorageBucket(ctx context.Context, region, label string) error
+	DeleteObjectStorageBucket(ctx context.Context, clusterID string, bucket string) error
+
 	ListObjectStorageKeys(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error)
 	CreateObjectStorageKey(ctx context.Context, opts linodego.ObjectStorageKeyCreateOptions) (*linodego.ObjectStorageKey, error)
 	DeleteObjectStorageKey(ctx context.Context, keyID int) error
 }
 
-// Manager is responsible for managing Akamai interactions for the Application controller.
+// Manager is responsible for managing Akamai/Linode interactions for the Application controller.
 type Manager struct {
 	k8sClient    client.Client
 	akamaiClient AKAMAIAPI
@@ -33,6 +34,17 @@ type Manager struct {
 
 	bucket string
 	region string
+}
+
+type StorageResult struct {
+	AccessKey string
+	SecretKey string
+	Endpoint  string
+}
+
+type AccessKeyResult struct {
+	AccessKey string
+	SecretKey string
 }
 
 // NewManager creates a new Manager instance for managing Akamai interactions.
@@ -50,7 +62,7 @@ func NewManager(
 	bucket := storage.Bucket
 	region := storage.Region
 	if region == "" {
-		region = "us-east-1" // Default region if not specified
+		region = "us-east-1" // default cluster/region
 	}
 
 	secretName := storage.SecretName
@@ -70,10 +82,10 @@ func NewManager(
 
 	tokenBytes, ok := secret.Data["apiToken"]
 	if !ok || len(tokenBytes) == 0 {
-		return nil, fmt.Errorf("Key 'apiToken' not found in secret %s", secretName)
+		return nil, fmt.Errorf("key 'apiToken' not found in secret %s", secretName)
 	}
 
-	// Initialize linode / akamai client
+	// Initialize linode client
 	tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: string(tokenBytes)})
 	oauthClient := oauth2.NewClient(ctx, tokenSource)
 	linodeClient := linodego.NewClient(oauthClient)
@@ -86,5 +98,4 @@ func NewManager(
 		bucket:       bucket,
 		region:       region,
 	}, nil
-
 }

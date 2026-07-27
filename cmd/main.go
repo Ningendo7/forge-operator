@@ -179,8 +179,11 @@ func main() {
 	}
 
 	if err := (&controller.ApplicationReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		OIDCProviderARN: oidcProviderARN,
+		OIDCProviderURL: oidcProviderURL,
+		StatusManager:   statusmanager.NewStatusManager(mgr.GetClient()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "application")
 		os.Exit(1)

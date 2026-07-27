@@ -7,40 +7,42 @@ import (
 	"github.com/linode/linodego"
 )
 
-// ReconcileBucket acts as the top-level orchestrator pipeline.
-// It delegates every operation to focused helper functions.
+// ReconcileBucket orchestrates bucket + key setup.
 func (m *Manager) ReconcileBucket(
 	ctx context.Context,
-) (string, string, string, error) {
+) (*StorageResult, error) {
 
 	if err := m.validateStorageSpec(); err != nil {
-		return "", "", "", fmt.Errorf("invalid storage spec: %w", err)
+		return nil, fmt.Errorf("invalid storage spec: %w", err)
 	}
 
-	bucket, err := m.ensureBucketExists(ctx)
+	_, err := m.ensureBucketExists(ctx)
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to ensure bucket exists: %w", err)
+		return nil, fmt.Errorf("failed to ensure bucket exists: %w", err)
 	}
 
-	if err := m.ensureVersioning(ctx); err != nil {
-		return "", "", "", fmt.Errorf("failed to ensure versioning: %w", err)
-	}
-
-	accessKey, secretKey, err := m.ensureAccessKey(ctx)
+	keyResult, err := m.ensureAccessKey(ctx)
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to ensure access key: %w", err)
+		return nil, fmt.Errorf("failed to ensure access key: %w", err)
 	}
 
-	endpoint := m.resolveEndpoint()
-
-	return accessKey, secretKey, endpoint, nil
+	return &StorageResult{
+		AccessKey: keyResult.AccessKey,
+		SecretKey: keyResult.SecretKey,
+		Endpoint:  m.resolveEndpoint(),
+	}, nil
 }
 
 func (m *Manager) validateStorageSpec() error {
 	if m.storage == nil {
 		return fmt.Errorf("storage spec is nil")
 	}
-
+	if m.bucket == "" {
+		return fmt.Errorf("bucket name is empty")
+	}
+	if m.region == "" {
+		return fmt.Errorf("region/cluster is empty")
+	}
 	return nil
 }
 
@@ -59,9 +61,8 @@ func (m *Manager) ensureBucketExists(
 
 	// Bucket does not exist, create it
 	createOpts := linodego.ObjectStorageBucketCreateOptions{
-		Label:         m.bucket,
-		Region:        m.region,
-		LifecycleRule: m.buildLifecycleRule(),
+		Label:   m.bucket,
+		Cluster: m.region,
 	}
 
 	newBucket, err := m.akamaiClient.CreateObjectStorageBucket(ctx, createOpts)
@@ -72,48 +73,31 @@ func (m *Manager) ensureBucketExists(
 	return newBucket, nil
 }
 
-func (m *Manager) ensureVersioning(
-	ctx context.Context,
-	bucket *linodego.ObjectStorageBucket,
-) error {
-
-	if !m.storage.Versioning {
-		return nil
-	}
-
-	opts := linodego.ObjectStorageBucketUpdateOptions{
-		Versioning: linodego.ObjectStorageBucketVersioningEnabled,
-	}
-
-	if _, err := m.akamaiClient.UpdateObjectStorageBucket(ctx, m.region, m.bucket, opts); err != nil {
-		return fmt.Errorf("failed to update bucket versioning: %w", err)
-	}
-	return nil
-}
-
 func (m *Manager) ensureAccessKey(
 	ctx context.Context,
-) (string, string, error) {
+) (*AccessKeyResult, error) {
 
 	keyLabel := fmt.Sprintf("%s-key", m.app.Name)
 
 	keys, err := m.akamaiClient.ListObjectStorageKeys(ctx, nil)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to list storage keys: %w", err)
+		return nil, fmt.Errorf("failed to list storage keys: %w", err)
 	}
 
 	// Reuse existing key if it exists
 	for _, key := range keys {
 		if key.Label == keyLabel {
-			return key.AccessKey, "", nil
-
+			return &AccessKeyResult{
+				AccessKey: key.AccessKey,
+				SecretKey: "",
+			}, nil
 		}
 	}
+
 	// Create a new scoped access key
 	perm := linodego.ObjectStorageKeyBucketAccess{
-		Bucket:     m.bucket,
-		Region:     m.region,
-		Permisions: "read_write",
+		Cluster:     m.region,
+		Permissions: "read_write",
 	}
 
 	createOpts := linodego.ObjectStorageKeyCreateOptions{
@@ -123,37 +107,18 @@ func (m *Manager) ensureAccessKey(
 
 	key, err := m.akamaiClient.CreateObjectStorageKey(ctx, createOpts)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to create storage key: %w", err)
+		return nil, fmt.Errorf("failed to create storage key: %w", err)
 	}
 
-	return key.AccessKey, key.SecretKey, nil
+	return &AccessKeyResult{
+		AccessKey: key.AccessKey,
+		SecretKey: key.SecretKey,
+	}, nil
 }
 
 func (m *Manager) resolveEndpoint() string {
 	if m.storage.Endpoint != "" {
 		return m.storage.Endpoint
 	}
-
 	return fmt.Sprintf("%s.linodeobjects.com", m.region)
-}
-
-func (m *Manager) buildLifecycleRule() *linodego.ObjectStorageBucketLifecycleRule {
-	if m.storage.Lifecycle == nil {
-		return nil
-	}
-
-	rule := linodego.ObjectStorageBucketLifecycleRule{
-		ID:      fmt.Sprintf("%s-lifecycle-rule", m.app.Name),
-		Enabled: true,
-		Prefix:  m.storage.Lifecycle.Prefix,
-	}
-
-	if m.storage.Lifecycle.ExpirationDays > 0 {
-		rule.Expiration = &linodego.ObjectStorageBucketLifecycleExpiration{
-			Days: int(m.storage.Lifecycle.ExpirationDays),
-		}
-	}
-
-	return &[]linodego.ObjectStorageBucketLifecycleRule{rule}
-
 }
