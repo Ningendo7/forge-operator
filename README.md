@@ -1,85 +1,91 @@
 # forge-operator
 
-forge-operator is a Kubebuilder-based Kubernetes operator that reconciles application runtime infrastructure from a single custom resource.
+forge-operator is a Kubebuilder-based Kubernetes operator for managing application runtime resources from a single Application custom resource.
 
 Repository status: active development.
 
-## Current Snapshot
+## Overview
 
-As of 2026-07-23, this repository contains a functional reconciliation architecture with ongoing refactors in API/storage layers and Terraform expansion.
+The controller reconciles the following resource types from `spec`:
 
-Primary API source:
-
-- [api/v1alpha1/application_types.go](api/v1alpha1/application_types.go)
-
-Primary controller entrypoint:
-
-- [internal/controller/application_controller.go](internal/controller/application_controller.go)
-
-## What The Operator Reconciles
-
-From an Application resource, the controller attempts to reconcile:
-
-- Deployment
-- Service
+- ServiceAccount
 - ConfigMap
 - Secret
-- Ingress (optional)
-- HorizontalPodAutoscaler (optional)
-- PodDisruptionBudget (optional)
-- Storage resources and storage Secret (provider dependent)
+- Service
+- Deployment
+- Ingress
+- PodDisruptionBudget
+- HorizontalPodAutoscaler
+- Storage resources and storage Secret
 
-Current reconciliation sequencing is defined in:
-
-- [internal/controller/desiredstate.go](internal/controller/desiredstate.go)
+Reconciliation order is defined in [internal/controller/desiredstate.go](internal/controller/desiredstate.go).
 
 ## API Surface
 
-The Application spec currently models:
+The Application API is defined in [api/v1alpha1/application_types.go](api/v1alpha1/application_types.go).
 
-- Workload: image, replicas, resources, env
-- Container wiring: port, config and secret mount references
-- Networking: service and ingress configuration
-- Reliability: autoscaling and PDB configuration
-- Storage: provider, bucket, endpoint/region, secret references, provider-specific blocks
+Current spec areas include:
 
-Sample CR:
+- image and replicas
+- container port, mount paths, and volume wiring
+- ConfigMap and Secret references
+- Service type, port, and targetPort
+- optional ingress host, path, class name, annotations, and TLS
+- optional autoscaling limits and CPU target
+- optional PodDisruptionBudget settings
+- optional object storage configuration for AWS or Akamai
+- optional ServiceAccount configuration
+- environment variables and resource requests/limits
 
-- [config/samples/forge_v1alpha1_application.yaml](config/samples/forge_v1alpha1_application.yaml)
+The Application status includes conditions, observed generation, and storage status.
 
-## Implementation Matrix
+## Controller Behavior
 
-Operator components:
+The controller entrypoint is [internal/controller/application_controller.go](internal/controller/application_controller.go).
 
-- Reconciler framework and finalizer handling: implemented
-- Status management helpers: implemented in status package
-- AWS-oriented storage manager path under s3 controller package: present
-- Akamai object storage controller path: scaffold directory exists, implementation pending
+It uses a finalizer for cleanup, then updates status through the status manager with Ready, Progressing, and Degraded conditions.
 
-Terraform components under [Terraform/AWS](Terraform/AWS):
+Supporting logic lives in:
 
-- modules/vpc: implemented baseline
-- modules/networking: implemented baseline
-- modules/iam: implemented baseline
-- modules/eks: implemented baseline, includes addon resources
-- modules/irsa: implemented
-- modules/monitoring: pending implementation
-- environments/dev: active composition
-- environments/prod: not yet populated
+- [internal/controller/finalizer.go](internal/controller/finalizer.go)
+- [internal/controller/status](internal/controller/status)
+- [internal/controller/desiredstate.go](internal/controller/desiredstate.go)
 
-## Known Active Gaps
+The manager entrypoint in [cmd/main.go](cmd/main.go) also reads `OIDC_PROVIDER_ARN` and `OIDC_PROVIDER_URL` from the environment for IRSA-related setup.
 
-This branch currently includes in-progress code that may not pass a full Go build/test run until refactor work is completed.
+## Storage
 
-Observed at repository level:
+Storage support is split between the API and controller packages:
 
-- Generated deepcopy output and API structs are not fully synchronized
-- New storage code requires additional Go module dependencies in go.mod
-- Some API/provider naming and status struct paths are in transition
+- AWS storage flows live under [internal/controller/s3](internal/controller/s3)
+- Akamai object storage has API support and a placeholder controller path under [internal/controller/Akamai-Obj-Str](internal/controller/Akamai-Obj-Str)
+- Storage status is surfaced on the Application status object
 
-If you are consuming this repository externally, treat the operator and Terraform as release-candidate quality only after CI is green on your target branch.
+## Terraform Layout
 
-## Development Workflow
+Terraform lives under [Terraform/AWS](Terraform/AWS).
+
+Current environment and module layout:
+
+- modules/vpc
+- modules/networking
+- modules/iam
+- modules/eks
+- modules/irsa
+- modules/monitoring
+- environments/dev
+- environments/prod
+
+Current state of those folders:
+
+- dev contains the active composition
+- prod exists but is empty
+- monitoring is empty
+- irsa contains implementation
+
+The dev composition wires VPC, networking, IAM, EKS, and IRSA together and includes the IAM policy used by the operator for S3 and IRSA permissions.
+
+## Deployment Workflow
 
 Prerequisites:
 
@@ -88,36 +94,41 @@ Prerequisites:
 - kubectl
 - Access to a Kubernetes cluster
 
-Common targets:
+Build and verify locally:
 
 ```sh
 make manifests
 make generate
 make test
 make build
+```
+
+Run the controller locally:
+
+```sh
 make run
 ```
 
-Container image build and push:
+Build and publish a container image:
 
 ```sh
 make docker-build docker-push IMG=<registry>/forge-operator:<tag>
 ```
 
-Install and deploy controller:
+Install and deploy the controller:
 
 ```sh
 make install
 make deploy IMG=<registry>/forge-operator:<tag>
 ```
 
-Apply sample:
+Apply the sample resource:
 
 ```sh
 kubectl apply -k config/samples/
 ```
 
-Cleanup:
+Clean up:
 
 ```sh
 kubectl delete -k config/samples/
@@ -125,13 +136,23 @@ make undeploy
 make uninstall
 ```
 
+Sample manifest:
+
+- [config/samples/forge_v1alpha1_application.yaml](config/samples/forge_v1alpha1_application.yaml)
+
+## Operational Notes
+
+This repository is still under active refactor. Treat the README as a current implementation guide, not a release contract.
+
+Before promoting a branch, verify the Go build, controller tests, and Terraform plan in your target environment.
+
 ## Contributing
 
 Before opening a PR:
 
-- Keep generated artifacts current (manifests/deepcopy)
+- Keep generated manifests and deepcopy code up to date
 - Run format, vet, and tests locally
-- Document any intentionally deferred work in code comments or PR notes
+- Update the README if behavior or module wiring changes
 
 ## License
 
