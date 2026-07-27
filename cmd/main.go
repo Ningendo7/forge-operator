@@ -37,6 +37,7 @@ import (
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	"github.com/Ningendo7/forge-operator/internal/controller"
+	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -178,6 +179,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	oidcProviderARN := os.Getenv("OIDC_PROVIDER_ARN")
+	oidcProviderURL := os.Getenv("OIDC_PROVIDER_URL")
 	if err := (&controller.ApplicationReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
