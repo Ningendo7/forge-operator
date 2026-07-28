@@ -8,12 +8,13 @@ terraform {
       version = ">= 4.1.0"
     }
   }
-
+  
   backend "s3" {
 
          # Native state locking
          use_lockfile = true
   }
+  
 
 
 }
