@@ -8,7 +8,9 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -414,5 +416,264 @@ func TestReconcileDeployment_CreatesDeployment(t *testing.T) {
 	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-deployment", Namespace: "default"}, deployment)
 	if err != nil {
 		t.Fatalf("expected deployment to be created, but got error: %v", err)
+	}
+}
+
+func TestReconcileDeployment_Idempotent(t *testing.T) {
+	scheme := runtime.NewScheme()
+
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = appsv1.AddToScheme(scheme)
+
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		Spec: forgev1alpha1.ApplicationSpec{
+			Image: "nginx:latest",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ApplicationReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	// First reconciliation
+	err := r.reconcileDeployment(context.Background(), app)
+	if err != nil {
+		t.Fatalf("unexpected error during first reconcileDeployment: %v", err)
+	}
+
+	// Second reconciliation should be idempotent
+	err = r.reconcileDeployment(context.Background(), app)
+	if err != nil {
+		t.Fatalf("unexpected error during second reconcileDeployment: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-deployment", Namespace: "default"}, deployment)
+	if err != nil {
+		t.Fatalf("expected deployment to exist, but got error: %v", err)
+	}
+
+	if deployment.Spec.Template.Spec.Containers[0].Image != "nginx:latest" {
+		t.Fatalf("expected container image to be %q, got %q", "nginx:latest", deployment.Spec.Template.Spec.Containers[0].Image)
+	}
+
+	if *deployment.Spec.Replicas != 1 {
+		t.Fatalf("expected replicas to be 1, got %d", *deployment.Spec.Replicas)
+	}
+}
+
+func TestReconcileDeployment_UpdatesFields(t *testing.T) {
+	tests := []struct {
+		name          string
+		Image  	     string
+		replicas      int32
+		expectedImage string
+		expectedReplicas int32
+	}{
+		{
+			name:          "updates replicas",
+			Image:         "nginx:latest",
+			replicas:      3,
+			expectedImage: "nginx:latest",
+			expectedReplicas: 3,
+		},
+		{
+			name:          "updates image",
+			Image:         "nginx:1.27",
+			replicas:      1,
+			expectedImage: "nginx:1.27",
+			expectedReplicas: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			_ = forgev1alpha1.AddToScheme(scheme)
+			_ = appsv1.AddToScheme(scheme)
+
+			app := &forgev1alpha1.Application{
+				ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+				Spec: forgev1alpha1.ApplicationSpec{
+					Image: tt.Image,
+				},
+			}
+
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+			r := &ApplicationReconciler{
+				Client: fakeClient,
+				Scheme: scheme,
+			}
+
+			// Initial reconcile
+			err := r.reconcileDeployment(context.Background(), app)
+			if err != nil {
+				t.Fatalf("unexpected error during initial reconcileDeployment: %v", err)
+			}
+
+			// Change the desired state
+			app.Spec.Image = tt.Image
+
+			replicas := tt.replicas
+			app.Spec.Replicas = &replicas
+
+			// Reconcile again to apply changes
+			err = r.reconcileDeployment(context.Background(), app)
+			if err != nil {
+				t.Fatalf("unexpected error during second reconcileDeployment: %v", err)
+			}
+
+			deployment := &appsv1.Deployment{}
+			err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-deployment", Namespace: "default"}, deployment)
+			if err != nil {
+				t.Fatalf("expected deployment to exist, but got error: %v", err)
+			}
+
+			if *deployment.Spec.Replicas != tt.expectedReplicas {
+				t.Fatalf("expected replicas to be %d, got %d", tt.expectedReplicas, *deployment.Spec.Replicas)
+			}
+
+			if deployment.Spec.Template.Spec.Containers[0].Image != tt.expectedImage {
+				t.Fatalf("expected image to be %q, got %q", tt.expectedImage, deployment.Spec.Template.Spec.Containers[0].Image)
+			}
+		})
+	}
+}
+
+func TestReconcileDeployment_SetsOwnerReference(t *testing.T) {
+	scheme := runtime.NewScheme()
+
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = appsv1.AddToScheme(scheme)
+
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default", UID: "12345"},
+		Spec: forgev1alpha1.ApplicationSpec{
+			Image: "nginx:latest",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	r := &ApplicationReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	err := r.reconcileDeployment(context.Background(), app)
+	if err != nil {
+		t.Fatalf("unexpected error during reconcileDeployment: %v", err)
+	}
+
+	deployment := &appsv1.Deployment{}
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-deployment", Namespace: "default"}, deployment)
+	if err != nil {
+		t.Fatalf("expected deployment to exist, but got error: %v", err)
+	}
+
+	if len(deployment.OwnerReferences) != 1 {
+		t.Fatalf("expected 1 owner reference, got %d", len(deployment.OwnerReferences))
+	}
+
+	owner := deployment.OwnerReferences[0]
+	if owner.Name != app.Name {
+		t.Fatalf("expected owner reference name %q, got %q", app.Name, owner.Name)
+	}
+
+	if owner.Kind != "Application" {
+		t.Fatalf("expected owner reference kind %q, got %q", "Application", owner.Kind)
+	}
+}
+
+func TestReconcileDeployment_UsesServiceAccount(t *testing.T) {
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		Spec: forgev1alpha1.ApplicationSpec{
+			Image: "nginx:latest",
+			ServiceAccount: &forgev1alpha1.ServiceAccountSpec{
+				Name: "custom-sa",
+			},
+		},
+	}
+
+	r := &ApplicationReconciler{}
+
+	deployment := r.desiredDeployment(app)
+	serviceAccountName := deployment.Spec.Template.Spec.ServiceAccountName
+
+	if serviceAccountName != "custom-sa" {
+		t.Fatalf("expected service account name to be %q, got %q", "custom-sa", serviceAccountName)
+	}
+}
+
+func TestReconcileDeployment_UsesResources(t *testing.T) {
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		Spec: forgev1alpha1.ApplicationSpec{
+			Image: "nginx:latest",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("250m"),
+					corev1.ResourceMemory: resource.MustParse("256Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+			},
+		},
+	}
+
+	r := &ApplicationReconciler{}
+	deployment := r.desiredDeployment(app)
+	resources := deployment.Spec.Template.Spec.Containers[0].Resources
+
+	if resources.Requests.Cpu().String() != "250m" {
+		t.Fatalf("expected CPU request to be %q, got %q", "250m", resources.Requests.Cpu().String())
+	}
+
+	if resources.Requests.Memory().String() != "256Mi" {
+		t.Fatalf("expected memory request to be %q, got %q", "256Mi", resources.Requests.Memory().String())
+	}
+
+	if resources.Limits.Cpu().String() != "1" {
+		t.Fatalf("expected CPU limit to be %q, got %q", "1", resources.Limits.Cpu().String())
+	}
+
+	if resources.Limits.Memory().String() != "1Gi" {
+		t.Fatalf("expected memory limit to be %q, got %q", "1Gi", resources.Limits.Memory().String())
+	}
+}
+
+// Unhappy path : Error Handling and Failure Scenarios
+func TestReconcileDeployment_ReturnsErrorWhenDeploymentPatchFails(t *testing.T) {
+	scheme := runtime.NewScheme()
+
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = appsv1.AddToScheme(scheme)
+
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		Spec: forgev1alpha1.ApplicationSpec{
+			Image: "nginx:latest",
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	r := &ApplicationReconciler{
+		Client: &failingPatchClient{
+			Client: fakeClient,
+		},
+		Scheme: scheme,
+	}
+
+	err := r.reconcileDeployment(context.Background(), app)
+	if err == nil {
+		t.Fatalf("expected error during reconcileDeployment due to failing patch, but got none")
 	}
 }

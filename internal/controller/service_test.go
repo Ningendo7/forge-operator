@@ -1,6 +1,7 @@
 package controller
 
 import (
+
 	"context"
 	"testing"
 
@@ -154,5 +155,180 @@ func TestReconcileService_CreateService(t *testing.T) {
 
 	if service.Spec.Ports[0].Port != 80 {
 		t.Errorf("expected service port 80, got %d", service.Spec.Ports[0].Port)
+	}
+}
+
+func TestReconcileService_Idempotent(t *testing.T) {
+	scheme := runtime.NewScheme()
+
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		Spec: forgev1alpha1.ApplicationSpec{
+			Image: "nginx:latest",
+			Service: forgev1alpha1.ServiceSpec{
+				Port: 80,
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	r := &ApplicationReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	// First reconciliation
+	err := r.reconcileService(context.Background(), app)
+	if err != nil {
+		t.Fatalf("first reconcileService returned error: %v", err)
+	}
+
+	// Second reconciliation
+	err = r.reconcileService(context.Background(), app)
+	if err != nil {
+		t.Fatalf("second reconcileService returned error: %v", err)
+	}
+
+	service := &corev1.Service{}
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, service)
+	if err != nil {
+		t.Fatalf("failed to get Service after second reconciliation: %v", err)
+	}
+
+	if service.Spec.Ports[0].Port != 80 {
+		t.Errorf("expected service port 80 after second reconciliation, got %d", service.Spec.Ports[0].Port)
+	}
+}
+
+func TestReconcileService_UpdateServicePort(t *testing.T) {
+	scheme := runtime.NewScheme()
+
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		Spec: forgev1alpha1.ApplicationSpec{
+			Image: "nginx:latest",
+			Service: forgev1alpha1.ServiceSpec{
+				Port: 80,
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	r := &ApplicationReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	// First reconciliation creates service with port 80
+	err := r.reconcileService(context.Background(), app)
+	if err != nil {
+		t.Fatalf("first reconcileService returned error: %v", err)
+	}
+
+	// change desired state
+	app.Spec.Service.Port = 8080
+
+	// Second reconciliation should update the service port to 8080
+	err = r.reconcileService(context.Background(), app)
+	if err != nil {
+		t.Fatalf("second reconcileService returned error: %v", err)
+	}
+
+	service := &corev1.Service{}
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, service)
+	if err != nil {
+		t.Fatalf("failed to get Service after second reconciliation: %v", err)
+	}
+
+	if service.Spec.Ports[0].Port != 8080 {
+		t.Errorf("expected service port 8080 after second reconciliation, got %d", service.Spec.Ports[0].Port)
+	}
+}
+
+func TestReconcileService_SetsControllerReference(t *testing.T) {
+	scheme := runtime.NewScheme()
+
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default", UID: "12345"},
+		Spec: forgev1alpha1.ApplicationSpec{
+			Image: "nginx:latest",
+			Service: forgev1alpha1.ServiceSpec{
+				Port: 80,
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	r := &ApplicationReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+	}
+
+	err := r.reconcileService(context.Background(), app)
+	if err != nil {
+		t.Fatalf("reconcileService returned error: %v", err)
+	}
+
+	service := &corev1.Service{}
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, service)
+	if err != nil {
+		t.Fatalf("failed to get Service: %v", err)
+	}
+
+	if len(service.OwnerReferences) != 1 {
+		t.Fatalf("expected 1 owner reference, got %d", len(service.OwnerReferences))
+	}
+
+	owner := service.OwnerReferences[0]
+	if owner.Name != app.Name {
+		t.Errorf("expected owner reference name %q, got %q", app.Name, owner.Name)
+	}
+	if owner.Kind != "Application" {
+		t.Errorf("expected owner reference kind 'Application', got %q", owner.Kind)
+	}
+}
+
+// Unhappy path : Error Handling and Failure Scenarios
+
+func TestReconcileService_ReturnsErrorWhenPatchFails(t *testing.T) {
+	scheme := runtime.NewScheme()
+
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default", UID: "12345"},
+		Spec: forgev1alpha1.ApplicationSpec{
+			Image: "nginx:latest",
+			Service: forgev1alpha1.ServiceSpec{
+				Port: 80,
+			},
+		},
+	}
+
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	r := &ApplicationReconciler{
+		Client: &failingPatchClient{
+			Client: baseClient,
+		},
+		Scheme: scheme,
+	}
+
+	err := r.reconcileService(context.Background(), app)
+	if err == nil {
+		t.Fatalf("expected error from reconcileService, got nil")
 	}
 }
