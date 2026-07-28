@@ -289,6 +289,47 @@ func TestConfigMapNameFor(t *testing.T) {
 	}
 }
 
+func TestSecretNameFor(t *testing.T) {
+	tests := []struct {
+		name     string
+		application string
+		secretName string
+		expected string
+	}{
+		{
+			name:     "uses secret name from spec",
+			application: "demo-app",
+			secretName: "custom-secret",
+			expected: "custom-secret",
+		},
+		{
+			name:     "uses default secret name when not specified",
+			application: "demo-app",
+			secretName: "",
+			expected: "demo-app-secret",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := &forgev1alpha1.Application{
+				ObjectMeta: metav1.ObjectMeta{Name: tt.application, Namespace: "default"},
+				Spec: forgev1alpha1.ApplicationSpec{
+					Image: "nginx:latest",
+					Container: forgev1alpha1.ContainerSpec{
+						SecretName: tt.secretName,
+					},
+				},
+			}
+
+			result := secretNameFor(app)
+			if result != tt.expected {
+				t.Fatalf("expected secret name to be %q, got %q", tt.expected, result)
+			}
+		})
+	}
+}
+
 func TestReconcileDeployment_CreatesDeployment(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)
