@@ -330,6 +330,63 @@ func TestSecretNameFor(t *testing.T) {
 	}
 }
 
+func TestDesiredPodSpec_ServiceAccount(t *testing.T) {
+	create := true
+	doNotCreate := false
+
+	tests := []struct {
+		name     string
+		serviceAccount *forgev1alpha1.ServiceAccountSpec
+		expectedName string
+	}{
+		{
+			name: "creates service account when not specified",
+			serviceAccount: nil,
+			expectedName: "demo-app-sa",
+		},
+		{
+			name: "creates service account when create is true",
+			serviceAccount : &forgev1alpha1.ServiceAccountSpec{
+				Name: "custom-sa",
+			},
+			expectedName: "custom-sa",
+		},
+		{
+			name: "does not create service account when create is false",
+			serviceAccount : &forgev1alpha1.ServiceAccountSpec{
+				Create: &doNotCreate,
+			},
+			expectedName: "",
+		},
+		{
+			name: "creates service account when create is true and name is specified",
+			serviceAccount : &forgev1alpha1.ServiceAccountSpec{
+				Create: &create,
+			},
+			expectedName: "demo-app-sa",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := &forgev1alpha1.Application{
+				ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+				Spec: forgev1alpha1.ApplicationSpec{
+					Image: "nginx:latest",
+					ServiceAccount: tt.serviceAccount,
+				},
+			}
+
+			r := &ApplicationReconciler{}
+			podSpec := r.desiredPodSpec(app)
+
+			if podSpec.ServiceAccountName != tt.expectedName {
+				t.Fatalf("expected service account name to be %q, got %q", tt.expectedName, podSpec.ServiceAccountName)
+			}
+		})
+	}
+}
+
 func TestReconcileDeployment_CreatesDeployment(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)
