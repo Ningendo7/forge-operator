@@ -1,158 +1,224 @@
-# forge-operator
+# Forge Operator
 
-forge-operator is a Kubebuilder-based Kubernetes operator for managing application runtime resources from a single Application custom resource.
+Forge Operator is a Kubernetes operator for managing application infrastructure declaratively across cloud providers.
 
-Repository status: active development.
+It manages the lifecycle of application workloads, Kubernetes resources, and cloud-backed object storage through a single Application custom resource.
 
-## Overview
+## Supported Providers
 
-The controller reconciles the following resource types from `spec`:
+| Provider | Compute Target | Object Storage | Authentication Model |
+| --- | --- | --- | --- |
+| AWS | EKS | Amazon S3 | IAM Roles for Service Accounts (IRSA) |
+| Akamai/Linode | LKE (Terraform modules) | Akamai Object Storage | S3-compatible access credentials |
 
-- ServiceAccount
-- ConfigMap
-- Secret
-- Service
-- Deployment
-- Ingress
-- PodDisruptionBudget
-- HorizontalPodAutoscaler
-- Storage resources and storage Secret
+## Architecture
 
-Reconciliation order is defined in [internal/controller/desiredstate.go](internal/controller/desiredstate.go).
+Forge Operator follows the Kubernetes reconciliation model:
 
-## API Surface
+```mermaid
+flowchart TD
+    A[Application CR] --> B[Forge Operator]
+    B --> C[Kubernetes Resources]
+    B --> D[Cloud Provider APIs]
+```
 
-The Application API is defined in [api/v1alpha1/application_types.go](api/v1alpha1/application_types.go).
+The controller reconciles:
 
-Current spec areas include:
+- ServiceAccounts
+- ConfigMaps
+- Secrets
+- Services
+- Deployments
+- Ingress resources
+- HorizontalPodAutoscalers
+- PodDisruptionBudgets
+- Object storage resources and storage Secrets
 
-- image and replicas
-- container port, mount paths, and volume wiring
-- ConfigMap and Secret references
-- Service type, port, and targetPort
-- optional ingress host, path, class name, annotations, and TLS
-- optional autoscaling limits and CPU target
-- optional PodDisruptionBudget settings
-- optional object storage configuration for AWS or Akamai
-- optional ServiceAccount configuration
-- environment variables and resource requests/limits
+Reconciliation flow is orchestrated in [internal/controller/desiredstate.go](internal/controller/desiredstate.go).
 
-The Application status includes conditions, observed generation, and storage status.
+## Application API
 
-## Controller Behavior
+The CRD schema is defined in [api/v1alpha1/application_types.go](api/v1alpha1/application_types.go).
 
-The controller entrypoint is [internal/controller/application_controller.go](internal/controller/application_controller.go).
+Key capability areas in spec:
 
-It uses a finalizer for cleanup, then updates status through the status manager with Ready, Progressing, and Degraded conditions.
+- application image and replica control
+- container port, volume mount paths, and runtime environment
+- Service and Ingress networking controls
+- autoscaling and disruption budget policy
+- ServiceAccount behavior
+- provider-aware storage settings for AWS and Akamai
 
-Supporting logic lives in:
+Status includes:
 
+- condition set for readiness/progress/failure
+- observed generation
+- storage status payload
+
+## Authentication Flows
+
+### AWS IRSA Flow
+
+```mermaid
+flowchart TD
+    A[Pod] --> B[ServiceAccount JWT]
+    B --> C[EKS OIDC Provider]
+    C --> D[AWS STS]
+    D --> E[IAM Role]
+    E --> F[Amazon S3]
+```
+
+No static AWS access keys are required for workloads that use IRSA.
+
+### Akamai Object Storage Flow
+
+```mermaid
+flowchart TD
+    A[Application] --> B[Kubernetes Secret]
+    B --> C[Akamai Object Storage]
+```
+
+Credentials are stored and managed as Kubernetes Secrets.
+
+## Storage Lifecycle
+
+Creation:
+
+```mermaid
+flowchart TD
+    A[Application Created] --> B[Storage Manager Init]
+    B --> C{Bucket Exists?}
+    C -->|Yes| D[Reconcile Metadata]
+    C -->|No| E[Create Bucket]
+    E --> D
+```
+
+Deletion is finalizer-driven:
+
+- Application deletion triggers finalizer logic
+- cloud storage resources are cleaned up
+- finalizer is removed and deletion completes
+
+Finalizer logic is implemented in [internal/controller/finalizer.go](internal/controller/finalizer.go).
+
+## Repository Structure
+
+Primary code paths:
+
+- [api/v1alpha1/application_types.go](api/v1alpha1/application_types.go)
+- [cmd/main.go](cmd/main.go)
+- [internal/controller/application_controller.go](internal/controller/application_controller.go)
 - [internal/controller/finalizer.go](internal/controller/finalizer.go)
 - [internal/controller/status](internal/controller/status)
-- [internal/controller/desiredstate.go](internal/controller/desiredstate.go)
+- [internal/controller/s3](internal/controller/s3)
+- [internal/controller/Akamai-Obj-Str](internal/controller/Akamai-Obj-Str)
 
-The manager entrypoint in [cmd/main.go](cmd/main.go) also reads `OIDC_PROVIDER_ARN` and `OIDC_PROVIDER_URL` from the environment for IRSA-related setup.
+Kubernetes manifests:
 
-## Storage
+- [config/crd](config/crd)
+- [config/rbac](config/rbac)
+- [config/manager](config/manager)
+- [config/samples](config/samples)
 
-Storage support is split between the API and controller packages:
+Terraform layouts:
 
-- AWS storage flows live under [internal/controller/s3](internal/controller/s3)
-- Akamai object storage has API support and a placeholder controller path under [internal/controller/Akamai-Obj-Str](internal/controller/Akamai-Obj-Str)
-- Storage status is surfaced on the Application status object
+- [Terraform/AWS](Terraform/AWS)
+- [Terraform/Akamai-Linode](Terraform/Akamai-Linode)
 
-## Terraform Layout
+## Terraform Infrastructure
 
-Terraform lives under [Terraform/AWS](Terraform/AWS).
+AWS infrastructure uses [Terraform/AWS/environments/dev](Terraform/AWS/environments/dev) with modules for VPC, networking, IAM, EKS, and IRSA.
 
-Current environment and module layout:
+Akamai/Linode infrastructure is organized under [Terraform/Akamai-Linode/modules](Terraform/Akamai-Linode/modules) with modules for LKE, networking, and firewall, plus environment directories.
 
-- modules/vpc
-- modules/networking
-- modules/iam
-- modules/eks
-- modules/irsa
-- modules/monitoring
-- environments/dev
-- environments/prod
+Current repository state:
 
-Current state of those folders:
+- AWS dev environment is active
+- Akamai/Linode dev environment exists
+- prod environment directories exist and are currently incomplete
 
-- dev contains the active composition
-- prod exists but is empty
-- monitoring is empty
-- irsa contains implementation
+## Installation
 
-The dev composition wires VPC, networking, IAM, EKS, and IRSA together and includes the IAM policy used by the operator for S3 and IRSA permissions.
+### Prerequisites
 
-## Deployment Workflow
-
-Prerequisites:
-
+- Kubernetes cluster
+- kubectl
 - Go 1.24+
 - Docker
-- kubectl
-- Access to a Kubernetes cluster
+- Terraform
+- Make
 
-Build and verify locally:
+### Deploy Operator
+
+Generate and install artifacts:
 
 ```sh
 make manifests
-make generate
-make test
-make build
-```
-
-Run the controller locally:
-
-```sh
-make run
-```
-
-Build and publish a container image:
-
-```sh
-make docker-build docker-push IMG=<registry>/forge-operator:<tag>
-```
-
-Install and deploy the controller:
-
-```sh
 make install
+```
+
+Deploy controller image:
+
+```sh
 make deploy IMG=<registry>/forge-operator:<tag>
 ```
 
-Apply the sample resource:
+Apply sample Application:
 
 ```sh
 kubectl apply -k config/samples/
 ```
 
-Clean up:
+Verify:
 
 ```sh
-kubectl delete -k config/samples/
-make undeploy
-make uninstall
+kubectl get pods -n forge-operator-system
 ```
 
-Sample manifest:
+### Leader Election
+
+Leader election is supported for high availability and can be enabled with:
+
+- --leader-elect=true
+
+Runtime wiring is in [cmd/main.go](cmd/main.go).
+
+## Example Application
+
+Sample custom resource:
 
 - [config/samples/forge_v1alpha1_application.yaml](config/samples/forge_v1alpha1_application.yaml)
 
-## Operational Notes
+## Development
 
-This repository is still under active refactor. Treat the README as a current implementation guide, not a release contract.
+Run tests:
 
-Before promoting a branch, verify the Go build, controller tests, and Terraform plan in your target environment.
+```sh
+make test
+```
 
-## Contributing
+Run controller locally:
 
-Before opening a PR:
+```sh
+make run
+```
 
-- Keep generated manifests and deepcopy code up to date
-- Run format, vet, and tests locally
-- Update the README if behavior or module wiring changes
+Regenerate code and manifests:
+
+```sh
+make generate
+make manifests
+```
+
+Build image:
+
+```sh
+make docker-build IMG=<image>
+```
+
+## Notes
+
+Forge Operator is under active development. Validate current build/test status and Terraform plan output in your target branch before production rollout.
 
 ## License
 
