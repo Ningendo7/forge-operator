@@ -43,6 +43,11 @@ func (m *Manager) CleanupBucket(
 		return fmt.Errorf("failed to delete objects in bucket %s: %w", m.bucket, err)
 	}
 
+	// Abort any in-progress multipart uploads so they don't linger after the bucket is gone
+	if err := m.abortMultipartUploads(ctx); err != nil {
+		return fmt.Errorf("failed to abort multipart uploads in bucket %s: %w", m.bucket, err)
+	}
+
 	// Now delete the bucket
 	if err := m.deleteBucket(ctx); err != nil {
 		return fmt.Errorf("failed to delete bucket %s: %w", m.bucket, err)
