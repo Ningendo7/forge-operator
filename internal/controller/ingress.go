@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,7 +29,7 @@ func (r *ApplicationReconciler) desiredIngress(
 					PathType: ingressSpec.PathType,
 					Backend: networkingv1.IngressBackend{
 						Service: &networkingv1.IngressServiceBackend{
-							Name: application.Name,
+							Name: naming.Service(application),
 							Port: networkingv1.ServiceBackendPort{Number: 80},
 						},
 					},
@@ -43,7 +44,7 @@ func (r *ApplicationReconciler) desiredIngress(
 			APIVersion: "networking.k8s.io/v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        application.Name,
+			Name:        naming.Ingress(application),
 			Namespace:   application.Namespace,
 			Labels:      labels,
 			Annotations: ingressSpec.Annotations,
@@ -66,7 +67,7 @@ func (r *ApplicationReconciler) reconcileIngress(
 	if application.Spec.Ingress == nil {
 		ing := &networkingv1.Ingress{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      application.Name,
+				Name:      naming.Ingress(application),
 				Namespace: application.Namespace,
 			},
 		}

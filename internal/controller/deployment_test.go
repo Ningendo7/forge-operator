@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -63,6 +64,142 @@ func TestDesiredDeployment_UsesApplicationImage(t *testing.T) {
 
 	if container.Image != "nginx:1.27" {
 		t.Fatalf("expected container image to be %q, got %q", "nginx:1.27", container.Image)
+	}
+}
+
+func TestDesiredDeployment_UsesApplicationEnv(t *testing.T) {
+	app := newTestApplication()
+	app.Spec.Env = []corev1.EnvVar{
+		{Name: "LOG_LEVEL", Value: "debug"},
+		{Name: "PORT", Value: "9090"},
+	}
+
+	r := &ApplicationReconciler{}
+	deployment := r.desiredDeployment(app)
+	container := deployment.Spec.Template.Spec.Containers[0]
+
+	if len(container.Env) != 2 {
+		t.Fatalf("expected 2 env vars, got %d", len(container.Env))
+	}
+	if container.Env[0].Name != "LOG_LEVEL" || container.Env[0].Value != "debug" {
+		t.Fatalf("expected LOG_LEVEL=debug, got %+v", container.Env[0])
+	}
+	if container.Env[1].Name != "PORT" || container.Env[1].Value != "9090" {
+		t.Fatalf("expected PORT=9090, got %+v", container.Env[1])
+	}
+}
+
+func TestDesiredDeployment_DefaultsToRestrictedSecurityContext(t *testing.T) {
+	app := newTestApplication()
+
+	r := &ApplicationReconciler{}
+	deployment := r.desiredDeployment(app)
+	podSpec := deployment.Spec.Template.Spec
+	container := podSpec.Containers[0]
+
+	if podSpec.SecurityContext == nil || podSpec.SecurityContext.RunAsNonRoot == nil || !*podSpec.SecurityContext.RunAsNonRoot {
+		t.Fatalf("expected default pod security context to set runAsNonRoot=true, got %#v", podSpec.SecurityContext)
+	}
+	if podSpec.SecurityContext.SeccompProfile == nil || podSpec.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Fatalf("expected default pod seccomp profile RuntimeDefault, got %#v", podSpec.SecurityContext.SeccompProfile)
+	}
+
+	if container.SecurityContext == nil {
+		t.Fatalf("expected default container security context to be set")
+	}
+	if container.SecurityContext.AllowPrivilegeEscalation == nil || *container.SecurityContext.AllowPrivilegeEscalation {
+		t.Fatalf("expected default allowPrivilegeEscalation=false, got %#v", container.SecurityContext.AllowPrivilegeEscalation)
+	}
+	if container.SecurityContext.Capabilities == nil || len(container.SecurityContext.Capabilities.Drop) != 1 || container.SecurityContext.Capabilities.Drop[0] != "ALL" {
+		t.Fatalf("expected default capabilities.drop=[ALL], got %#v", container.SecurityContext.Capabilities)
+	}
+}
+
+func TestDesiredDeployment_UsesConfiguredSecurityContext(t *testing.T) {
+	app := newTestApplication()
+	trueVal := true
+	app.Spec.PodSecurityContext = &corev1.PodSecurityContext{RunAsNonRoot: &trueVal}
+	app.Spec.Container.SecurityContext = &corev1.SecurityContext{ReadOnlyRootFilesystem: &trueVal}
+
+	r := &ApplicationReconciler{}
+	deployment := r.desiredDeployment(app)
+	podSpec := deployment.Spec.Template.Spec
+	container := podSpec.Containers[0]
+
+	if podSpec.SecurityContext != app.Spec.PodSecurityContext {
+		t.Fatalf("expected configured pod security context to be used as-is")
+	}
+	if container.SecurityContext == nil || container.SecurityContext.ReadOnlyRootFilesystem == nil || !*container.SecurityContext.ReadOnlyRootFilesystem {
+		t.Fatalf("expected configured container security context to be used, got %#v", container.SecurityContext)
+	}
+}
+
+func TestDesiredDeployment_UsesConfiguredProbes(t *testing.T) {
+	app := newTestApplication()
+	app.Spec.Container.LivenessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt(8080)}},
+	}
+	app.Spec.Container.ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromInt(8080)}},
+	}
+	app.Spec.Container.StartupProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(8080)}},
+	}
+
+	r := &ApplicationReconciler{}
+	deployment := r.desiredDeployment(app)
+	container := deployment.Spec.Template.Spec.Containers[0]
+
+	if container.LivenessProbe == nil || container.LivenessProbe.HTTPGet.Path != "/healthz" {
+		t.Fatalf("expected liveness probe to be set, got %#v", container.LivenessProbe)
+	}
+	if container.ReadinessProbe == nil || container.ReadinessProbe.HTTPGet.Path != "/readyz" {
+		t.Fatalf("expected readiness probe to be set, got %#v", container.ReadinessProbe)
+	}
+	if container.StartupProbe == nil || container.StartupProbe.TCPSocket == nil {
+		t.Fatalf("expected startup probe to be set, got %#v", container.StartupProbe)
+	}
+}
+
+func TestDesiredDeployment_DefaultsToTCPProbesOnContainerPort(t *testing.T) {
+	app := newTestApplication()
+
+	r := &ApplicationReconciler{}
+	deployment := r.desiredDeployment(app)
+	container := deployment.Spec.Template.Spec.Containers[0]
+
+	if container.LivenessProbe == nil || container.LivenessProbe.TCPSocket == nil {
+		t.Fatalf("expected default liveness probe to be a TCP check, got %#v", container.LivenessProbe)
+	}
+	if container.LivenessProbe.TCPSocket.Port.IntValue() != 8080 {
+		t.Errorf("expected default liveness probe to target port 8080, got %d", container.LivenessProbe.TCPSocket.Port.IntValue())
+	}
+
+	if container.ReadinessProbe == nil || container.ReadinessProbe.TCPSocket == nil {
+		t.Fatalf("expected default readiness probe to be a TCP check, got %#v", container.ReadinessProbe)
+	}
+	if container.ReadinessProbe.TCPSocket.Port.IntValue() != 8080 {
+		t.Errorf("expected default readiness probe to target port 8080, got %d", container.ReadinessProbe.TCPSocket.Port.IntValue())
+	}
+
+	if container.StartupProbe != nil {
+		t.Errorf("expected no default startup probe, got %#v", container.StartupProbe)
+	}
+}
+
+func TestDesiredDeployment_DefaultProbesTargetConfiguredPort(t *testing.T) {
+	app := newTestApplication()
+	app.Spec.Container.Port = 9090
+
+	r := &ApplicationReconciler{}
+	deployment := r.desiredDeployment(app)
+	container := deployment.Spec.Template.Spec.Containers[0]
+
+	if container.LivenessProbe.TCPSocket.Port.IntValue() != 9090 {
+		t.Errorf("expected default liveness probe to target configured port 9090, got %d", container.LivenessProbe.TCPSocket.Port.IntValue())
+	}
+	if container.ReadinessProbe.TCPSocket.Port.IntValue() != 9090 {
+		t.Errorf("expected default readiness probe to target configured port 9090, got %d", container.ReadinessProbe.TCPSocket.Port.IntValue())
 	}
 }
 
@@ -569,6 +706,47 @@ func TestReconcileDeployment_UsesResources(t *testing.T) {
 
 	if resources.Limits.Memory().String() != "1Gi" {
 		t.Fatalf("expected memory limit to be %q, got %q", "1Gi", resources.Limits.Memory().String())
+	}
+}
+
+func TestDesiredDeployment_DefaultsResourcesWhenUnset(t *testing.T) {
+	app := newTestApplication()
+
+	r := &ApplicationReconciler{}
+	deployment := r.desiredDeployment(app)
+	resources := deployment.Spec.Template.Spec.Containers[0].Resources
+
+	if resources.Requests.Cpu().String() != "100m" {
+		t.Errorf("expected default CPU request %q, got %q", "100m", resources.Requests.Cpu().String())
+	}
+	if resources.Requests.Memory().String() != "128Mi" {
+		t.Errorf("expected default memory request %q, got %q", "128Mi", resources.Requests.Memory().String())
+	}
+	if resources.Limits.Cpu().String() != "500m" {
+		t.Errorf("expected default CPU limit %q, got %q", "500m", resources.Limits.Cpu().String())
+	}
+	if resources.Limits.Memory().String() != "512Mi" {
+		t.Errorf("expected default memory limit %q, got %q", "512Mi", resources.Limits.Memory().String())
+	}
+}
+
+func TestDesiredDeployment_RespectsPartiallySpecifiedResources(t *testing.T) {
+	app := newTestApplication()
+	app.Spec.Resources = corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceMemory: resource.MustParse("1Gi"),
+		},
+	}
+
+	r := &ApplicationReconciler{}
+	deployment := r.desiredDeployment(app)
+	resources := deployment.Spec.Template.Spec.Containers[0].Resources
+
+	if resources.Limits.Memory().String() != "1Gi" {
+		t.Fatalf("expected the user-specified memory limit to be respected, got %q", resources.Limits.Memory().String())
+	}
+	if len(resources.Requests) != 0 {
+		t.Fatalf("expected no requests to be defaulted in when limits were explicitly set, got %#v", resources.Requests)
 	}
 }
 

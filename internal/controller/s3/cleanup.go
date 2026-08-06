@@ -14,7 +14,7 @@ import (
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 )
 
-// Helper to check for missing bucket errors in AWS SDK v2. This is necessary because the AWS SDK v2 does not provide a direct way to check for a "NoSuchBucket" error, and the error can be wrapped in different types.
+// isNotFoundError checks for a missing-bucket error across its several AWS SDK forms.
 func isNotFoundError(err error) bool {
 	var noSuchBucketErr *s3types.NoSuchBucket
 	if errors.As(err, &noSuchBucketErr) {

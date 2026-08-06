@@ -214,3 +214,39 @@ func TestFinalizeApplication_ReturnsErrorWhenAkamaiManagerCreationFails(t *testi
 		t.Fatalf("expected error when Akamai storage manager creation fails, got nil")
 	}
 }
+
+func TestFinalizeApplication_SetsStorageReadyCleanupFailedOnError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider:   forgev1alpha1.ProviderAWSS3,
+		Bucket:     "demo-bucket",
+		SecretName: "missing-creds",
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.finalizeApplication(context.Background(), app); err == nil {
+		t.Fatalf("expected error when AWS storage manager creation fails, got nil")
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+
+	var storageReady *metav1.Condition
+	for i := range got.Status.Conditions {
+		if got.Status.Conditions[i].Type == "StorageReady" {
+			storageReady = &got.Status.Conditions[i]
+		}
+	}
+	if storageReady == nil {
+		t.Fatalf("expected StorageReady condition to be set after cleanup failure")
+	}
+	if storageReady.Reason != "BucketCleanupFailed" {
+		t.Fatalf("expected reason BucketCleanupFailed, got %q", storageReady.Reason)
+	}
+}

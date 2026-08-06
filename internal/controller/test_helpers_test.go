@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
+	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -32,4 +34,20 @@ func (c *failingPatchClient) Patch(
 	opts ...client.PatchOption,
 ) error {
 	return fmt.Errorf("patch failed")
+}
+
+type mockS3StorageManager struct {
+	reconcileBucketFunc func(ctx context.Context) (*s3storage.StorageResult, error)
+}
+
+func (m *mockS3StorageManager) ReconcileBucket(ctx context.Context) (*s3storage.StorageResult, error) {
+	return m.reconcileBucketFunc(ctx)
+}
+
+type mockAkamaiStorageManager struct {
+	reconcileBucketFunc func(ctx context.Context) (*akamaiobjstr.StorageResult, error)
+}
+
+func (m *mockAkamaiStorageManager) ReconcileBucket(ctx context.Context) (*akamaiobjstr.StorageResult, error) {
+	return m.reconcileBucketFunc(ctx)
 }

@@ -19,7 +19,7 @@ func (s *StatusManager) IsPDBReady(
 	pdb := &policyv1.PodDisruptionBudget{}
 	err := s.client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, pdb)
 	if err != nil {
-		return false, "", client.IgnoreNotFound(err)
+		return false, fmt.Sprintf("PDB %s/%s not found:", namespace, name), client.IgnoreNotFound(err)
 	}
 
 	if pdb.Status.DisruptionsAllowed == 0 && pdb.Status.CurrentHealthy < pdb.Status.DesiredHealthy {

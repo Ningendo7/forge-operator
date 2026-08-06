@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,7 +38,7 @@ func (r *ApplicationReconciler) desiredPDB(
 			APIVersion: "policy/v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      application.Name + "-pdb",
+			Name:      naming.PDB(application),
 			Namespace: application.Namespace,
 			Labels:    labels,
 		},
@@ -56,7 +57,7 @@ func (r *ApplicationReconciler) reconcilePDB(
 	if application.Spec.PDB == nil {
 		pdb := &policyv1.PodDisruptionBudget{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      application.Name + "-pdb",
+				Name:      naming.PDB(application),
 				Namespace: application.Namespace,
 			},
 		}

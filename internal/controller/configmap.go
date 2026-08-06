@@ -48,6 +48,33 @@ func (r *ApplicationReconciler) desiredConfigMap(
 	}
 }
 
+// deleteStaleConfigMaps deletes ConfigMaps owned by application other than keepName,
+// so a rename or full disable can never orphan the previous one.
+func (r *ApplicationReconciler) deleteStaleConfigMaps(
+	ctx context.Context,
+	application *forgev1alpha1.Application,
+	keepName string,
+) error {
+	logger := logf.FromContext(ctx)
+
+	var list corev1.ConfigMapList
+	if err := r.List(ctx, &list, client.InNamespace(application.Namespace), client.MatchingLabels{"app": application.Name}); err != nil {
+		return fmt.Errorf("failed to list ConfigMaps for cleanup: %w", err)
+	}
+
+	for i := range list.Items {
+		cm := &list.Items[i]
+		if cm.Name == keepName || !metav1.IsControlledBy(cm, application) {
+			continue
+		}
+		if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
+			return fmt.Errorf("failed to delete stale ConfigMap %s: %w", cm.Name, err)
+		}
+		logger.Info("Deleted stale ConfigMap", "name", cm.Name)
+	}
+	return nil
+}
+
 func (r *ApplicationReconciler) reconcileConfigMap(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
@@ -55,21 +82,9 @@ func (r *ApplicationReconciler) reconcileConfigMap(
 
 	logger := logf.FromContext(ctx)
 
-	// Handle Toggling ConfigMap: If the ConfigMap is disabled, we should delete it if it exists
-	if application.Spec.ConfigMap == nil || len(application.Spec.ConfigMap.Data) == 0 {
-		cm := &corev1.ConfigMap{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      configResourceNameFor(application),
-				Namespace: application.Namespace,
-			},
-		}
-		if err := r.Delete(ctx, cm); client.IgnoreNotFound(err) != nil {
-			logger.Error(err, "Failed to delete disabled ConfigMap", "name", cm.Name)
-			return fmt.Errorf("failed to delete disabled ConfigMap: %w", err)
-		}
-
-		logger.Info("Successfully deleted disabled ConfigMap", "name", cm.Name)
-		return nil
+	// Presence of spec.config enables it, not whether data was provided.
+	if application.Spec.ConfigMap == nil {
+		return r.deleteStaleConfigMaps(ctx, application, "")
 	}
 
 	logger.Info("Reconciling ConfigMap")
@@ -90,6 +105,10 @@ func (r *ApplicationReconciler) reconcileConfigMap(
 	if err != nil {
 		logger.Error(err, "Failed to apply ConfigMap", "name", desired.Name)
 		return fmt.Errorf("failed to server-side apply ConfigMap: %w", err)
+	}
+
+	if err := r.deleteStaleConfigMaps(ctx, application, desired.Name); err != nil {
+		return fmt.Errorf("failed to clean up stale ConfigMap: %w", err)
 	}
 
 	logger.Info("Successfully reconciled ConfigMap", "name", desired.Name)

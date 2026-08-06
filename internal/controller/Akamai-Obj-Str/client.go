@@ -24,7 +24,7 @@ type AKAMAIAPI interface {
 	DeleteObjectStorageKey(ctx context.Context, keyID int) error
 }
 
-// Manager is responsible for managing Akamai/Linode interactions for the Application controller.
+// Manager handles Akamai/Linode interactions for the Application controller.
 type Manager struct {
 	k8sClient    client.Client
 	akamaiClient AKAMAIAPI

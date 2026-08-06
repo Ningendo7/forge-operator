@@ -5,9 +5,12 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -87,6 +90,109 @@ func (r *ApplicationReconciler) buildVolumeAndMounts(
 	return volumes, volumeMounts
 }
 
+// defaultPodSecurityContext applies when unspecified, for restricted-profile compliance.
+func defaultPodSecurityContext() *corev1.PodSecurityContext {
+	runAsNonRoot := true
+	return &corev1.PodSecurityContext{
+		RunAsNonRoot: &runAsNonRoot,
+		SeccompProfile: &corev1.SeccompProfile{
+			Type: corev1.SeccompProfileTypeRuntimeDefault,
+		},
+	}
+}
+
+// defaultContainerSecurityContext applies when unspecified. ReadOnlyRootFilesystem is left
+// unset since forcing it can break images not built to expect it.
+func defaultContainerSecurityContext() *corev1.SecurityContext {
+	runAsNonRoot := true
+	allowPrivilegeEscalation := false
+	return &corev1.SecurityContext{
+		RunAsNonRoot:             &runAsNonRoot,
+		AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		},
+	}
+}
+
+func podSecurityContextFor(application *forgev1alpha1.Application) *corev1.PodSecurityContext {
+	if application.Spec.PodSecurityContext != nil {
+		return application.Spec.PodSecurityContext
+	}
+	return defaultPodSecurityContext()
+}
+
+func containerSecurityContextFor(application *forgev1alpha1.Application) *corev1.SecurityContext {
+	if application.Spec.Container.SecurityContext != nil {
+		return application.Spec.Container.SecurityContext
+	}
+	return defaultContainerSecurityContext()
+}
+
+// defaultResources applies when neither requests nor limits are specified.
+func defaultResources() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("100m"),
+			corev1.ResourceMemory: resource.MustParse("128Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("500m"),
+			corev1.ResourceMemory: resource.MustParse("512Mi"),
+		},
+	}
+}
+
+// resourcesFor defaults only when both requests and limits are empty; a partial
+// spec is respected as-is rather than merged with defaults.
+func resourcesFor(application *forgev1alpha1.Application) corev1.ResourceRequirements {
+	res := application.Spec.Resources
+	if len(res.Requests) == 0 && len(res.Limits) == 0 {
+		return defaultResources()
+	}
+	return res
+}
+
+// defaultLivenessProbe uses a TCP check on the container port; guessing an HTTP
+// path could turn the safety net into a CrashLoopBackOff.
+func defaultLivenessProbe(port int32) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)},
+		},
+		InitialDelaySeconds: 10,
+		PeriodSeconds:       15,
+		TimeoutSeconds:      5,
+		FailureThreshold:    3,
+	}
+}
+
+func defaultReadinessProbe(port int32) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)},
+		},
+		InitialDelaySeconds: 5,
+		PeriodSeconds:       10,
+		TimeoutSeconds:      3,
+		FailureThreshold:    3,
+	}
+}
+
+func livenessProbeFor(application *forgev1alpha1.Application, port int32) *corev1.Probe {
+	if application.Spec.Container.LivenessProbe != nil {
+		return application.Spec.Container.LivenessProbe
+	}
+	return defaultLivenessProbe(port)
+}
+
+func readinessProbeFor(application *forgev1alpha1.Application, port int32) *corev1.Probe {
+	if application.Spec.Container.ReadinessProbe != nil {
+		return application.Spec.Container.ReadinessProbe
+	}
+	return defaultReadinessProbe(port)
+}
+
 func (r *ApplicationReconciler) desiredPodSpec(
 	application *forgev1alpha1.Application,
 ) corev1.PodSpec {
@@ -99,7 +205,7 @@ func (r *ApplicationReconciler) desiredPodSpec(
 	}
 
 	podSpec := corev1.PodSpec{
-
+		SecurityContext: podSecurityContextFor(application),
 		Containers: []corev1.Container{
 			{
 				Name:  application.Name,
@@ -109,8 +215,13 @@ func (r *ApplicationReconciler) desiredPodSpec(
 						ContainerPort: port,
 					},
 				},
-				Resources:    application.Spec.Resources,
-				VolumeMounts: volumeMounts,
+				Env:             application.Spec.Env,
+				Resources:       resourcesFor(application),
+				VolumeMounts:    volumeMounts,
+				SecurityContext: containerSecurityContextFor(application),
+				LivenessProbe:   livenessProbeFor(application, port),
+				ReadinessProbe:  readinessProbeFor(application, port),
+				StartupProbe:    application.Spec.Container.StartupProbe,
 			},
 		},
 		Volumes: volumes,
@@ -143,7 +254,7 @@ func (r *ApplicationReconciler) desiredDeployment(
 			Kind:       "Deployment",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      application.Name + "-deployment",
+			Name:      naming.Deployment(application),
 			Namespace: application.Namespace,
 		},
 		Spec: appsv1.DeploymentSpec{

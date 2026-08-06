@@ -91,6 +91,10 @@ type ApplicationSpec struct {
 	// Resource requests and limits.
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Pod-level security context. Defaults to a restricted profile if unset.
+	// +optional
+	PodSecurityContext *corev1.PodSecurityContext `json:"podSecurityContext,omitempty"`
 }
 
 // ApplicationStatus defines the observed state of Application.
@@ -101,15 +105,7 @@ type ApplicationStatus struct {
 	// For Kubernetes API conventions, see:
 	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
 
-	// conditions represent the current state of the Application resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// Conditions reflect current state: Available, Progressing, Degraded.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -194,6 +190,22 @@ type ContainerSpec struct {
 	// Mount path for the secret volume.
 	// +optional
 	SecretMountPath string `json:"secretMountPath,omitempty"`
+
+	// Container-level security context. Defaults to a restricted profile if unset.
+	// +optional
+	SecurityContext *corev1.SecurityContext `json:"securityContext,omitempty"`
+
+	// Liveness probe for the container.
+	// +optional
+	LivenessProbe *corev1.Probe `json:"livenessProbe,omitempty"`
+
+	// Readiness probe for the container.
+	// +optional
+	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
+
+	// Startup probe for the container.
+	// +optional
+	StartupProbe *corev1.Probe `json:"startupProbe,omitempty"`
 }
 
 // ConfigSpec defines the ConfigMap data that the operator manages.

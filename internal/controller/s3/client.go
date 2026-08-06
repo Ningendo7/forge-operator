@@ -42,7 +42,7 @@ type StorageResult struct {
 	RoleARN string
 }
 
-// Manager is responsible for managing S3 interactions for the Application controller.
+// Manager handles S3 interactions for the Application controller.
 type Manager struct {
 	k8sClient client.Client
 	s3client  S3API

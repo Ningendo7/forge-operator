@@ -14,19 +14,34 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
+// secretRoleLabel distinguishes the app-managed Secret from the storage credentials
+// Secret, since both carry the same "app" label and would otherwise be indistinguishable
+// when cleaning up stale/renamed resources.
+const secretRoleLabel = "forge.ningendo7.github.io/secret-role"
+
+const (
+	secretRoleApp     = "app"
+	secretRoleStorage = "storage"
+)
+
+// secretResourceNameFor names the operator-managed Secret from spec.secret.name,
+// independent of Container.SecretName which only drives what gets mounted.
+func secretResourceNameFor(application *forgev1alpha1.Application) string {
+	if application.Spec.Secret != nil && application.Spec.Secret.Name != "" {
+		return application.Spec.Secret.Name
+	}
+	return application.Name + "-secret"
+}
+
 func (r *ApplicationReconciler) desiredSecret(
 	application *forgev1alpha1.Application,
 ) *corev1.Secret {
 
-	labels := map[string]string{"app": application.Name}
-	name := application.Name + "-secret"
+	labels := map[string]string{"app": application.Name, secretRoleLabel: secretRoleApp}
 	secretType := corev1.SecretTypeOpaque
-	secretData := map[string]string{}
+	var secretData map[string]string
 
 	if application.Spec.Secret != nil {
-		if application.Spec.Secret.Name != "" {
-			name = application.Spec.Secret.Name
-		}
 		if application.Spec.Secret.Type != "" {
 			secretType = application.Spec.Secret.Type
 		}
@@ -39,13 +54,21 @@ func (r *ApplicationReconciler) desiredSecret(
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      secretResourceNameFor(application),
 			Namespace: application.Namespace,
 			Labels:    labels,
 		},
 		Type:       secretType,
 		StringData: secretData,
 	}
+}
+
+// storageSecretNameFor names the operator-managed storage credentials Secret.
+func storageSecretNameFor(application *forgev1alpha1.Application) string {
+	if application.Spec.Storage != nil && application.Spec.Storage.SecretName != "" {
+		return application.Spec.Storage.SecretName
+	}
+	return application.Name + "-storage"
 }
 
 func (r *ApplicationReconciler) desiredStorage(
@@ -56,10 +79,7 @@ func (r *ApplicationReconciler) desiredStorage(
 		return nil
 	}
 
-	name := application.Name + "-storage"
-	if application.Spec.Storage.SecretName != "" {
-		name = application.Spec.Storage.SecretName
-	}
+	name := storageSecretNameFor(application)
 
 	secretData := map[string]string{
 		"provider": string(application.Spec.Storage.Provider),
@@ -78,8 +98,7 @@ func (r *ApplicationReconciler) desiredStorage(
 		akamai := application.Status.Storage.Akamai
 		secretData["access_key"] = akamai.AccessKey
 
-		// only write secret data if we actually have it.
-		// This prevents overwriting the secret with empty values if the controller is restarted and the status is not yet populated.
+		// Avoid overwriting with empty value if status isn't populated yet.
 		if akamai.SecretKey != "" {
 			secretData["secret_key"] = akamai.SecretKey
 		}
@@ -95,11 +114,39 @@ func (r *ApplicationReconciler) desiredStorage(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: application.Namespace,
-			Labels:    map[string]string{"app": application.Name},
+			Labels:    map[string]string{"app": application.Name, secretRoleLabel: secretRoleStorage},
 		},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: secretData,
 	}
+}
+
+// deleteStaleSecrets deletes Secrets of the given role owned by application other than
+// keepName, so a rename or full disable can never orphan the previous one.
+func (r *ApplicationReconciler) deleteStaleSecrets(
+	ctx context.Context,
+	application *forgev1alpha1.Application,
+	role string,
+	keepName string,
+) error {
+	logger := logf.FromContext(ctx)
+
+	var list corev1.SecretList
+	if err := r.List(ctx, &list, client.InNamespace(application.Namespace), client.MatchingLabels{"app": application.Name, secretRoleLabel: role}); err != nil {
+		return fmt.Errorf("failed to list Secrets for cleanup: %w", err)
+	}
+
+	for i := range list.Items {
+		sec := &list.Items[i]
+		if sec.Name == keepName || !metav1.IsControlledBy(sec, application) {
+			continue
+		}
+		if err := r.Delete(ctx, sec); client.IgnoreNotFound(err) != nil {
+			return fmt.Errorf("failed to delete stale Secret %s: %w", sec.Name, err)
+		}
+		logger.Info("Deleted stale Secret", "name", sec.Name, "role", role)
+	}
+	return nil
 }
 
 func (r *ApplicationReconciler) reconcileSecret(
@@ -109,20 +156,9 @@ func (r *ApplicationReconciler) reconcileSecret(
 
 	logger := logf.FromContext(ctx)
 
-	if application.Spec.Secret == nil || len(application.Spec.Secret.StringData) == 0 {
-		sec := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      secretNameFor(application),
-				Namespace: application.Namespace,
-			},
-		}
-		if err := r.Delete(ctx, sec); client.IgnoreNotFound(err) != nil {
-			logger.Error(err, "Failed to delete disabled Secret", "name", sec.Name)
-			return fmt.Errorf("failed to delete disabled Secret: %w", err)
-		}
-
-		logger.Info("Successfully deleted disabled Secret", "name", sec.Name)
-		return nil
+	// Presence of spec.secret enables it, not whether data was provided.
+	if application.Spec.Secret == nil {
+		return r.deleteStaleSecrets(ctx, application, secretRoleApp, "")
 	}
 
 	logger.Info("Reconciling Secret")
@@ -145,6 +181,10 @@ func (r *ApplicationReconciler) reconcileSecret(
 		return fmt.Errorf("failed to server-side apply Secret: %w", err)
 	}
 
+	if err := r.deleteStaleSecrets(ctx, application, secretRoleApp, desired.Name); err != nil {
+		return fmt.Errorf("failed to clean up stale Secret: %w", err)
+	}
+
 	logger.Info("Successfully reconciled Secret", "name", desired.Name)
 	return nil
 }
@@ -156,26 +196,8 @@ func (r *ApplicationReconciler) reconcileStorageSecret(
 
 	logger := logf.FromContext(ctx)
 
-	secretName := application.Name + "-storage"
-	if application.Spec.Storage != nil && application.Spec.Storage.SecretName != "" {
-		secretName = application.Spec.Storage.SecretName
-	}
-
-	// Handle Toggling Storage Secret: If the Storage is disabled, we should delete the secret if it exists.
 	if application.Spec.Storage == nil {
-		sec := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      secretName,
-				Namespace: application.Namespace,
-			},
-		}
-		if err := r.Delete(ctx, sec); client.IgnoreNotFound(err) != nil {
-			logger.Error(err, "Failed to delete disabled Storage Secret", "name", sec.Name)
-			return fmt.Errorf("failed to delete disabled Storage Secret: %w", err)
-		}
-
-		logger.Info("Successfully deleted disabled Storage Secret", "name", sec.Name)
-		return nil
+		return r.deleteStaleSecrets(ctx, application, secretRoleStorage, "")
 	}
 
 	logger.Info("Reconciling Storage Secret")
@@ -199,6 +221,10 @@ func (r *ApplicationReconciler) reconcileStorageSecret(
 	if err != nil {
 		logger.Error(err, "Failed to apply Storage Secret", "name", desired.Name)
 		return fmt.Errorf("failed to server-side apply Storage Secret: %w", err)
+	}
+
+	if err := r.deleteStaleSecrets(ctx, application, secretRoleStorage, desired.Name); err != nil {
+		return fmt.Errorf("failed to clean up stale Storage Secret: %w", err)
 	}
 
 	logger.Info("Successfully reconciled Storage Secret", "name", desired.Name)

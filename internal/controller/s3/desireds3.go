@@ -128,10 +128,7 @@ func (m *Manager) ensureLifecyclePolicy(
 	ctx context.Context,
 ) error {
 
-	// Standard production lifecycle policy:
-	// - Abort incomplete multipart uploads after 7 days
-	// - Expire noncurrent versions after 30 days
-	// Transition current objects to Standard-IA after 30 days
+	// Abort stale multipart uploads at 7d, expire old versions and transition to Standard-IA at 30d.
 	input := &s3sdk.PutBucketLifecycleConfigurationInput{
 		Bucket: aws.String(m.bucket),
 		LifecycleConfiguration: &s3types.BucketLifecycleConfiguration{

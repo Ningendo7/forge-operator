@@ -7,6 +7,7 @@ import (
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
+	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -62,6 +63,9 @@ func (r *ApplicationReconciler) finalizeApplication(
 	if application.Spec.Storage != nil {
 		switch application.Spec.Storage.Provider {
 		case forgev1alpha1.ProviderAWSS3:
+			storagestatus.SetCleanupInProgress(application)
+			logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+
 			storageManager, err := s3storage.NewManager(
 				ctx,
 				r.Client,
@@ -71,24 +75,39 @@ func (r *ApplicationReconciler) finalizeApplication(
 				r.OIDCProviderURL,
 			)
 			if err != nil {
-				return fmt.Errorf("failed to create storage manager for cleanup: %w", err)
+				return r.failStorageCleanup(ctx, application, fmt.Errorf("failed to create storage manager for cleanup: %w", err))
 			}
 			if err := storageManager.CleanupBucket(ctx); err != nil {
-				return fmt.Errorf("failed to delete S3 bucket during cleanup: %w", err)
+				return r.failStorageCleanup(ctx, application, fmt.Errorf("failed to delete S3 bucket during cleanup: %w", err))
 			}
 		case forgev1alpha1.ProviderAkamaiObjectStorage:
+			storagestatus.SetCleanupInProgress(application)
+			logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+
 			storageManager, err := akamaiobjstr.NewManager(
 				ctx,
 				r.Client,
 				application,
 			)
 			if err != nil {
-				return fmt.Errorf("failed to create Akamai storage manager for cleanup: %w", err)
+				return r.failStorageCleanup(ctx, application, fmt.Errorf("failed to create Akamai storage manager for cleanup: %w", err))
 			}
 			if err := storageManager.DeleteBucket(ctx); err != nil {
-				return fmt.Errorf("failed to delete Akamai bucket during cleanup: %w", err)
+				return r.failStorageCleanup(ctx, application, fmt.Errorf("failed to delete Akamai bucket during cleanup: %w", err))
 			}
 		}
 	}
 	return nil
+}
+
+// failStorageCleanup records the StorageReady condition as cleanup-failed
+// (best-effort) and returns the original error unchanged.
+func (r *ApplicationReconciler) failStorageCleanup(
+	ctx context.Context,
+	application *forgev1alpha1.Application,
+	err error,
+) error {
+	storagestatus.SetCleanupFailed(application, err)
+	logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+	return err
 }

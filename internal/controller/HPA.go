@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,7 +54,7 @@ func (r *ApplicationReconciler) desiredHPA(
 			APIVersion: "autoscaling/v2",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      application.Name + "-hpa",
+			Name:      naming.HPA(application),
 			Namespace: application.Namespace,
 			Labels: map[string]string{
 				"app": application.Name,
@@ -63,7 +64,7 @@ func (r *ApplicationReconciler) desiredHPA(
 			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
 				APIVersion: "apps/v1",
 				Kind:       "Deployment",
-				Name:       application.Name + "-deployment",
+				Name:       naming.Deployment(application),
 			},
 			MinReplicas: &minReplicas,
 			MaxReplicas: maxReplicas,
@@ -95,7 +96,7 @@ func (r *ApplicationReconciler) reconcileHPA(
 	if application.Spec.Autoscaling == nil || desired == nil {
 		hpa := &autoscalingv2.HorizontalPodAutoscaler{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      application.Name + "-hpa",
+				Name:      naming.HPA(application),
 				Namespace: application.Namespace,
 			},
 		}

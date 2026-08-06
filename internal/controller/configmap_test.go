@@ -99,6 +99,59 @@ func TestReconcileConfigMap_CreatesConfigMap(t *testing.T) {
 	}
 }
 
+func TestReconcileConfigMap_CreatesWhenSpecPresentButDataEmpty(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.ConfigMap = &forgev1alpha1.ConfigSpec{}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileConfigMap(context.Background(), app); err != nil {
+		t.Fatalf("reconcileConfigMap returned error: %v", err)
+	}
+
+	cm := &corev1.ConfigMap{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-config", Namespace: "default"}, cm); err != nil {
+		t.Fatalf("expected ConfigMap to be created even with empty data, got: %v", err)
+	}
+	if cm.Data["app-name"] != app.Name {
+		t.Errorf("expected default data to be used, got %v", cm.Data)
+	}
+}
+
+func TestReconcileConfigMap_RenameCleansUpPreviousName(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.ConfigMap = &forgev1alpha1.ConfigSpec{Name: "old-name", Data: map[string]string{"foo": "bar"}}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileConfigMap(context.Background(), app); err != nil {
+		t.Fatalf("failed to create configmap: %v", err)
+	}
+
+	app.Spec.ConfigMap.Name = "new-name"
+	if err := r.reconcileConfigMap(context.Background(), app); err != nil {
+		t.Fatalf("reconcileConfigMap returned error on rename: %v", err)
+	}
+
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "new-name", Namespace: "default"}, &corev1.ConfigMap{}); err != nil {
+		t.Fatalf("expected new-name ConfigMap to exist: %v", err)
+	}
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "old-name", Namespace: "default"}, &corev1.ConfigMap{})
+	if err == nil {
+		t.Fatalf("expected old-name ConfigMap to have been cleaned up after rename")
+	}
+}
+
 func TestReconcileConfigMap_Idempotent(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)

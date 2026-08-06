@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -16,27 +17,34 @@ func (s *StatusManager) EvaluateComputeReadiness(
 ) (bool, string, error) {
 
 	svc := &corev1.Service{}
-	if err := s.client.Get(ctx, types.NamespacedName{Namespace: application.Namespace, Name: application.Name}, svc); err != nil {
+	if err := s.client.Get(ctx, types.NamespacedName{Namespace: application.Namespace, Name: naming.Service(application)}, svc); err != nil {
 		if client.IgnoreNotFound(err) == nil {
 			return false, fmt.Sprintf("Service %s/%s not found", application.Namespace, application.Name), nil
 		}
 		return false, fmt.Sprintf("Error fetching Service %s/%s: %v", application.Namespace, application.Name, err), err
 	}
 
-	ready, msg, err := s.IsDeploymentReady(ctx, application.Namespace, application.Name)
+	ready, msg, err := s.IsDeploymentReady(ctx, application.Namespace, naming.Deployment(application))
 	if !ready || err != nil {
 		return ready, msg, err
 	}
 
 	if application.Spec.Ingress != nil {
-		ready, msg, err := s.IsIngressReady(ctx, application.Namespace, application.Name)
+		ready, msg, err := s.IsIngressReady(ctx, application.Namespace, naming.Ingress(application))
 		if !ready || err != nil {
 			return ready, msg, err
 		}
 	}
 
 	if application.Spec.Autoscaling != nil {
-		ready, msg, err := s.IsHPAReady(ctx, application.Namespace, application.Name)
+		ready, msg, err := s.IsHPAReady(ctx, application.Namespace, naming.HPA(application))
+		if !ready || err != nil {
+			return ready, msg, err
+		}
+	}
+
+	if application.Spec.PDB != nil {
+		ready, msg, err := s.IsPDBReady(ctx, application.Namespace, naming.PDB(application))
 		if !ready || err != nil {
 			return ready, msg, err
 		}

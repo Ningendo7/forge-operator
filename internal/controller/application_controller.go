@@ -18,9 +18,10 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
-	autoscalingv1 "k8s.io/api/autoscaling/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
@@ -33,6 +34,9 @@ import (
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
 )
+
+// readinessRequeueInterval is how soon Reconcile re-checks readiness when not yet ready.
+const readinessRequeueInterval = 10 * time.Second
 
 // ApplicationReconciler reconciles a Application object
 type ApplicationReconciler struct {
@@ -54,15 +58,7 @@ type ApplicationReconciler struct {
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the Application object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/reconcile
+// Reconcile drives the cluster state toward the Application's desired state.
 func (r *ApplicationReconciler) Reconcile(
 	ctx context.Context,
 	req ctrl.Request,
@@ -93,19 +89,31 @@ func (r *ApplicationReconciler) Reconcile(
 
 	if err := r.ensureDesiredState(ctx, application); err != nil {
 		logger.Error(err, "Failed to reconcile desired state", "name", req.Name, "namespace", req.Namespace)
-		return ctrl.Result{}, err
-	}
-
-	if err := r.StatusManager.UpdateStatus(ctx, application); err != nil {
 		if statusErr := r.StatusManager.SetFailed(ctx, application, err); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
-		logger.Error(err, "Failed to update Application status", "name", req.Name, "namespace", req.Namespace)
 		return ctrl.Result{}, err
 	}
 
+	ready, reason, err := r.StatusManager.EvaluateComputeReadiness(ctx, application)
+	if err != nil {
+		logger.Error(err, "Failed to evaluate Application readiness", "name", req.Name, "namespace", req.Namespace)
+		if statusErr := r.StatusManager.SetFailed(ctx, application, err); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, err
+	}
+
+	if !ready {
+		logger.Info("Application not yet ready", "name", req.Name, "namespace", req.Namespace, "reason", reason)
+		if err := r.StatusManager.SetReconciling(ctx, application, reason); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: readinessRequeueInterval}, nil
+	}
+
 	logger.Info("Successfully reconciled Application", "name", req.Name, "namespace", req.Namespace)
-	if err := r.StatusManager.SetReady(ctx, application, "Application reconciled successfully"); err != nil {
+	if err := r.StatusManager.SetReady(ctx, application, reason); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -121,7 +129,7 @@ func (r *ApplicationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
 		Owns(&networkingv1.Ingress{}).
-		Owns(&autoscalingv1.HorizontalPodAutoscaler{}).
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
 		Owns(&corev1.ServiceAccount{}).
 		Watches(

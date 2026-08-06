@@ -13,6 +13,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+func newTestApp() *forgev1alpha1.Application {
+	return &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+	}
+}
+
 // newHTTPStatusError builds an error that unwraps to an awshttp.ResponseError
 // with the given HTTP status code, mirroring what the AWS SDK returns for
 // untyped API errors.

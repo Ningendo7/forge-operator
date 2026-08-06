@@ -1,4 +1,4 @@
-package s3storage
+package storagestatus
 
 import (
 	"errors"
@@ -15,11 +15,20 @@ func newTestApp() *forgev1alpha1.Application {
 	}
 }
 
-func TestSetStorageReady_SetsConditionAndStatus(t *testing.T) {
+func findCondition(app *forgev1alpha1.Application, condType string) *metav1.Condition {
+	for i := range app.Status.Conditions {
+		if app.Status.Conditions[i].Type == condType {
+			return &app.Status.Conditions[i]
+		}
+	}
+	return nil
+}
+
+func TestSetReady_SetsConditionAndStatus(t *testing.T) {
 	app := newTestApp()
 	status := &forgev1alpha1.StorageStatus{Provider: forgev1alpha1.ProviderAWSS3, Bucket: "demo-bucket"}
 
-	SetStorageReady(app, status, "bucket ready")
+	SetReady(app, status, "bucket ready")
 
 	if app.Status.Storage != status {
 		t.Fatalf("expected status.Storage to be set")
@@ -40,14 +49,14 @@ func TestSetStorageReady_SetsConditionAndStatus(t *testing.T) {
 	}
 }
 
-func TestSetStorageReady_NilAppIsNoOp(t *testing.T) {
-	SetStorageReady(nil, &forgev1alpha1.StorageStatus{}, "should not panic")
+func TestSetReady_NilAppIsNoOp(t *testing.T) {
+	SetReady(nil, &forgev1alpha1.StorageStatus{}, "should not panic")
 }
 
-func TestSetStorageNotReady_SetsConditionFalse(t *testing.T) {
+func TestSetNotReady_SetsConditionFalse(t *testing.T) {
 	app := newTestApp()
 
-	SetStorageNotReady(app, errors.New("boom"))
+	SetNotReady(app, errors.New("boom"))
 
 	cond := findCondition(app, StorageReady)
 	if cond == nil {
@@ -64,10 +73,10 @@ func TestSetStorageNotReady_SetsConditionFalse(t *testing.T) {
 	}
 }
 
-func TestSetStorageNotReady_NilErrorUsesDefaultMessage(t *testing.T) {
+func TestSetNotReady_NilErrorUsesDefaultMessage(t *testing.T) {
 	app := newTestApp()
 
-	SetStorageNotReady(app, nil)
+	SetNotReady(app, nil)
 
 	cond := findCondition(app, StorageReady)
 	if cond == nil {
@@ -78,11 +87,11 @@ func TestSetStorageNotReady_NilErrorUsesDefaultMessage(t *testing.T) {
 	}
 }
 
-func TestSetStorageNotReady_TruncatesLongErrorMessage(t *testing.T) {
+func TestSetNotReady_TruncatesLongErrorMessage(t *testing.T) {
 	app := newTestApp()
 	longMsg := strings.Repeat("x", MaxErrorMessageLength+50)
 
-	SetStorageNotReady(app, errors.New(longMsg))
+	SetNotReady(app, errors.New(longMsg))
 
 	cond := findCondition(app, StorageReady)
 	if cond == nil {
@@ -96,10 +105,10 @@ func TestSetStorageNotReady_TruncatesLongErrorMessage(t *testing.T) {
 	}
 }
 
-func TestSetStorageCleanupInProgress_SetsConditionFalse(t *testing.T) {
+func TestSetCleanupInProgress_SetsConditionFalse(t *testing.T) {
 	app := newTestApp()
 
-	SetStorageCleanupInProgress(app)
+	SetCleanupInProgress(app)
 
 	cond := findCondition(app, StorageReady)
 	if cond == nil {
@@ -113,10 +122,10 @@ func TestSetStorageCleanupInProgress_SetsConditionFalse(t *testing.T) {
 	}
 }
 
-func TestSetStorageCleanupFailed_SetsConditionFalse(t *testing.T) {
+func TestSetCleanupFailed_SetsConditionFalse(t *testing.T) {
 	app := newTestApp()
 
-	SetStorageCleanupFailed(app, errors.New("cleanup boom"))
+	SetCleanupFailed(app, errors.New("cleanup boom"))
 
 	cond := findCondition(app, StorageReady)
 	if cond == nil {
@@ -128,6 +137,18 @@ func TestSetStorageCleanupFailed_SetsConditionFalse(t *testing.T) {
 	if !strings.Contains(cond.Message, "cleanup boom") {
 		t.Errorf("expected message to contain %q, got %q", "cleanup boom", cond.Message)
 	}
+}
+
+func TestSetCleanupFailed_NilAppIsNoOp(t *testing.T) {
+	SetCleanupFailed(nil, errors.New("boom"))
+}
+
+func TestSetCleanupInProgress_NilAppIsNoOp(t *testing.T) {
+	SetCleanupInProgress(nil)
+}
+
+func TestSetNotReady_NilAppIsNoOp(t *testing.T) {
+	SetNotReady(nil, errors.New("boom"))
 }
 
 func TestTruncateMessage(t *testing.T) {
@@ -150,11 +171,17 @@ func TestTruncateMessage(t *testing.T) {
 	}
 }
 
-func findCondition(app *forgev1alpha1.Application, condType string) *metav1.Condition {
-	for i := range app.Status.Conditions {
-		if app.Status.Conditions[i].Type == condType {
-			return &app.Status.Conditions[i]
-		}
+func TestSetReadyThenNotReady_UpdatesSameConditionInPlace(t *testing.T) {
+	app := newTestApp()
+
+	SetReady(app, &forgev1alpha1.StorageStatus{}, "ready")
+	SetNotReady(app, errors.New("now failing"))
+
+	if len(app.Status.Conditions) != 1 {
+		t.Fatalf("expected exactly 1 StorageReady condition, got %d", len(app.Status.Conditions))
 	}
-	return nil
+	cond := findCondition(app, StorageReady)
+	if cond.Status != metav1.ConditionFalse {
+		t.Fatalf("expected condition to flip to False, got %q", cond.Status)
+	}
 }

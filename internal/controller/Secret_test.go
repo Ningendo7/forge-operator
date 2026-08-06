@@ -91,6 +91,121 @@ func TestReconcileSecret_CreatesSecret(t *testing.T) {
 	}
 }
 
+func TestReconcileSecret_CreatesWhenSpecPresentButDataEmpty(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Secret = &forgev1alpha1.SecretSpec{}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileSecret(context.Background(), app); err != nil {
+		t.Fatalf("reconcileSecret returned error: %v", err)
+	}
+
+	secret := &corev1.Secret{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-secret", Namespace: "default"}, secret); err != nil {
+		t.Fatalf("expected Secret to be created even with empty data, got: %v", err)
+	}
+}
+
+func TestReconcileSecret_UsesManagedNameIndependentOfContainerMountRef(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Container.SecretName = "some-other-preexisting-secret"
+	app.Spec.Secret = &forgev1alpha1.SecretSpec{
+		Name:       "custom-managed-secret",
+		StringData: map[string]string{"API_KEY": "abc123"},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileSecret(context.Background(), app); err != nil {
+		t.Fatalf("failed to create secret: %v", err)
+	}
+
+	// Disabling spec.secret must delete the managed secret, not the unrelated
+	// Container.SecretName mount reference.
+	app.Spec.Secret = nil
+	if err := r.reconcileSecret(context.Background(), app); err != nil {
+		t.Fatalf("reconcileSecret returned error on disable: %v", err)
+	}
+
+	deleted := &corev1.Secret{}
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "custom-managed-secret", Namespace: "default"}, deleted)
+	if err == nil {
+		t.Fatalf("expected managed Secret custom-managed-secret to be deleted, but it still exists")
+	}
+}
+
+func TestReconcileSecret_RenameCleansUpPreviousName(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Secret = &forgev1alpha1.SecretSpec{
+		Name:       "old-name",
+		StringData: map[string]string{"API_KEY": "abc123"},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileSecret(context.Background(), app); err != nil {
+		t.Fatalf("failed to create secret: %v", err)
+	}
+
+	app.Spec.Secret.Name = "new-name"
+	if err := r.reconcileSecret(context.Background(), app); err != nil {
+		t.Fatalf("reconcileSecret returned error on rename: %v", err)
+	}
+
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "new-name", Namespace: "default"}, &corev1.Secret{}); err != nil {
+		t.Fatalf("expected new-name Secret to exist: %v", err)
+	}
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "old-name", Namespace: "default"}, &corev1.Secret{})
+	if err == nil {
+		t.Fatalf("expected old-name Secret to have been cleaned up after rename")
+	}
+}
+
+func TestReconcileSecret_DisablingAppSecretDoesNotDeleteStorageSecret(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Secret = &forgev1alpha1.SecretSpec{StringData: map[string]string{"API_KEY": "abc123"}}
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Provider: forgev1alpha1.ProviderAWSS3, Bucket: "demo-bucket"}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileSecret(context.Background(), app); err != nil {
+		t.Fatalf("failed to create app secret: %v", err)
+	}
+	if err := r.reconcileStorageSecret(context.Background(), app); err != nil {
+		t.Fatalf("failed to create storage secret: %v", err)
+	}
+
+	app.Spec.Secret = nil
+	if err := r.reconcileSecret(context.Background(), app); err != nil {
+		t.Fatalf("reconcileSecret returned error on disable: %v", err)
+	}
+
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-storage", Namespace: "default"}, &corev1.Secret{}); err != nil {
+		t.Fatalf("expected storage Secret to survive disabling the unrelated app Secret: %v", err)
+	}
+}
+
 func TestReconcileSecret_Idempotent(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)

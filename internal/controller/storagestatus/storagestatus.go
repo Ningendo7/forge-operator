@@ -1,4 +1,6 @@
-package s3storage
+// Package storagestatus is the single source of truth for the StorageReady
+// condition, shared by the AWS and Akamai backends so their Reasons don't drift.
+package storagestatus
 
 import (
 	"fmt"
@@ -29,7 +31,8 @@ func truncateMessage(
 	return message
 }
 
-func SetStorageReady(
+// SetReady marks storage as provisioned and records the given status payload.
+func SetReady(
 	app *forgev1alpha1.Application,
 	storageStatus *forgev1alpha1.StorageStatus,
 	message string,
@@ -53,7 +56,8 @@ func SetStorageReady(
 	)
 }
 
-func SetStorageNotReady(
+// SetNotReady marks storage provisioning as failed.
+func SetNotReady(
 	app *forgev1alpha1.Application,
 	err error,
 ) {
@@ -77,7 +81,9 @@ func SetStorageNotReady(
 	)
 }
 
-func SetStorageCleanupInProgress(
+// SetCleanupInProgress marks storage teardown as underway, e.g. while a
+// finalizer is deleting the backing bucket.
+func SetCleanupInProgress(
 	app *forgev1alpha1.Application,
 ) {
 
@@ -97,7 +103,8 @@ func SetStorageCleanupInProgress(
 	)
 }
 
-func SetStorageCleanupFailed(
+// SetCleanupFailed marks storage teardown as failed.
+func SetCleanupFailed(
 	app *forgev1alpha1.Application,
 	err error,
 ) {
