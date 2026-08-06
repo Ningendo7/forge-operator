@@ -7,36 +7,31 @@ import (
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 
 	appsv1 "k8s.io/api/apps/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestDesiredDeployment_DefaultReplicas(t *testing.T) {
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-		},
-	}
+	app := newTestApplication()
 
 	r := &ApplicationReconciler{}
 	deployment := r.desiredDeployment(app)
 
 	if deployment.Name != "demo-app-deployment" {
-		t.Fatalf("expected deployment name %q, got %q", 
-		"demo-app", 
-		deployment.Name)
+		t.Fatalf("expected deployment name %q, got %q",
+			"demo-app",
+			deployment.Name)
 	}
 
 	if deployment.Namespace != "default" {
-		t.Fatalf("expected deployment namespace %q, got %q", 
-		"default", 
-		deployment.Namespace)
+		t.Fatalf("expected deployment namespace %q, got %q",
+			"default",
+			deployment.Namespace)
 	}
 
 	if *deployment.Spec.Replicas != 1 {
@@ -47,13 +42,8 @@ func TestDesiredDeployment_DefaultReplicas(t *testing.T) {
 func TestDesiredDeployment_ConfiguredReplicas(t *testing.T) {
 	replicas := int32(3)
 
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image:    "nginx:latest",
-			Replicas: &replicas,
-		},
-	}
+	app := newTestApplication()
+	app.Spec.Replicas = &replicas
 
 	r := &ApplicationReconciler{}
 	deployment := r.desiredDeployment(app)
@@ -64,12 +54,8 @@ func TestDesiredDeployment_ConfiguredReplicas(t *testing.T) {
 }
 
 func TestDesiredDeployment_UsesApplicationImage(t *testing.T) {
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:1.27",
-		},
-	}
+	app := newTestApplication()
+	app.Spec.Image = "nginx:1.27"
 
 	r := &ApplicationReconciler{}
 	deployment := r.desiredDeployment(app)
@@ -81,12 +67,7 @@ func TestDesiredDeployment_UsesApplicationImage(t *testing.T) {
 }
 
 func TestDesiredDeployment_DefaultContainerPort(t *testing.T) {
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-		},
-	}
+	app := newTestApplication()
 
 	r := &ApplicationReconciler{}
 	deployment := r.desiredDeployment(app)
@@ -99,14 +80,9 @@ func TestDesiredDeployment_DefaultContainerPort(t *testing.T) {
 
 func TestDesiredDeployment_ConfiguredContainerPort(t *testing.T) {
 	port := int32(9090)
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-			Container: forgev1alpha1.ContainerSpec{
-				Port: port,
-			},
-		},
+	app := newTestApplication()
+	app.Spec.Container = forgev1alpha1.ContainerSpec{
+		Port: port,
 	}
 
 	r := &ApplicationReconciler{}
@@ -119,14 +95,9 @@ func TestDesiredDeployment_ConfiguredContainerPort(t *testing.T) {
 }
 
 func TestBuildVolumeandMounts_ConfigMap(t *testing.T) {
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-			Container: forgev1alpha1.ContainerSpec{
-				ConfigMapName: "custom-config",
-			},
-		},
+	app := newTestApplication()
+	app.Spec.Container = forgev1alpha1.ContainerSpec{
+		ConfigMapName: "custom-config",
 	}
 
 	r := &ApplicationReconciler{}
@@ -146,14 +117,9 @@ func TestBuildVolumeandMounts_ConfigMap(t *testing.T) {
 }
 
 func TestBuildVolumeandMounts_Secret(t *testing.T) {
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-			Container: forgev1alpha1.ContainerSpec{
-				SecretName: "custom-secret",
-			},
-		},
+	app := newTestApplication()
+	app.Spec.Container = forgev1alpha1.ContainerSpec{
+		SecretName: "custom-secret",
 	}
 
 	r := &ApplicationReconciler{}
@@ -173,14 +139,9 @@ func TestBuildVolumeandMounts_Secret(t *testing.T) {
 }
 
 func TestBuildVolumeandMounts_DefaultConfigMountPath(t *testing.T) {
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-			Container: forgev1alpha1.ContainerSpec{
-				ConfigMapName: "custom-config",
-			},
-		},
+	app := newTestApplication()
+	app.Spec.Container = forgev1alpha1.ContainerSpec{
+		ConfigMapName: "custom-config",
 	}
 
 	r := &ApplicationReconciler{}
@@ -192,15 +153,10 @@ func TestBuildVolumeandMounts_DefaultConfigMountPath(t *testing.T) {
 }
 
 func TestBuildVolumeandMounts_CustomConfigMountPath(t *testing.T) {
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-			Container: forgev1alpha1.ContainerSpec{
-				ConfigMapName:    "custom-config",
-				ConfigMountPath:  "/custom/config",
-			},
-		},
+	app := newTestApplication()
+	app.Spec.Container = forgev1alpha1.ContainerSpec{
+		ConfigMapName:   "custom-config",
+		ConfigMountPath: "/custom/config",
 	}
 
 	r := &ApplicationReconciler{}
@@ -212,14 +168,9 @@ func TestBuildVolumeandMounts_CustomConfigMountPath(t *testing.T) {
 }
 
 func TestBuildVolumeandMounts_DefaultSecretMountPath(t *testing.T) {
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-			Container: forgev1alpha1.ContainerSpec{
-				SecretName: "custom-secret",
-			},
-		},
+	app := newTestApplication()
+	app.Spec.Container = forgev1alpha1.ContainerSpec{
+		SecretName: "custom-secret",
 	}
 
 	r := &ApplicationReconciler{}
@@ -231,15 +182,10 @@ func TestBuildVolumeandMounts_DefaultSecretMountPath(t *testing.T) {
 }
 
 func TestBuildVolumeandMounts_CustomSecretMountPath(t *testing.T) {
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-			Container: forgev1alpha1.ContainerSpec{
-				SecretName:      "custom-secret",
-				SecretMountPath: "/custom/secret",
-			},
-		},
+	app := newTestApplication()
+	app.Spec.Container = forgev1alpha1.ContainerSpec{
+		SecretName:      "custom-secret",
+		SecretMountPath: "/custom/secret",
 	}
 
 	r := &ApplicationReconciler{}
@@ -252,22 +198,22 @@ func TestBuildVolumeandMounts_CustomSecretMountPath(t *testing.T) {
 
 func TestConfigMapNameFor(t *testing.T) {
 	tests := []struct {
-		name     string
-		application string
+		name          string
+		application   string
 		configMapName string
-		expected string
+		expected      string
 	}{
 		{
-			name:     "uses config map name from spec",
-			application: "demo-app",
+			name:          "uses config map name from spec",
+			application:   "demo-app",
 			configMapName: "custom-config",
-			expected: "custom-config",
+			expected:      "custom-config",
 		},
 		{
-			name:     "uses default config map name when not specified",
-			application: "demo-app",
+			name:          "uses default config map name when not specified",
+			application:   "demo-app",
 			configMapName: "",
-			expected: "demo-app-config",
+			expected:      "demo-app-config",
 		},
 	}
 
@@ -293,22 +239,22 @@ func TestConfigMapNameFor(t *testing.T) {
 
 func TestSecretNameFor(t *testing.T) {
 	tests := []struct {
-		name     string
+		name        string
 		application string
-		secretName string
-		expected string
+		secretName  string
+		expected    string
 	}{
 		{
-			name:     "uses secret name from spec",
+			name:        "uses secret name from spec",
 			application: "demo-app",
-			secretName: "custom-secret",
-			expected: "custom-secret",
+			secretName:  "custom-secret",
+			expected:    "custom-secret",
 		},
 		{
-			name:     "uses default secret name when not specified",
+			name:        "uses default secret name when not specified",
 			application: "demo-app",
-			secretName: "",
-			expected: "demo-app-secret",
+			secretName:  "",
+			expected:    "demo-app-secret",
 		},
 	}
 
@@ -337,32 +283,32 @@ func TestDesiredPodSpec_ServiceAccount(t *testing.T) {
 	doNotCreate := false
 
 	tests := []struct {
-		name     string
+		name           string
 		serviceAccount *forgev1alpha1.ServiceAccountSpec
-		expectedName string
+		expectedName   string
 	}{
 		{
-			name: "creates service account when not specified",
+			name:           "creates service account when not specified",
 			serviceAccount: nil,
-			expectedName: "demo-app-sa",
+			expectedName:   "demo-app-sa",
 		},
 		{
 			name: "creates service account when create is true",
-			serviceAccount : &forgev1alpha1.ServiceAccountSpec{
+			serviceAccount: &forgev1alpha1.ServiceAccountSpec{
 				Name: "custom-sa",
 			},
 			expectedName: "custom-sa",
 		},
 		{
 			name: "does not create service account when create is false",
-			serviceAccount : &forgev1alpha1.ServiceAccountSpec{
+			serviceAccount: &forgev1alpha1.ServiceAccountSpec{
 				Create: &doNotCreate,
 			},
 			expectedName: "",
 		},
 		{
 			name: "creates service account when create is true and name is specified",
-			serviceAccount : &forgev1alpha1.ServiceAccountSpec{
+			serviceAccount: &forgev1alpha1.ServiceAccountSpec{
 				Create: &create,
 			},
 			expectedName: "demo-app-sa",
@@ -374,7 +320,7 @@ func TestDesiredPodSpec_ServiceAccount(t *testing.T) {
 			app := &forgev1alpha1.Application{
 				ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
 				Spec: forgev1alpha1.ApplicationSpec{
-					Image: "nginx:latest",
+					Image:          "nginx:latest",
 					ServiceAccount: tt.serviceAccount,
 				},
 			}
@@ -394,12 +340,7 @@ func TestReconcileDeployment_CreatesDeployment(t *testing.T) {
 	_ = forgev1alpha1.AddToScheme(scheme)
 	_ = appsv1.AddToScheme(scheme)
 
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-		},
-	}
+	app := newTestApplication()
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{
@@ -425,12 +366,7 @@ func TestReconcileDeployment_Idempotent(t *testing.T) {
 	_ = forgev1alpha1.AddToScheme(scheme)
 	_ = appsv1.AddToScheme(scheme)
 
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-		},
-	}
+	app := newTestApplication()
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{
@@ -467,24 +403,24 @@ func TestReconcileDeployment_Idempotent(t *testing.T) {
 
 func TestReconcileDeployment_UpdatesFields(t *testing.T) {
 	tests := []struct {
-		name          string
-		Image  	     string
-		replicas      int32
-		expectedImage string
+		name             string
+		Image            string
+		replicas         int32
+		expectedImage    string
 		expectedReplicas int32
 	}{
 		{
-			name:          "updates replicas",
-			Image:         "nginx:latest",
-			replicas:      3,
-			expectedImage: "nginx:latest",
+			name:             "updates replicas",
+			Image:            "nginx:latest",
+			replicas:         3,
+			expectedImage:    "nginx:latest",
 			expectedReplicas: 3,
 		},
 		{
-			name:          "updates image",
-			Image:         "nginx:1.27",
-			replicas:      1,
-			expectedImage: "nginx:1.27",
+			name:             "updates image",
+			Image:            "nginx:1.27",
+			replicas:         1,
+			expectedImage:    "nginx:1.27",
 			expectedReplicas: 1,
 		},
 	}
@@ -495,12 +431,8 @@ func TestReconcileDeployment_UpdatesFields(t *testing.T) {
 			_ = forgev1alpha1.AddToScheme(scheme)
 			_ = appsv1.AddToScheme(scheme)
 
-			app := &forgev1alpha1.Application{
-				ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-				Spec: forgev1alpha1.ApplicationSpec{
-					Image: tt.Image,
-				},
-			}
+			app := newTestApplication()
+			app.Spec.Image = tt.Image
 
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
@@ -550,12 +482,8 @@ func TestReconcileDeployment_SetsOwnerReference(t *testing.T) {
 	_ = forgev1alpha1.AddToScheme(scheme)
 	_ = appsv1.AddToScheme(scheme)
 
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default", UID: "12345"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-		},
-	}
+	app := newTestApplication()
+	app.ObjectMeta.UID = "12345"
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
@@ -590,14 +518,9 @@ func TestReconcileDeployment_SetsOwnerReference(t *testing.T) {
 }
 
 func TestReconcileDeployment_UsesServiceAccount(t *testing.T) {
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-			ServiceAccount: &forgev1alpha1.ServiceAccountSpec{
-				Name: "custom-sa",
-			},
-		},
+	app := newTestApplication()
+	app.Spec.ServiceAccount = &forgev1alpha1.ServiceAccountSpec{
+		Name: "custom-sa",
 	}
 
 	r := &ApplicationReconciler{}
@@ -649,6 +572,56 @@ func TestReconcileDeployment_UsesResources(t *testing.T) {
 	}
 }
 
+func TestDesiredDeployment_SetsLabels(t *testing.T) {
+	app := newTestApplication()
+
+	r := &ApplicationReconciler{}
+	deployment := r.desiredDeployment(app)
+
+	expected := "demo-app"
+
+	if deployment.Spec.Selector.MatchLabels["app"] != expected {
+		t.Fatalf("expected selector label 'app' to be %q, got %q", expected, deployment.Spec.Selector.MatchLabels["app"])
+	}
+
+	if deployment.Spec.Template.Labels["app"] != expected {
+		t.Fatalf("expected template label 'app' to be %q, got %q", expected, deployment.Spec.Template.Labels["app"])
+	}
+}
+
+func TestBuildVolumeAndMounts_ConfigMapAndSecret(t *testing.T) {
+	app := newTestApplication()
+	app.Spec.Container = forgev1alpha1.ContainerSpec{
+		ConfigMapName: "custom-config",
+		SecretName:    "custom-secret",
+	}
+
+	r := &ApplicationReconciler{}
+	volumes, volumeMounts := r.buildVolumeAndMounts(app)
+
+	if len(volumes) != 2 {
+		t.Fatalf("expected 2 volumes, got %d", len(volumes))
+	}
+
+	if len(volumeMounts) != 2 {
+		t.Fatalf("expected 2 volume mounts, got %d", len(volumeMounts))
+	}
+
+	if volumes[0].ConfigMap == nil {
+		t.Fatalf("expected first volume to be a ConfigMap volume")
+	}
+	if volumes[0].ConfigMap.Name != "custom-config" {
+		t.Fatalf("expected ConfigMap volume name to be %q, got %q", "custom-config", volumes[0].ConfigMap.Name)
+	}
+
+	if volumes[1].Secret == nil {
+		t.Fatalf("expected second volume to be a Secret volume")
+	}
+	if volumes[1].Secret.SecretName != "custom-secret" {
+		t.Fatalf("expected Secret volume name to be %q, got %q", "custom-secret", volumes[1].Secret.SecretName)
+	}
+}
+
 // Unhappy path : Error Handling and Failure Scenarios
 func TestReconcileDeployment_ReturnsErrorWhenDeploymentPatchFails(t *testing.T) {
 	scheme := runtime.NewScheme()
@@ -656,12 +629,7 @@ func TestReconcileDeployment_ReturnsErrorWhenDeploymentPatchFails(t *testing.T) 
 	_ = forgev1alpha1.AddToScheme(scheme)
 	_ = appsv1.AddToScheme(scheme)
 
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-		},
-	}
+	app := newTestApplication()
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 

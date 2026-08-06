@@ -1,97 +1,91 @@
 package controller
 
 import (
-
 	"context"
 	"testing"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestDesiredService(t *testing.T) {
 	tests := []struct {
-		name        string
-		serviceType corev1.ServiceType
-		servicePort int32
-		containerPort int32
-		targetPort  *int32
-		expectedType corev1.ServiceType
-		expectedPort int32
+		name               string
+		serviceType        corev1.ServiceType
+		servicePort        int32
+		containerPort      int32
+		targetPort         *int32
+		expectedType       corev1.ServiceType
+		expectedPort       int32
 		expectedTargetPort int32
 	}{
 		{
-			name:        "uses default values",
-			serviceType: "",
-			servicePort: 0,
-			containerPort: 0,
-			targetPort:  nil,
-			expectedType: corev1.ServiceTypeClusterIP,
-			expectedPort: 80,
+			name:               "uses default values",
+			serviceType:        "",
+			servicePort:        0,
+			containerPort:      0,
+			targetPort:         nil,
+			expectedType:       corev1.ServiceTypeClusterIP,
+			expectedPort:       80,
 			expectedTargetPort: 8080,
 		},
 		{
-			name:        "uses custom service type",
-			serviceType: corev1.ServiceTypeNodePort,
-			servicePort: 8080,
-			containerPort: 9090,
-			targetPort:  nil,
-			expectedType: corev1.ServiceTypeNodePort,
-			expectedPort: 8080,
+			name:               "uses custom service type",
+			serviceType:        corev1.ServiceTypeNodePort,
+			servicePort:        8080,
+			containerPort:      9090,
+			targetPort:         nil,
+			expectedType:       corev1.ServiceTypeNodePort,
+			expectedPort:       8080,
 			expectedTargetPort: 9090,
 		},
 		{
-			name:        "uses custom service port",
-			serviceType: "",
-			servicePort: 3000,
-			containerPort: 8080,
-			targetPort:  nil,
-			expectedType: corev1.ServiceTypeClusterIP,
-			expectedPort: 3000,
+			name:               "uses custom service port",
+			serviceType:        "",
+			servicePort:        3000,
+			containerPort:      8080,
+			targetPort:         nil,
+			expectedType:       corev1.ServiceTypeClusterIP,
+			expectedPort:       3000,
 			expectedTargetPort: 8080,
 		},
 		{
-			name:        "uses container port as target port",
-			serviceType: "",
-			servicePort: 80,
-			containerPort: 9090,
-			targetPort:  nil,
-			expectedType: corev1.ServiceTypeClusterIP,
-			expectedPort: 80,
+			name:               "uses container port as target port",
+			serviceType:        "",
+			servicePort:        80,
+			containerPort:      9090,
+			targetPort:         nil,
+			expectedType:       corev1.ServiceTypeClusterIP,
+			expectedPort:       80,
 			expectedTargetPort: 9090,
 		},
 		{
-			name:        "service target port overrides",
-			serviceType: "",
-			servicePort: 80,
-			containerPort: 9090,
-			targetPort:  int32Ptr(7000),
-			expectedType: corev1.ServiceTypeClusterIP,
-			expectedPort: 80,
+			name:               "service target port overrides",
+			serviceType:        "",
+			servicePort:        80,
+			containerPort:      9090,
+			targetPort:         int32Ptr(7000),
+			expectedType:       corev1.ServiceTypeClusterIP,
+			expectedPort:       80,
 			expectedTargetPort: 7000,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			app := &forgev1alpha1.Application{
-				ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-				Spec: forgev1alpha1.ApplicationSpec{
-					Container: forgev1alpha1.ContainerSpec{
-						Port: tt.containerPort,
-					},
-					Service: forgev1alpha1.ServiceSpec{
-						Type: tt.serviceType,
-						Port: tt.servicePort,
-						TargetPort: tt.targetPort,
-					},
-				},
+			app := newTestApplication()
+			app.Spec.Container = forgev1alpha1.ContainerSpec{
+				Port: tt.containerPort,
+			}
+			app.Spec.Service = forgev1alpha1.ServiceSpec{
+				Type:       tt.serviceType,
+				Port:       tt.servicePort,
+				TargetPort: tt.targetPort,
 			}
 
 			r := &ApplicationReconciler{}
@@ -113,26 +107,19 @@ func TestDesiredService(t *testing.T) {
 	}
 }
 
-
-
 func int32Ptr(i int32) *int32 {
 	return &i
 }
-			
+
 func TestReconcileService_CreateService(t *testing.T) {
 	scheme := runtime.NewScheme()
 
 	_ = forgev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-			Service: forgev1alpha1.ServiceSpec{
-				Port: 80,
-			},
-		},
+	app := newTestApplication()
+	app.Spec.Service = forgev1alpha1.ServiceSpec{
+		Port: 80,
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -164,14 +151,9 @@ func TestReconcileService_Idempotent(t *testing.T) {
 	_ = forgev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-			Service: forgev1alpha1.ServiceSpec{
-				Port: 80,
-			},
-		},
+	app := newTestApplication()
+	app.Spec.Service = forgev1alpha1.ServiceSpec{
+		Port: 80,
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -210,14 +192,9 @@ func TestReconcileService_UpdateServicePort(t *testing.T) {
 	_ = forgev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-			Service: forgev1alpha1.ServiceSpec{
-				Port: 80,
-			},
-		},
+	app := newTestApplication()
+	app.Spec.Service = forgev1alpha1.ServiceSpec{
+		Port: 80,
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -259,14 +236,10 @@ func TestReconcileService_SetsControllerReference(t *testing.T) {
 	_ = forgev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default", UID: "12345"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-			Service: forgev1alpha1.ServiceSpec{
-				Port: 80,
-			},
-		},
+	app := newTestApplication()
+	app.ObjectMeta.UID = "12345"
+	app.Spec.Service = forgev1alpha1.ServiceSpec{
+		Port: 80,
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -308,14 +281,10 @@ func TestReconcileService_ReturnsErrorWhenPatchFails(t *testing.T) {
 	_ = forgev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
-	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default", UID: "12345"},
-		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
-			Service: forgev1alpha1.ServiceSpec{
-				Port: 80,
-			},
-		},
+	app := newTestApplication()
+	app.ObjectMeta.UID = "12345"
+	app.Spec.Service = forgev1alpha1.ServiceSpec{
+		Port: 80,
 	}
 
 	baseClient := fake.NewClientBuilder().WithScheme(scheme).Build()
