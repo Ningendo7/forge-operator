@@ -1,36 +1,36 @@
 resource "linode_lke_cluster" "lke-cluster" {
-  
-         label = var.cluster_name
-         region = var.region
-         k8s_version = var.kubernetes_version
 
-         control_plane {
+  label       = var.cluster_name
+  region      = var.region
+  k8s_version = var.kubernetes_version
 
-                  high_availability = var.enable_ha
-         }
+  control_plane {
 
-         pool {
+    high_availability = var.enable_ha
+  }
 
-         type  = var.node_type
-         
-         autoscaler {
-                  min = var.min_nodes
-                  max = var.max_nodes
-         }
+  pool {
 
-         }
+    type = var.node_type
+
+    autoscaler {
+      min = var.min_nodes
+      max = var.max_nodes
+    }
+
+  }
 
 
-         tags = ["managed-by:forge-operator"]
+  tags = concat(["managed-by:forge-operator"], var.tags)
 
-         subnet_id = var.subnet_id
+  subnet_id = var.subnet_id
 
-         # Prevent accidental deletion of the cluster. This is a safety measure to avoid accidental deletion of the cluster.
-         lifecycle {
+  # Prevent accidental deletion of the cluster. This is a safety measure to avoid accidental deletion of the cluster.
+  lifecycle {
 
-                  prevent_destroy = true
+    prevent_destroy = true
 
-         }
+  }
 }
 
 
