@@ -13,9 +13,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	testNamespace    = "default"
+	testAppName      = "demo-app"
+	testBucket       = "demo-bucket"
+	testRegion       = "us-east-1"
+	testEUWestRegion = "eu-west-1"
+	testSecretName   = "aws-creds"
+	testIRSARoleARN  = "arn:aws:iam::123456789012:role/app-irsa-demo-app"
+)
+
 func newTestApp() *forgev1alpha1.Application {
 	return &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
 	}
 }
 
@@ -38,11 +48,11 @@ func newTestManager(s3Client S3API, iamClient IAMAPI) *Manager {
 		s3client:  s3Client,
 		iamclient: iamClient,
 		app: &forgev1alpha1.Application{
-			ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
 		},
-		storage:            &forgev1alpha1.StorageSpec{Bucket: "demo-bucket", Region: "us-east-1"},
-		bucket:             "demo-bucket",
-		region:             "us-east-1",
+		storage:            &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testRegion},
+		bucket:             testBucket,
+		region:             testRegion,
 		serviceAccountName: "demo-app-sa",
 		OIDCProviderARN:    "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
 		OIDCProviderURL:    "https://oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",

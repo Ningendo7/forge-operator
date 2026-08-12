@@ -12,6 +12,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const defaultRegion = "us-east-1"
+
 // AKAMAIAPI defines the interface for interacting with Linode Object Storage.
 type AKAMAIAPI interface {
 	ListObjectStorageBuckets(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageBucket, error)
@@ -62,7 +64,7 @@ func NewManager(
 	bucket := storage.Bucket
 	region := storage.Region
 	if region == "" {
-		region = "us-east-1" // default cluster/region
+		region = defaultRegion
 	}
 
 	secretName := storage.SecretName

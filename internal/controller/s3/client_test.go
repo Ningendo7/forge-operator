@@ -31,17 +31,17 @@ func TestNewManager_DefaultsRegionWhenUnset(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	app := newTestApp()
-	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: "demo-bucket"}
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com")
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
-	if manager.region != "us-east-1" {
+	if manager.region != testRegion {
 		t.Fatalf("expected default region us-east-1, got %q", manager.region)
 	}
-	if manager.bucket != "demo-bucket" {
+	if manager.bucket != testBucket {
 		t.Fatalf("expected bucket demo-bucket, got %q", manager.bucket)
 	}
 }
@@ -52,14 +52,14 @@ func TestNewManager_UsesConfiguredRegion(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	app := newTestApp()
-	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: "demo-bucket", Region: "eu-west-1"}
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testEUWestRegion}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com")
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
-	if manager.region != "eu-west-1" {
+	if manager.region != testEUWestRegion {
 		t.Fatalf("expected region eu-west-1, got %q", manager.region)
 	}
 }
@@ -71,7 +71,7 @@ func TestNewManager_ReturnsErrorWhenCredentialsSecretMissing(t *testing.T) {
 
 	app := newTestApp()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Bucket:     "demo-bucket",
+		Bucket:     testBucket,
 		SecretName: "missing-secret",
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -89,11 +89,11 @@ func TestNewManager_ReturnsErrorWhenCredentialsKeysMissing(t *testing.T) {
 
 	app := newTestApp()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Bucket:     "demo-bucket",
-		SecretName: "aws-creds",
+		Bucket:     testBucket,
+		SecretName: testSecretName,
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "aws-creds", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testSecretName, Namespace: testNamespace},
 		Data:       map[string][]byte{"AWS_ACCESS_KEY_ID": []byte("id-only")},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
@@ -111,11 +111,11 @@ func TestNewManager_SucceedsWithCredentialsSecret(t *testing.T) {
 
 	app := newTestApp()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Bucket:     "demo-bucket",
-		SecretName: "aws-creds",
+		Bucket:     testBucket,
+		SecretName: testSecretName,
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "aws-creds", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testSecretName, Namespace: testNamespace},
 		Data: map[string][]byte{
 			"AWS_ACCESS_KEY_ID":     []byte("AKIAEXAMPLE"),
 			"AWS_SECRET_ACCESS_KEY": []byte("secretexample"),
@@ -138,7 +138,7 @@ func TestNewManager_PropagatesServiceAccountAndOIDCFields(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	app := newTestApp()
-	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: "demo-bucket"}
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	manager, err := NewManager(context.Background(), fakeClient, app, "custom-sa", "arn:oidc:role", "oidc.example.com/id/XYZ")

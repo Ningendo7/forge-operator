@@ -1,5 +1,8 @@
 # Copy this file to backend.tfvars (gitignored) and fill in real values, then run:
 #   terraform init -backend-config=backend.tfvars
+#
+# variables.tf has no defaults, so every apply/plan also needs:
+#   terraform plan -var-file=dev.tfvars
 
 bucket  = "<your-akamai-object-storage-bucket-for-tfstate>"
 key     = "terraform.tfstate"

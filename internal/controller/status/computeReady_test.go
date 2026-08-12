@@ -29,7 +29,7 @@ func newComputeReadyScheme() *runtime.Scheme {
 func readyDeployment() *appsv1.Deployment {
 	replicas := int32(1)
 	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-deployment", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testDeploymentName, Namespace: testNamespace},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
 		Status:     appsv1.DeploymentStatus{UpdatedReplicas: 1, AvailableReplicas: 1, ReadyReplicas: 1},
 	}
@@ -37,7 +37,7 @@ func readyDeployment() *appsv1.Deployment {
 
 func readyService() *corev1.Service {
 	return &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
 	}
 }
 
@@ -148,7 +148,7 @@ func TestEvaluateComputeReadiness_ReadyWhenAllEnabledResourcesAreReady(t *testin
 	scheme := newComputeReadyScheme()
 
 	ingress := &networkingv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
 		Status: networkingv1.IngressStatus{
 			LoadBalancer: networkingv1.IngressLoadBalancerStatus{
 				Ingress: []networkingv1.IngressLoadBalancerIngress{{IP: "203.0.113.5"}},
@@ -156,10 +156,10 @@ func TestEvaluateComputeReadiness_ReadyWhenAllEnabledResourcesAreReady(t *testin
 		},
 	}
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-hpa", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testHPAName, Namespace: testNamespace},
 	}
 	pdb := &policyv1.PodDisruptionBudget{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-pdb", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testPDBName, Namespace: testNamespace},
 		Status: policyv1.PodDisruptionBudgetStatus{
 			DisruptionsAllowed: 1,
 			CurrentHealthy:     1,

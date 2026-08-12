@@ -26,6 +26,6 @@ func (s *StatusManager) IsPDBReady(
 		return false, fmt.Sprintf("PDB unhealthy: %d/%d healthy pods", pdb.Status.CurrentHealthy, pdb.Status.DesiredHealthy), nil
 	}
 
-	return true, fmt.Sprintf("PDB active and healthy"), nil
+	return true, "PDB active and healthy", nil
 
 }

@@ -15,9 +15,9 @@ func newTestApp() *forgev1alpha1.Application {
 	}
 }
 
-func findCondition(app *forgev1alpha1.Application, condType string) *metav1.Condition {
+func findCondition(app *forgev1alpha1.Application) *metav1.Condition {
 	for i := range app.Status.Conditions {
-		if app.Status.Conditions[i].Type == condType {
+		if app.Status.Conditions[i].Type == StorageReady {
 			return &app.Status.Conditions[i]
 		}
 	}
@@ -34,7 +34,7 @@ func TestSetReady_SetsConditionAndStatus(t *testing.T) {
 		t.Fatalf("expected status.Storage to be set")
 	}
 
-	cond := findCondition(app, StorageReady)
+	cond := findCondition(app)
 	if cond == nil {
 		t.Fatalf("expected StorageReady condition to be set")
 	}
@@ -58,7 +58,7 @@ func TestSetNotReady_SetsConditionFalse(t *testing.T) {
 
 	SetNotReady(app, errors.New("boom"))
 
-	cond := findCondition(app, StorageReady)
+	cond := findCondition(app)
 	if cond == nil {
 		t.Fatalf("expected StorageReady condition to be set")
 	}
@@ -78,7 +78,7 @@ func TestSetNotReady_NilErrorUsesDefaultMessage(t *testing.T) {
 
 	SetNotReady(app, nil)
 
-	cond := findCondition(app, StorageReady)
+	cond := findCondition(app)
 	if cond == nil {
 		t.Fatalf("expected StorageReady condition to be set")
 	}
@@ -93,7 +93,7 @@ func TestSetNotReady_TruncatesLongErrorMessage(t *testing.T) {
 
 	SetNotReady(app, errors.New(longMsg))
 
-	cond := findCondition(app, StorageReady)
+	cond := findCondition(app)
 	if cond == nil {
 		t.Fatalf("expected StorageReady condition to be set")
 	}
@@ -110,7 +110,7 @@ func TestSetCleanupInProgress_SetsConditionFalse(t *testing.T) {
 
 	SetCleanupInProgress(app)
 
-	cond := findCondition(app, StorageReady)
+	cond := findCondition(app)
 	if cond == nil {
 		t.Fatalf("expected StorageReady condition to be set")
 	}
@@ -127,7 +127,7 @@ func TestSetCleanupFailed_SetsConditionFalse(t *testing.T) {
 
 	SetCleanupFailed(app, errors.New("cleanup boom"))
 
-	cond := findCondition(app, StorageReady)
+	cond := findCondition(app)
 	if cond == nil {
 		t.Fatalf("expected StorageReady condition to be set")
 	}
@@ -180,7 +180,7 @@ func TestSetReadyThenNotReady_UpdatesSameConditionInPlace(t *testing.T) {
 	if len(app.Status.Conditions) != 1 {
 		t.Fatalf("expected exactly 1 StorageReady condition, got %d", len(app.Status.Conditions))
 	}
-	cond := findCondition(app, StorageReady)
+	cond := findCondition(app)
 	if cond.Status != metav1.ConditionFalse {
 		t.Fatalf("expected condition to flip to False, got %q", cond.Status)
 	}

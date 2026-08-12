@@ -17,7 +17,7 @@ func (r *ApplicationReconciler) desiredIngress(
 	application *forgev1alpha1.Application,
 ) *networkingv1.Ingress {
 
-	labels := map[string]string{"app": application.Name}
+	labels := map[string]string{appLabelKey: application.Name}
 	ingressSpec := application.Spec.Ingress
 
 	rule := networkingv1.IngressRule{
@@ -91,7 +91,7 @@ func (r *ApplicationReconciler) reconcileIngress(
 	err := r.Patch(
 		ctx,
 		desired,
-		client.Apply,
+		client.Apply, //nolint:staticcheck // SSA patch via client.Apply is the standard controller-runtime pattern
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	)

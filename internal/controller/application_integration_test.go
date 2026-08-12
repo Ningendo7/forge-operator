@@ -46,11 +46,13 @@ var _ = Describe("Application integration", func() {
 	const namespace = "default"
 	const eventualTimeout = 10 * time.Second
 	const pollInterval = 200 * time.Millisecond
+	const cmAppOldName = "cm-app-old"
+	const finalizerAppName = "finalizer-app"
 
 	It("creates the core child resources for a minimal Application", func() {
 		app := &forgev1alpha1.Application{
 			ObjectMeta: metav1.ObjectMeta{Name: "core-app", Namespace: namespace},
-			Spec:       forgev1alpha1.ApplicationSpec{Image: "nginx:latest"},
+			Spec:       forgev1alpha1.ApplicationSpec{Image: testImage},
 		}
 		Expect(k8sClient.Create(ctx, app)).To(Succeed())
 		DeferCleanup(func() {
@@ -74,7 +76,7 @@ var _ = Describe("Application integration", func() {
 	It("becomes Ready once the Deployment reports healthy replicas", func() {
 		app := &forgev1alpha1.Application{
 			ObjectMeta: metav1.ObjectMeta{Name: "ready-app", Namespace: namespace},
-			Spec:       forgev1alpha1.ApplicationSpec{Image: "nginx:latest"},
+			Spec:       forgev1alpha1.ApplicationSpec{Image: testImage},
 		}
 		Expect(k8sClient.Create(ctx, app)).To(Succeed())
 		DeferCleanup(func() {
@@ -113,7 +115,7 @@ var _ = Describe("Application integration", func() {
 		app := &forgev1alpha1.Application{
 			ObjectMeta: metav1.ObjectMeta{Name: "hpa-app", Namespace: namespace},
 			Spec: forgev1alpha1.ApplicationSpec{
-				Image:       "nginx:latest",
+				Image:       testImage,
 				Autoscaling: &forgev1alpha1.AutoscalingSpec{MinReplicas: 1, MaxReplicas: 3},
 			},
 		}
@@ -145,7 +147,7 @@ var _ = Describe("Application integration", func() {
 		app := &forgev1alpha1.Application{
 			ObjectMeta: metav1.ObjectMeta{Name: "pdb-app", Namespace: namespace},
 			Spec: forgev1alpha1.ApplicationSpec{
-				Image: "nginx:latest",
+				Image: testImage,
 				PDB:   &forgev1alpha1.PDBSpec{MinAvailable: &minAvailable},
 			},
 		}
@@ -166,9 +168,9 @@ var _ = Describe("Application integration", func() {
 		app := &forgev1alpha1.Application{
 			ObjectMeta: metav1.ObjectMeta{Name: "ingress-app", Namespace: namespace},
 			Spec: forgev1alpha1.ApplicationSpec{
-				Image: "nginx:latest",
+				Image: testImage,
 				Ingress: &forgev1alpha1.IngressSpec{
-					Host:     "example.com",
+					Host:     testExampleHost,
 					Path:     "/",
 					PathType: &pathType,
 				},
@@ -183,15 +185,15 @@ var _ = Describe("Application integration", func() {
 		Eventually(func() error {
 			return k8sClient.Get(ctx, types.NamespacedName{Name: "ingress-app", Namespace: namespace}, ing)
 		}, eventualTimeout, pollInterval).Should(Succeed())
-		Expect(ing.Spec.Rules[0].Host).To(Equal("example.com"))
+		Expect(ing.Spec.Rules[0].Host).To(Equal(testExampleHost))
 	})
 
 	It("creates a ConfigMap even with empty data, and cleans up the old name after a rename", func() {
 		app := &forgev1alpha1.Application{
 			ObjectMeta: metav1.ObjectMeta{Name: "cm-app", Namespace: namespace},
 			Spec: forgev1alpha1.ApplicationSpec{
-				Image:     "nginx:latest",
-				ConfigMap: &forgev1alpha1.ConfigSpec{Name: "cm-app-old"},
+				Image:     testImage,
+				ConfigMap: &forgev1alpha1.ConfigSpec{Name: cmAppOldName},
 			},
 		}
 		Expect(k8sClient.Create(ctx, app)).To(Succeed())
@@ -200,7 +202,7 @@ var _ = Describe("Application integration", func() {
 		})
 
 		Eventually(func() error {
-			return k8sClient.Get(ctx, types.NamespacedName{Name: "cm-app-old", Namespace: namespace}, &corev1.ConfigMap{})
+			return k8sClient.Get(ctx, types.NamespacedName{Name: cmAppOldName, Namespace: namespace}, &corev1.ConfigMap{})
 		}, eventualTimeout, pollInterval).Should(Succeed())
 
 		Eventually(func() error {
@@ -216,21 +218,21 @@ var _ = Describe("Application integration", func() {
 		}, eventualTimeout, pollInterval).Should(Succeed())
 
 		Eventually(func() bool {
-			err := k8sClient.Get(ctx, types.NamespacedName{Name: "cm-app-old", Namespace: namespace}, &corev1.ConfigMap{})
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: cmAppOldName, Namespace: namespace}, &corev1.ConfigMap{})
 			return apierrors.IsNotFound(err)
 		}, eventualTimeout, pollInterval).Should(BeTrue())
 	})
 
 	It("attaches a finalizer and fully deletes the Application when no storage is configured", func() {
 		app := &forgev1alpha1.Application{
-			ObjectMeta: metav1.ObjectMeta{Name: "finalizer-app", Namespace: namespace},
-			Spec:       forgev1alpha1.ApplicationSpec{Image: "nginx:latest"},
+			ObjectMeta: metav1.ObjectMeta{Name: finalizerAppName, Namespace: namespace},
+			Spec:       forgev1alpha1.ApplicationSpec{Image: testImage},
 		}
 		Expect(k8sClient.Create(ctx, app)).To(Succeed())
 
 		Eventually(func() []string {
 			got := &forgev1alpha1.Application{}
-			if err := k8sClient.Get(ctx, types.NamespacedName{Name: "finalizer-app", Namespace: namespace}, got); err != nil {
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: finalizerAppName, Namespace: namespace}, got); err != nil {
 				return nil
 			}
 			return got.Finalizers
@@ -239,7 +241,7 @@ var _ = Describe("Application integration", func() {
 		Expect(k8sClient.Delete(ctx, app)).To(Succeed())
 
 		Eventually(func() bool {
-			err := k8sClient.Get(ctx, types.NamespacedName{Name: "finalizer-app", Namespace: namespace}, &forgev1alpha1.Application{})
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: finalizerAppName, Namespace: namespace}, &forgev1alpha1.Application{})
 			return apierrors.IsNotFound(err)
 		}, eventualTimeout, pollInterval).Should(BeTrue())
 	})

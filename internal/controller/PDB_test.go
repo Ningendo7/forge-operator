@@ -18,8 +18,8 @@ func TestDesiredPDB_DefaultsToNoBudget(t *testing.T) {
 	r := &ApplicationReconciler{}
 	pdb := r.desiredPDB(app)
 
-	if pdb.Name != "demo-app-pdb" {
-		t.Fatalf("expected pdb name %q, got %q", "demo-app-pdb", pdb.Name)
+	if pdb.Name != testPDBName {
+		t.Fatalf("expected pdb name %q, got %q", testPDBName, pdb.Name)
 	}
 	if pdb.Spec.MinAvailable != nil {
 		t.Fatalf("expected no minAvailable by default, got %#v", pdb.Spec.MinAvailable)
@@ -92,7 +92,7 @@ func TestReconcilePDB_CreatesPDB(t *testing.T) {
 	}
 
 	pdb := &policyv1.PodDisruptionBudget{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-pdb", Namespace: "default"}, pdb); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testPDBName, Namespace: testNamespace}, pdb); err != nil {
 		t.Fatalf("failed to get PodDisruptionBudget: %v", err)
 	}
 	if pdb.Spec.MinAvailable.String() != "1" {
@@ -120,7 +120,7 @@ func TestReconcilePDB_Idempotent(t *testing.T) {
 	}
 
 	pdb := &policyv1.PodDisruptionBudget{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-pdb", Namespace: "default"}, pdb); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testPDBName, Namespace: testNamespace}, pdb); err != nil {
 		t.Fatalf("failed to get PodDisruptionBudget after second reconciliation: %v", err)
 	}
 }
@@ -147,7 +147,7 @@ func TestReconcilePDB_DeletesWhenDisabled(t *testing.T) {
 	}
 
 	pdb := &policyv1.PodDisruptionBudget{}
-	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-pdb", Namespace: "default"}, pdb)
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testPDBName, Namespace: testNamespace}, pdb)
 	if err == nil {
 		t.Fatalf("expected PodDisruptionBudget to be deleted, but it still exists")
 	}
@@ -159,7 +159,7 @@ func TestReconcilePDB_SetsControllerReference(t *testing.T) {
 	_ = policyv1.AddToScheme(scheme)
 
 	app := newTestApplication()
-	app.ObjectMeta.UID = "12345"
+	app.UID = "12345"
 	minAvailable := intstr.FromInt(1)
 	app.Spec.PDB = &forgev1alpha1.PDBSpec{MinAvailable: &minAvailable}
 
@@ -171,7 +171,7 @@ func TestReconcilePDB_SetsControllerReference(t *testing.T) {
 	}
 
 	pdb := &policyv1.PodDisruptionBudget{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-pdb", Namespace: "default"}, pdb); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testPDBName, Namespace: testNamespace}, pdb); err != nil {
 		t.Fatalf("failed to get PodDisruptionBudget: %v", err)
 	}
 

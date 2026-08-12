@@ -74,3 +74,10 @@ variable "subnet_id" {
   type        = number
 
 }
+
+variable "firewall_id" {
+  description = "Cloud Firewall ID to attach to the node pool. Leave null to create the cluster without an attached firewall."
+  type        = number
+  default     = null
+
+}

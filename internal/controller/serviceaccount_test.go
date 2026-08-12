@@ -45,8 +45,8 @@ func TestServiceAccountNameFor(t *testing.T) {
 		spec     *forgev1alpha1.ServiceAccountSpec
 		expected string
 	}{
-		{name: "defaults to app name with -sa suffix", spec: nil, expected: "demo-app-sa"},
-		{name: "uses configured name", spec: &forgev1alpha1.ServiceAccountSpec{Name: "custom-sa"}, expected: "custom-sa"},
+		{name: "defaults to app name with -sa suffix", spec: nil, expected: testSAName},
+		{name: "uses configured name", spec: &forgev1alpha1.ServiceAccountSpec{Name: testCustomSAName}, expected: testCustomSAName},
 	}
 
 	for _, tt := range tests {
@@ -63,12 +63,12 @@ func TestServiceAccountNameFor(t *testing.T) {
 
 func TestDesiredServiceAccount_UsesConfiguredName(t *testing.T) {
 	app := newTestApplication()
-	app.Spec.ServiceAccount = &forgev1alpha1.ServiceAccountSpec{Name: "custom-sa"}
+	app.Spec.ServiceAccount = &forgev1alpha1.ServiceAccountSpec{Name: testCustomSAName}
 
 	r := &ApplicationReconciler{}
 	sa := r.desiredServiceAccount(app)
 
-	if sa.Name != "custom-sa" {
+	if sa.Name != testCustomSAName {
 		t.Fatalf("expected service account name custom-sa, got %q", sa.Name)
 	}
 	if sa.Labels["app"] != app.Name {
@@ -91,7 +91,7 @@ func TestReconcileServiceAccount_CreatesServiceAccount(t *testing.T) {
 	}
 
 	sa := &corev1.ServiceAccount{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-sa", Namespace: "default"}, sa); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testSAName, Namespace: testNamespace}, sa); err != nil {
 		t.Fatalf("failed to get ServiceAccount: %v", err)
 	}
 }
@@ -114,7 +114,7 @@ func TestReconcileServiceAccount_Idempotent(t *testing.T) {
 	}
 
 	sa := &corev1.ServiceAccount{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-sa", Namespace: "default"}, sa); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testSAName, Namespace: testNamespace}, sa); err != nil {
 		t.Fatalf("failed to get ServiceAccount after second reconciliation: %v", err)
 	}
 }
@@ -139,7 +139,7 @@ func TestReconcileServiceAccount_SkipsWhenCreateIsFalse(t *testing.T) {
 	}
 
 	sa := &corev1.ServiceAccount{}
-	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "user-managed-sa", Namespace: "default"}, sa)
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "user-managed-sa", Namespace: testNamespace}, sa)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected ServiceAccount to not be created, got err=%v", err)
 	}
@@ -151,7 +151,7 @@ func TestReconcileServiceAccount_SetsControllerReference(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	app := newTestApplication()
-	app.ObjectMeta.UID = "12345"
+	app.UID = "12345"
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -161,7 +161,7 @@ func TestReconcileServiceAccount_SetsControllerReference(t *testing.T) {
 	}
 
 	sa := &corev1.ServiceAccount{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-sa", Namespace: "default"}, sa); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testSAName, Namespace: testNamespace}, sa); err != nil {
 		t.Fatalf("failed to get ServiceAccount: %v", err)
 	}
 
@@ -183,13 +183,13 @@ func TestAnnotateServiceAccountWithIRSA_SetsAnnotation(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
-	roleArn := "arn:aws:iam::123456789012:role/demo-role"
+	roleArn := testRoleARN
 	if err := r.annotateServiceAccountWithIRSA(context.Background(), app, roleArn); err != nil {
 		t.Fatalf("annotateServiceAccountWithIRSA returned error: %v", err)
 	}
 
 	sa := &corev1.ServiceAccount{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-sa", Namespace: "default"}, sa); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testSAName, Namespace: testNamespace}, sa); err != nil {
 		t.Fatalf("failed to get ServiceAccount: %v", err)
 	}
 
@@ -232,7 +232,7 @@ func TestAnnotateServiceAccountWithIRSA_ReturnsErrorWhenPatchFails(t *testing.T)
 		Scheme: scheme,
 	}
 
-	err := r.annotateServiceAccountWithIRSA(context.Background(), app, "arn:aws:iam::123456789012:role/demo-role")
+	err := r.annotateServiceAccountWithIRSA(context.Background(), app, testRoleARN)
 	if err == nil {
 		t.Fatalf("expected error from annotateServiceAccountWithIRSA, got nil")
 	}

@@ -9,7 +9,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// IsIngressReady verifies whether the ingress has recieved an IP or Hostname assignment
+// IsIngressReady verifies whether the ingress has received an IP or Hostname assignment
 func (s *StatusManager) IsIngressReady(
 	ctx context.Context,
 	namespace,

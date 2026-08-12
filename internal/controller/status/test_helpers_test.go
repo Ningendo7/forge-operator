@@ -9,9 +9,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const (
+	testNamespace      = "default"
+	testAppName        = "demo-app"
+	testHPAName        = "demo-app-hpa"
+	testPDBName        = "demo-app-pdb"
+	testDeploymentName = "demo-app-deployment"
+)
+
 func newTestApplication() *forgev1alpha1.Application {
 	return &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
 		Spec: forgev1alpha1.ApplicationSpec{
 			Image: "nginx:latest",
 		},

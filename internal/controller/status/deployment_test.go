@@ -22,7 +22,7 @@ func TestIsDeploymentReady_NotFound(t *testing.T) {
 	fakeClient := newDeploymentTestClient().Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, msg, err := s.IsDeploymentReady(context.Background(), "default", "demo-app-deployment")
+	ready, msg, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
 		t.Fatalf("expected nil error for not-found deployment, got %v", err)
 	}
@@ -37,14 +37,14 @@ func TestIsDeploymentReady_NotFound(t *testing.T) {
 func TestIsDeploymentReady_ObservedGenerationLagsSpec(t *testing.T) {
 	replicas := int32(1)
 	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-deployment", Namespace: "default", Generation: 2},
+		ObjectMeta: metav1.ObjectMeta{Name: testDeploymentName, Namespace: testNamespace, Generation: 2},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
 		Status:     appsv1.DeploymentStatus{ObservedGeneration: 1},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, _, err := s.IsDeploymentReady(context.Background(), "default", "demo-app-deployment")
+	ready, _, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
 		t.Fatalf("IsDeploymentReady returned error: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestIsDeploymentReady_ObservedGenerationLagsSpec(t *testing.T) {
 func TestIsDeploymentReady_ProgressingConditionFalse(t *testing.T) {
 	replicas := int32(1)
 	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-deployment", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testDeploymentName, Namespace: testNamespace},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
 		Status: appsv1.DeploymentStatus{
 			Conditions: []appsv1.DeploymentCondition{
@@ -67,7 +67,7 @@ func TestIsDeploymentReady_ProgressingConditionFalse(t *testing.T) {
 	fakeClient := newDeploymentTestClient(dep).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, msg, err := s.IsDeploymentReady(context.Background(), "default", "demo-app-deployment")
+	ready, msg, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
 		t.Fatalf("IsDeploymentReady returned error: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestIsDeploymentReady_ProgressingConditionFalse(t *testing.T) {
 func TestIsDeploymentReady_ReplicaFailureConditionTrue(t *testing.T) {
 	replicas := int32(1)
 	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-deployment", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testDeploymentName, Namespace: testNamespace},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
 		Status: appsv1.DeploymentStatus{
 			Conditions: []appsv1.DeploymentCondition{
@@ -93,7 +93,7 @@ func TestIsDeploymentReady_ReplicaFailureConditionTrue(t *testing.T) {
 	fakeClient := newDeploymentTestClient(dep).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, _, err := s.IsDeploymentReady(context.Background(), "default", "demo-app-deployment")
+	ready, _, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
 		t.Fatalf("IsDeploymentReady returned error: %v", err)
 	}
@@ -105,14 +105,14 @@ func TestIsDeploymentReady_ReplicaFailureConditionTrue(t *testing.T) {
 func TestIsDeploymentReady_UpdatedReplicasBelowDesired(t *testing.T) {
 	replicas := int32(3)
 	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-deployment", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testDeploymentName, Namespace: testNamespace},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
 		Status:     appsv1.DeploymentStatus{UpdatedReplicas: 1},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, _, err := s.IsDeploymentReady(context.Background(), "default", "demo-app-deployment")
+	ready, _, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
 		t.Fatalf("IsDeploymentReady returned error: %v", err)
 	}
@@ -124,14 +124,14 @@ func TestIsDeploymentReady_UpdatedReplicasBelowDesired(t *testing.T) {
 func TestIsDeploymentReady_AvailableReplicasBelowDesired(t *testing.T) {
 	replicas := int32(3)
 	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-deployment", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testDeploymentName, Namespace: testNamespace},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
 		Status:     appsv1.DeploymentStatus{UpdatedReplicas: 3, AvailableReplicas: 1},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, _, err := s.IsDeploymentReady(context.Background(), "default", "demo-app-deployment")
+	ready, _, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
 		t.Fatalf("IsDeploymentReady returned error: %v", err)
 	}
@@ -143,14 +143,14 @@ func TestIsDeploymentReady_AvailableReplicasBelowDesired(t *testing.T) {
 func TestIsDeploymentReady_ReadyReplicasBelowDesired(t *testing.T) {
 	replicas := int32(3)
 	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-deployment", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testDeploymentName, Namespace: testNamespace},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
 		Status:     appsv1.DeploymentStatus{UpdatedReplicas: 3, AvailableReplicas: 3, ReadyReplicas: 1},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, _, err := s.IsDeploymentReady(context.Background(), "default", "demo-app-deployment")
+	ready, _, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
 		t.Fatalf("IsDeploymentReady returned error: %v", err)
 	}
@@ -162,14 +162,14 @@ func TestIsDeploymentReady_ReadyReplicasBelowDesired(t *testing.T) {
 func TestIsDeploymentReady_FullyReady(t *testing.T) {
 	replicas := int32(3)
 	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-deployment", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testDeploymentName, Namespace: testNamespace},
 		Spec:       appsv1.DeploymentSpec{Replicas: &replicas},
 		Status:     appsv1.DeploymentStatus{UpdatedReplicas: 3, AvailableReplicas: 3, ReadyReplicas: 3},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, msg, err := s.IsDeploymentReady(context.Background(), "default", "demo-app-deployment")
+	ready, msg, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
 		t.Fatalf("IsDeploymentReady returned error: %v", err)
 	}
@@ -180,13 +180,13 @@ func TestIsDeploymentReady_FullyReady(t *testing.T) {
 
 func TestIsDeploymentReady_DefaultsDesiredReplicasToOneWhenUnset(t *testing.T) {
 	dep := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-deployment", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testDeploymentName, Namespace: testNamespace},
 		Status:     appsv1.DeploymentStatus{UpdatedReplicas: 1, AvailableReplicas: 1, ReadyReplicas: 1},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, _, err := s.IsDeploymentReady(context.Background(), "default", "demo-app-deployment")
+	ready, _, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
 		t.Fatalf("IsDeploymentReady returned error: %v", err)
 	}

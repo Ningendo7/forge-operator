@@ -29,8 +29,8 @@ func TestDesiredHPA_DefaultsMinMaxReplicasAndUtilization(t *testing.T) {
 	r := &ApplicationReconciler{}
 	hpa := r.desiredHPA(app)
 
-	if hpa.Name != "demo-app-hpa" {
-		t.Fatalf("expected hpa name %q, got %q", "demo-app-hpa", hpa.Name)
+	if hpa.Name != testHPAName {
+		t.Fatalf("expected hpa name %q, got %q", testHPAName, hpa.Name)
 	}
 	if *hpa.Spec.MinReplicas != 1 {
 		t.Fatalf("expected default minReplicas 1, got %d", *hpa.Spec.MinReplicas)
@@ -111,10 +111,10 @@ func TestDesiredHPA_ScaleTargetRefTargetsDeployment(t *testing.T) {
 	r := &ApplicationReconciler{}
 	hpa := r.desiredHPA(app)
 
-	if hpa.Spec.ScaleTargetRef.Kind != "Deployment" {
+	if hpa.Spec.ScaleTargetRef.Kind != deploymentKind {
 		t.Fatalf("expected scale target kind Deployment, got %q", hpa.Spec.ScaleTargetRef.Kind)
 	}
-	if hpa.Spec.ScaleTargetRef.Name != "demo-app-deployment" {
+	if hpa.Spec.ScaleTargetRef.Name != testDeploymentName {
 		t.Fatalf("expected scale target name demo-app-deployment, got %q", hpa.Spec.ScaleTargetRef.Name)
 	}
 }
@@ -135,7 +135,7 @@ func TestReconcileHPA_CreatesHPA(t *testing.T) {
 	}
 
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-hpa", Namespace: "default"}, hpa); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testHPAName, Namespace: testNamespace}, hpa); err != nil {
 		t.Fatalf("failed to get HPA: %v", err)
 	}
 	if hpa.Spec.MaxReplicas != 3 {
@@ -162,7 +162,7 @@ func TestReconcileHPA_Idempotent(t *testing.T) {
 	}
 
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-hpa", Namespace: "default"}, hpa); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testHPAName, Namespace: testNamespace}, hpa); err != nil {
 		t.Fatalf("failed to get HPA after second reconciliation: %v", err)
 	}
 }
@@ -188,7 +188,7 @@ func TestReconcileHPA_DeletesWhenDisabled(t *testing.T) {
 	}
 
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
-	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-hpa", Namespace: "default"}, hpa)
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testHPAName, Namespace: testNamespace}, hpa)
 	if err == nil {
 		t.Fatalf("expected HPA to be deleted, but it still exists")
 	}
@@ -200,7 +200,7 @@ func TestReconcileHPA_SetsControllerReference(t *testing.T) {
 	_ = autoscalingv2.AddToScheme(scheme)
 
 	app := newTestApplication()
-	app.ObjectMeta.UID = "12345"
+	app.UID = "12345"
 	app.Spec.Autoscaling = &forgev1alpha1.AutoscalingSpec{MinReplicas: 1, MaxReplicas: 3}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -211,7 +211,7 @@ func TestReconcileHPA_SetsControllerReference(t *testing.T) {
 	}
 
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-hpa", Namespace: "default"}, hpa); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testHPAName, Namespace: testNamespace}, hpa); err != nil {
 		t.Fatalf("failed to get HPA: %v", err)
 	}
 

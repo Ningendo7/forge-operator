@@ -8,9 +8,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	testNamespace         = "default"
+	testBucket            = "demo-bucket"
+	testRegion            = "us-east-1"
+	testAccessKeyLabel    = "demo-app-key"
+	testExistingAccessKey = "existing-access-key"
+)
+
 func newTestApp() *forgev1alpha1.Application {
 	return &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: testNamespace},
 	}
 }
 
@@ -18,9 +26,9 @@ func newTestManager(akamaiClient AKAMAIAPI) *Manager {
 	return &Manager{
 		akamaiClient: akamaiClient,
 		app:          newTestApp(),
-		storage:      &forgev1alpha1.StorageSpec{Bucket: "demo-bucket", Region: "us-east-1"},
-		bucket:       "demo-bucket",
-		region:       "us-east-1",
+		storage:      &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testRegion},
+		bucket:       testBucket,
+		region:       testRegion,
 	}
 }
 

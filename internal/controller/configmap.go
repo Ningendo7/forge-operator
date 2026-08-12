@@ -23,7 +23,7 @@ func (r *ApplicationReconciler) desiredConfigMap(
 	application *forgev1alpha1.Application,
 ) *corev1.ConfigMap {
 
-	labels := map[string]string{"app": application.Name}
+	labels := map[string]string{appLabelKey: application.Name}
 	data := map[string]string{
 		"app-name": application.Name,
 		"image":    application.Spec.Image,
@@ -58,7 +58,7 @@ func (r *ApplicationReconciler) deleteStaleConfigMaps(
 	logger := logf.FromContext(ctx)
 
 	var list corev1.ConfigMapList
-	if err := r.List(ctx, &list, client.InNamespace(application.Namespace), client.MatchingLabels{"app": application.Name}); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(application.Namespace), client.MatchingLabels{appLabelKey: application.Name}); err != nil {
 		return fmt.Errorf("failed to list ConfigMaps for cleanup: %w", err)
 	}
 
@@ -98,7 +98,7 @@ func (r *ApplicationReconciler) reconcileConfigMap(
 	err := r.Patch(
 		ctx,
 		desired,
-		client.Apply,
+		client.Apply, //nolint:staticcheck // SSA patch via client.Apply is the standard controller-runtime pattern
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	)

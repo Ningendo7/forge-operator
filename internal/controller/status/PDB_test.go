@@ -20,7 +20,7 @@ func TestIsPDBReady_NotFound(t *testing.T) {
 	fakeClient := newPDBTestClient().Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, msg, err := s.IsPDBReady(context.Background(), "default", "demo-app-pdb")
+	ready, msg, err := s.IsPDBReady(context.Background(), testNamespace, testPDBName)
 	if err != nil {
 		t.Fatalf("expected nil error for not-found PDB, got %v", err)
 	}
@@ -34,7 +34,7 @@ func TestIsPDBReady_NotFound(t *testing.T) {
 
 func TestIsPDBReady_UnhealthyWhenNoDisruptionsAllowedAndBelowDesired(t *testing.T) {
 	pdb := &policyv1.PodDisruptionBudget{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-pdb", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testPDBName, Namespace: testNamespace},
 		Status: policyv1.PodDisruptionBudgetStatus{
 			DisruptionsAllowed: 0,
 			CurrentHealthy:     1,
@@ -44,7 +44,7 @@ func TestIsPDBReady_UnhealthyWhenNoDisruptionsAllowedAndBelowDesired(t *testing.
 	fakeClient := newPDBTestClient(pdb).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, msg, err := s.IsPDBReady(context.Background(), "default", "demo-app-pdb")
+	ready, msg, err := s.IsPDBReady(context.Background(), testNamespace, testPDBName)
 	if err != nil {
 		t.Fatalf("IsPDBReady returned error: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestIsPDBReady_UnhealthyWhenNoDisruptionsAllowedAndBelowDesired(t *testing.
 
 func TestIsPDBReady_HealthyWhenDisruptionsAllowed(t *testing.T) {
 	pdb := &policyv1.PodDisruptionBudget{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-pdb", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testPDBName, Namespace: testNamespace},
 		Status: policyv1.PodDisruptionBudgetStatus{
 			DisruptionsAllowed: 1,
 			CurrentHealthy:     3,
@@ -65,7 +65,7 @@ func TestIsPDBReady_HealthyWhenDisruptionsAllowed(t *testing.T) {
 	fakeClient := newPDBTestClient(pdb).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, msg, err := s.IsPDBReady(context.Background(), "default", "demo-app-pdb")
+	ready, msg, err := s.IsPDBReady(context.Background(), testNamespace, testPDBName)
 	if err != nil {
 		t.Fatalf("IsPDBReady returned error: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestIsPDBReady_HealthyWhenDisruptionsAllowed(t *testing.T) {
 
 func TestIsPDBReady_HealthyWhenCurrentMeetsDesiredDespiteNoDisruptionsAllowed(t *testing.T) {
 	pdb := &policyv1.PodDisruptionBudget{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-pdb", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testPDBName, Namespace: testNamespace},
 		Status: policyv1.PodDisruptionBudgetStatus{
 			DisruptionsAllowed: 0,
 			CurrentHealthy:     3,
@@ -86,7 +86,7 @@ func TestIsPDBReady_HealthyWhenCurrentMeetsDesiredDespiteNoDisruptionsAllowed(t 
 	fakeClient := newPDBTestClient(pdb).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, msg, err := s.IsPDBReady(context.Background(), "default", "demo-app-pdb")
+	ready, msg, err := s.IsPDBReady(context.Background(), testNamespace, testPDBName)
 	if err != nil {
 		t.Fatalf("IsPDBReady returned error: %v", err)
 	}

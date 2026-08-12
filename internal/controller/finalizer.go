@@ -20,7 +20,7 @@ func (r *ApplicationReconciler) handleFinalizer(
 	logger := logf.FromContext(ctx)
 
 	// Check if the Object is being deleted
-	if !application.ObjectMeta.DeletionTimestamp.IsZero() {
+	if !application.DeletionTimestamp.IsZero() {
 		// The object is being deleted
 		if controllerutil.ContainsFinalizer(application, ApplicationFinalizer) {
 			logger.Info("Application is being deleted, running cleanup finalizer")

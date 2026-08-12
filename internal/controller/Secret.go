@@ -37,7 +37,7 @@ func (r *ApplicationReconciler) desiredSecret(
 	application *forgev1alpha1.Application,
 ) *corev1.Secret {
 
-	labels := map[string]string{"app": application.Name, secretRoleLabel: secretRoleApp}
+	labels := map[string]string{appLabelKey: application.Name, secretRoleLabel: secretRoleApp}
 	secretType := corev1.SecretTypeOpaque
 	var secretData map[string]string
 
@@ -114,7 +114,7 @@ func (r *ApplicationReconciler) desiredStorage(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: application.Namespace,
-			Labels:    map[string]string{"app": application.Name, secretRoleLabel: secretRoleStorage},
+			Labels:    map[string]string{appLabelKey: application.Name, secretRoleLabel: secretRoleStorage},
 		},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: secretData,
@@ -132,7 +132,7 @@ func (r *ApplicationReconciler) deleteStaleSecrets(
 	logger := logf.FromContext(ctx)
 
 	var list corev1.SecretList
-	if err := r.List(ctx, &list, client.InNamespace(application.Namespace), client.MatchingLabels{"app": application.Name, secretRoleLabel: role}); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(application.Namespace), client.MatchingLabels{appLabelKey: application.Name, secretRoleLabel: role}); err != nil {
 		return fmt.Errorf("failed to list Secrets for cleanup: %w", err)
 	}
 
@@ -172,7 +172,7 @@ func (r *ApplicationReconciler) reconcileSecret(
 	err := r.Patch(
 		ctx,
 		desired,
-		client.Apply,
+		client.Apply, //nolint:staticcheck // SSA patch via client.Apply is the standard controller-runtime pattern
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	)
@@ -214,7 +214,7 @@ func (r *ApplicationReconciler) reconcileStorageSecret(
 	err := r.Patch(
 		ctx,
 		desired,
-		client.Apply,
+		client.Apply, //nolint:staticcheck // SSA patch via client.Apply is the standard controller-runtime pattern
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	)

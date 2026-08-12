@@ -23,15 +23,15 @@ func TestDesiredDeployment_DefaultReplicas(t *testing.T) {
 	r := &ApplicationReconciler{}
 	deployment := r.desiredDeployment(app)
 
-	if deployment.Name != "demo-app-deployment" {
+	if deployment.Name != testDeploymentName {
 		t.Fatalf("expected deployment name %q, got %q",
-			"demo-app",
+			testAppName,
 			deployment.Name)
 	}
 
-	if deployment.Namespace != "default" {
+	if deployment.Namespace != testNamespace {
 		t.Fatalf("expected deployment namespace %q, got %q",
-			"default",
+			testNamespace,
 			deployment.Namespace)
 	}
 
@@ -56,14 +56,14 @@ func TestDesiredDeployment_ConfiguredReplicas(t *testing.T) {
 
 func TestDesiredDeployment_UsesApplicationImage(t *testing.T) {
 	app := newTestApplication()
-	app.Spec.Image = "nginx:1.27"
+	app.Spec.Image = testImage127
 
 	r := &ApplicationReconciler{}
 	deployment := r.desiredDeployment(app)
 	container := deployment.Spec.Template.Spec.Containers[0]
 
-	if container.Image != "nginx:1.27" {
-		t.Fatalf("expected container image to be %q, got %q", "nginx:1.27", container.Image)
+	if container.Image != testImage127 {
+		t.Fatalf("expected container image to be %q, got %q", testImage127, container.Image)
 	}
 }
 
@@ -234,7 +234,7 @@ func TestDesiredDeployment_ConfiguredContainerPort(t *testing.T) {
 func TestBuildVolumeandMounts_ConfigMap(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Container = forgev1alpha1.ContainerSpec{
-		ConfigMapName: "custom-config",
+		ConfigMapName: testCustomConfigMapName,
 	}
 
 	r := &ApplicationReconciler{}
@@ -248,15 +248,15 @@ func TestBuildVolumeandMounts_ConfigMap(t *testing.T) {
 		t.Fatalf("expected 1 volume, got %d", len(volumes))
 	}
 
-	if volumes[0].ConfigMap.Name != "custom-config" {
-		t.Fatalf("expected config map volume name to be %q, got %q", "custom-config", volumes[0].ConfigMap.Name)
+	if volumes[0].ConfigMap.Name != testCustomConfigMapName {
+		t.Fatalf("expected config map volume name to be %q, got %q", testCustomConfigMapName, volumes[0].ConfigMap.Name)
 	}
 }
 
 func TestBuildVolumeandMounts_Secret(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Container = forgev1alpha1.ContainerSpec{
-		SecretName: "custom-secret",
+		SecretName: testCustomSecretName,
 	}
 
 	r := &ApplicationReconciler{}
@@ -270,15 +270,15 @@ func TestBuildVolumeandMounts_Secret(t *testing.T) {
 		t.Fatalf("expected 1 volume, got %d", len(volumes))
 	}
 
-	if volumes[0].Secret.SecretName != "custom-secret" {
-		t.Fatalf("expected secret volume name to be %q, got %q", "custom-secret", volumes[0].Secret.SecretName)
+	if volumes[0].Secret.SecretName != testCustomSecretName {
+		t.Fatalf("expected secret volume name to be %q, got %q", testCustomSecretName, volumes[0].Secret.SecretName)
 	}
 }
 
 func TestBuildVolumeandMounts_DefaultConfigMountPath(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Container = forgev1alpha1.ContainerSpec{
-		ConfigMapName: "custom-config",
+		ConfigMapName: testCustomConfigMapName,
 	}
 
 	r := &ApplicationReconciler{}
@@ -292,7 +292,7 @@ func TestBuildVolumeandMounts_DefaultConfigMountPath(t *testing.T) {
 func TestBuildVolumeandMounts_CustomConfigMountPath(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Container = forgev1alpha1.ContainerSpec{
-		ConfigMapName:   "custom-config",
+		ConfigMapName:   testCustomConfigMapName,
 		ConfigMountPath: "/custom/config",
 	}
 
@@ -307,7 +307,7 @@ func TestBuildVolumeandMounts_CustomConfigMountPath(t *testing.T) {
 func TestBuildVolumeandMounts_DefaultSecretMountPath(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Container = forgev1alpha1.ContainerSpec{
-		SecretName: "custom-secret",
+		SecretName: testCustomSecretName,
 	}
 
 	r := &ApplicationReconciler{}
@@ -321,7 +321,7 @@ func TestBuildVolumeandMounts_DefaultSecretMountPath(t *testing.T) {
 func TestBuildVolumeandMounts_CustomSecretMountPath(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Container = forgev1alpha1.ContainerSpec{
-		SecretName:      "custom-secret",
+		SecretName:      testCustomSecretName,
 		SecretMountPath: "/custom/secret",
 	}
 
@@ -342,24 +342,24 @@ func TestConfigMapNameFor(t *testing.T) {
 	}{
 		{
 			name:          "uses config map name from spec",
-			application:   "demo-app",
-			configMapName: "custom-config",
-			expected:      "custom-config",
+			application:   testAppName,
+			configMapName: testCustomConfigMapName,
+			expected:      testCustomConfigMapName,
 		},
 		{
 			name:          "uses default config map name when not specified",
-			application:   "demo-app",
+			application:   testAppName,
 			configMapName: "",
-			expected:      "demo-app-config",
+			expected:      testConfigMapName,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			app := &forgev1alpha1.Application{
-				ObjectMeta: metav1.ObjectMeta{Name: tt.application, Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: tt.application, Namespace: testNamespace},
 				Spec: forgev1alpha1.ApplicationSpec{
-					Image: "nginx:latest",
+					Image: testImage,
 					Container: forgev1alpha1.ContainerSpec{
 						ConfigMapName: tt.configMapName,
 					},
@@ -383,24 +383,24 @@ func TestSecretNameFor(t *testing.T) {
 	}{
 		{
 			name:        "uses secret name from spec",
-			application: "demo-app",
-			secretName:  "custom-secret",
-			expected:    "custom-secret",
+			application: testAppName,
+			secretName:  testCustomSecretName,
+			expected:    testCustomSecretName,
 		},
 		{
 			name:        "uses default secret name when not specified",
-			application: "demo-app",
+			application: testAppName,
 			secretName:  "",
-			expected:    "demo-app-secret",
+			expected:    testSecretAppName,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			app := &forgev1alpha1.Application{
-				ObjectMeta: metav1.ObjectMeta{Name: tt.application, Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: tt.application, Namespace: testNamespace},
 				Spec: forgev1alpha1.ApplicationSpec{
-					Image: "nginx:latest",
+					Image: testImage,
 					Container: forgev1alpha1.ContainerSpec{
 						SecretName: tt.secretName,
 					},
@@ -427,14 +427,14 @@ func TestDesiredPodSpec_ServiceAccount(t *testing.T) {
 		{
 			name:           "creates service account when not specified",
 			serviceAccount: nil,
-			expectedName:   "demo-app-sa",
+			expectedName:   testSAName,
 		},
 		{
 			name: "creates service account when create is true",
 			serviceAccount: &forgev1alpha1.ServiceAccountSpec{
-				Name: "custom-sa",
+				Name: testCustomSAName,
 			},
-			expectedName: "custom-sa",
+			expectedName: testCustomSAName,
 		},
 		{
 			name: "does not create service account when create is false",
@@ -448,16 +448,16 @@ func TestDesiredPodSpec_ServiceAccount(t *testing.T) {
 			serviceAccount: &forgev1alpha1.ServiceAccountSpec{
 				Create: &create,
 			},
-			expectedName: "demo-app-sa",
+			expectedName: testSAName,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			app := &forgev1alpha1.Application{
-				ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
 				Spec: forgev1alpha1.ApplicationSpec{
-					Image:          "nginx:latest",
+					Image:          testImage,
 					ServiceAccount: tt.serviceAccount,
 				},
 			}
@@ -491,7 +491,7 @@ func TestReconcileDeployment_CreatesDeployment(t *testing.T) {
 	}
 
 	deployment := &appsv1.Deployment{}
-	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-deployment", Namespace: "default"}, deployment)
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: testDeploymentName, Namespace: testNamespace}, deployment)
 	if err != nil {
 		t.Fatalf("expected deployment to be created, but got error: %v", err)
 	}
@@ -524,13 +524,13 @@ func TestReconcileDeployment_Idempotent(t *testing.T) {
 	}
 
 	deployment := &appsv1.Deployment{}
-	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-deployment", Namespace: "default"}, deployment)
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: testDeploymentName, Namespace: testNamespace}, deployment)
 	if err != nil {
 		t.Fatalf("expected deployment to exist, but got error: %v", err)
 	}
 
-	if deployment.Spec.Template.Spec.Containers[0].Image != "nginx:latest" {
-		t.Fatalf("expected container image to be %q, got %q", "nginx:latest", deployment.Spec.Template.Spec.Containers[0].Image)
+	if deployment.Spec.Template.Spec.Containers[0].Image != testImage {
+		t.Fatalf("expected container image to be %q, got %q", testImage, deployment.Spec.Template.Spec.Containers[0].Image)
 	}
 
 	if *deployment.Spec.Replicas != 1 {
@@ -548,16 +548,16 @@ func TestReconcileDeployment_UpdatesFields(t *testing.T) {
 	}{
 		{
 			name:             "updates replicas",
-			Image:            "nginx:latest",
+			Image:            testImage,
 			replicas:         3,
-			expectedImage:    "nginx:latest",
+			expectedImage:    testImage,
 			expectedReplicas: 3,
 		},
 		{
 			name:             "updates image",
-			Image:            "nginx:1.27",
+			Image:            testImage127,
 			replicas:         1,
-			expectedImage:    "nginx:1.27",
+			expectedImage:    testImage127,
 			expectedReplicas: 1,
 		},
 	}
@@ -597,7 +597,7 @@ func TestReconcileDeployment_UpdatesFields(t *testing.T) {
 			}
 
 			deployment := &appsv1.Deployment{}
-			err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-deployment", Namespace: "default"}, deployment)
+			err = fakeClient.Get(context.Background(), client.ObjectKey{Name: testDeploymentName, Namespace: testNamespace}, deployment)
 			if err != nil {
 				t.Fatalf("expected deployment to exist, but got error: %v", err)
 			}
@@ -620,7 +620,7 @@ func TestReconcileDeployment_SetsOwnerReference(t *testing.T) {
 	_ = appsv1.AddToScheme(scheme)
 
 	app := newTestApplication()
-	app.ObjectMeta.UID = "12345"
+	app.UID = "12345"
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
@@ -635,7 +635,7 @@ func TestReconcileDeployment_SetsOwnerReference(t *testing.T) {
 	}
 
 	deployment := &appsv1.Deployment{}
-	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-deployment", Namespace: "default"}, deployment)
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: testDeploymentName, Namespace: testNamespace}, deployment)
 	if err != nil {
 		t.Fatalf("expected deployment to exist, but got error: %v", err)
 	}
@@ -657,7 +657,7 @@ func TestReconcileDeployment_SetsOwnerReference(t *testing.T) {
 func TestReconcileDeployment_UsesServiceAccount(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.ServiceAccount = &forgev1alpha1.ServiceAccountSpec{
-		Name: "custom-sa",
+		Name: testCustomSAName,
 	}
 
 	r := &ApplicationReconciler{}
@@ -665,16 +665,16 @@ func TestReconcileDeployment_UsesServiceAccount(t *testing.T) {
 	deployment := r.desiredDeployment(app)
 	serviceAccountName := deployment.Spec.Template.Spec.ServiceAccountName
 
-	if serviceAccountName != "custom-sa" {
-		t.Fatalf("expected service account name to be %q, got %q", "custom-sa", serviceAccountName)
+	if serviceAccountName != testCustomSAName {
+		t.Fatalf("expected service account name to be %q, got %q", testCustomSAName, serviceAccountName)
 	}
 }
 
 func TestReconcileDeployment_UsesResources(t *testing.T) {
 	app := &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
 		Spec: forgev1alpha1.ApplicationSpec{
-			Image: "nginx:latest",
+			Image: testImage,
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
 					corev1.ResourceCPU:    resource.MustParse("250m"),
@@ -756,7 +756,7 @@ func TestDesiredDeployment_SetsLabels(t *testing.T) {
 	r := &ApplicationReconciler{}
 	deployment := r.desiredDeployment(app)
 
-	expected := "demo-app"
+	expected := testAppName
 
 	if deployment.Spec.Selector.MatchLabels["app"] != expected {
 		t.Fatalf("expected selector label 'app' to be %q, got %q", expected, deployment.Spec.Selector.MatchLabels["app"])
@@ -770,8 +770,8 @@ func TestDesiredDeployment_SetsLabels(t *testing.T) {
 func TestBuildVolumeAndMounts_ConfigMapAndSecret(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Container = forgev1alpha1.ContainerSpec{
-		ConfigMapName: "custom-config",
-		SecretName:    "custom-secret",
+		ConfigMapName: testCustomConfigMapName,
+		SecretName:    testCustomSecretName,
 	}
 
 	r := &ApplicationReconciler{}
@@ -788,15 +788,15 @@ func TestBuildVolumeAndMounts_ConfigMapAndSecret(t *testing.T) {
 	if volumes[0].ConfigMap == nil {
 		t.Fatalf("expected first volume to be a ConfigMap volume")
 	}
-	if volumes[0].ConfigMap.Name != "custom-config" {
-		t.Fatalf("expected ConfigMap volume name to be %q, got %q", "custom-config", volumes[0].ConfigMap.Name)
+	if volumes[0].ConfigMap.Name != testCustomConfigMapName {
+		t.Fatalf("expected ConfigMap volume name to be %q, got %q", testCustomConfigMapName, volumes[0].ConfigMap.Name)
 	}
 
 	if volumes[1].Secret == nil {
 		t.Fatalf("expected second volume to be a Secret volume")
 	}
-	if volumes[1].Secret.SecretName != "custom-secret" {
-		t.Fatalf("expected Secret volume name to be %q, got %q", "custom-secret", volumes[1].Secret.SecretName)
+	if volumes[1].Secret.SecretName != testCustomSecretName {
+		t.Fatalf("expected Secret volume name to be %q, got %q", testCustomSecretName, volumes[1].Secret.SecretName)
 	}
 }
 

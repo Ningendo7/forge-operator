@@ -17,7 +17,7 @@ func (r *ApplicationReconciler) desiredPDB(
 	application *forgev1alpha1.Application,
 ) *policyv1.PodDisruptionBudget {
 
-	labels := map[string]string{"app": application.Name}
+	labels := map[string]string{appLabelKey: application.Name}
 
 	pdbSpec := policyv1.PodDisruptionBudgetSpec{
 		Selector: &metav1.LabelSelector{MatchLabels: labels},
@@ -81,7 +81,7 @@ func (r *ApplicationReconciler) reconcilePDB(
 	err := r.Patch(
 		ctx,
 		desired,
-		client.Apply,
+		client.Apply, //nolint:staticcheck // SSA patch via client.Apply is the standard controller-runtime pattern
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	)

@@ -15,6 +15,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const defaultRegion = "us-east-1"
+
 // S3API defines the interface for interacting with AWS S3.
 type S3API interface {
 	CreateBucket(ctx context.Context, params *s3sdk.CreateBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.CreateBucketOutput, error)
@@ -76,7 +78,7 @@ func NewManager(
 
 	region := storage.Region
 	if region == "" {
-		region = "us-east-1" // default region if not specified
+		region = defaultRegion
 	}
 
 	cfgOptions := []func(*config.LoadOptions) error{

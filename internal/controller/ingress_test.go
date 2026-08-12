@@ -20,7 +20,7 @@ func TestDesiredIngress_UsesConfiguredValues(t *testing.T) {
 
 	pathType := networkingv1.PathTypePrefix
 	app.Spec.Ingress = &forgev1alpha1.IngressSpec{
-		Host:        "example.com",
+		Host:        testExampleHost,
 		Path:        "/api",
 		PathType:    &pathType,
 		ClassName:   stringPtr("nginx"),
@@ -52,7 +52,7 @@ func TestDesiredIngress_UsesConfiguredValues(t *testing.T) {
 
 func TestDesiredIngress_SetsLabels(t *testing.T) {
 	app := newTestApplication()
-	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: "example.com"}
+	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: testExampleHost}
 
 	r := &ApplicationReconciler{}
 	ing := r.desiredIngress(app)
@@ -68,7 +68,7 @@ func TestReconcileIngress_CreatesIngress(t *testing.T) {
 	_ = networkingv1.AddToScheme(scheme)
 
 	app := newTestApplication()
-	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: "example.com", Path: "/"}
+	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: testExampleHost, Path: "/"}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -78,10 +78,10 @@ func TestReconcileIngress_CreatesIngress(t *testing.T) {
 	}
 
 	ing := &networkingv1.Ingress{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, ing); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, ing); err != nil {
 		t.Fatalf("failed to get Ingress: %v", err)
 	}
-	if ing.Spec.Rules[0].Host != "example.com" {
+	if ing.Spec.Rules[0].Host != testExampleHost {
 		t.Errorf("expected ingress host example.com, got %q", ing.Spec.Rules[0].Host)
 	}
 }
@@ -92,7 +92,7 @@ func TestReconcileIngress_Idempotent(t *testing.T) {
 	_ = networkingv1.AddToScheme(scheme)
 
 	app := newTestApplication()
-	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: "example.com", Path: "/"}
+	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: testExampleHost, Path: "/"}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -105,7 +105,7 @@ func TestReconcileIngress_Idempotent(t *testing.T) {
 	}
 
 	ing := &networkingv1.Ingress{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, ing); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, ing); err != nil {
 		t.Fatalf("failed to get Ingress after second reconciliation: %v", err)
 	}
 }
@@ -116,7 +116,7 @@ func TestReconcileIngress_DeletesWhenDisabled(t *testing.T) {
 	_ = networkingv1.AddToScheme(scheme)
 
 	app := newTestApplication()
-	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: "example.com", Path: "/"}
+	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: testExampleHost, Path: "/"}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -131,7 +131,7 @@ func TestReconcileIngress_DeletesWhenDisabled(t *testing.T) {
 	}
 
 	ing := &networkingv1.Ingress{}
-	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, ing)
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, ing)
 	if err == nil {
 		t.Fatalf("expected Ingress to be deleted, but it still exists")
 	}
@@ -143,8 +143,8 @@ func TestReconcileIngress_SetsControllerReference(t *testing.T) {
 	_ = networkingv1.AddToScheme(scheme)
 
 	app := newTestApplication()
-	app.ObjectMeta.UID = "12345"
-	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: "example.com", Path: "/"}
+	app.UID = "12345"
+	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: testExampleHost, Path: "/"}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -154,7 +154,7 @@ func TestReconcileIngress_SetsControllerReference(t *testing.T) {
 	}
 
 	ing := &networkingv1.Ingress{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, ing); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, ing); err != nil {
 		t.Fatalf("failed to get Ingress: %v", err)
 	}
 
@@ -174,7 +174,7 @@ func TestReconcileIngress_ReturnsErrorWhenPatchFails(t *testing.T) {
 	_ = networkingv1.AddToScheme(scheme)
 
 	app := newTestApplication()
-	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: "example.com", Path: "/"}
+	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: testExampleHost, Path: "/"}
 
 	baseClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{

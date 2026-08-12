@@ -40,7 +40,12 @@ backend.tfvars
 # Local-only variable files often contain secrets
 *.tfvars
 *.tfvars.json
-!*.example.tfvars
+
+# ...except the per-environment tfvars checked into environments/*/, which
+# hold no secrets by design (only sizing/naming/CIDR config) and are meant
+# to be tracked so `terraform apply -var-file=<env>.tfvars` works out of the box.
+!**/dev.tfvars
+!**/prod.tfvars
 
 # CLI and local override files
 override.tf

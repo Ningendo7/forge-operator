@@ -1,0 +1,15 @@
+# Copy this file to backend.tfvars (gitignored) and fill in real values, then run:
+#   terraform init -backend-config=backend.tfvars
+#
+# Use a separate key from dev (shown below), or a separate bucket entirely,
+# so a prod apply can never read or write dev's state.
+#
+# variables.tf has no defaults, so every apply/plan also needs:
+#   terraform plan -var-file=prod.tfvars
+
+bucket  = "<your-s3-bucket-for-tfstate>"
+key     = "forge-operator/aws/prod/terraform.tfstate"
+region  = "us-east-1"
+# Optional: name of an AWS credentials-file profile to use instead of the
+# default credential chain (env vars, instance role, etc.).
+# profile = "<your-aws-credentials-profile-name>"

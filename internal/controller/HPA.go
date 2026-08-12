@@ -57,13 +57,13 @@ func (r *ApplicationReconciler) desiredHPA(
 			Name:      naming.HPA(application),
 			Namespace: application.Namespace,
 			Labels: map[string]string{
-				"app": application.Name,
+				appLabelKey: application.Name,
 			},
 		},
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
 				APIVersion: "apps/v1",
-				Kind:       "Deployment",
+				Kind:       deploymentKind,
 				Name:       naming.Deployment(application),
 			},
 			MinReplicas: &minReplicas,
@@ -117,7 +117,7 @@ func (r *ApplicationReconciler) reconcileHPA(
 	err := r.Patch(
 		ctx,
 		desired,
-		client.Apply,
+		client.Apply, //nolint:staticcheck // SSA patch via client.Apply is the standard controller-runtime pattern
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	)

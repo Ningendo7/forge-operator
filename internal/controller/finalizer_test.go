@@ -31,7 +31,7 @@ func TestHandleFinalizer_AddsFinalizerWhenNotDeleting(t *testing.T) {
 	}
 
 	got := &forgev1alpha1.Application{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, got); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
 		t.Fatalf("failed to get Application: %v", err)
 	}
 	found := false
@@ -93,7 +93,7 @@ func TestHandleFinalizer_RemovesFinalizerOnDeleteWithNoStorage(t *testing.T) {
 	}
 
 	pending := &forgev1alpha1.Application{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, pending); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, pending); err != nil {
 		t.Fatalf("failed to get pending-deletion Application: %v", err)
 	}
 
@@ -105,7 +105,7 @@ func TestHandleFinalizer_RemovesFinalizerOnDeleteWithNoStorage(t *testing.T) {
 		t.Fatalf("expected deleted=true")
 	}
 
-	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, &forgev1alpha1.Application{})
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, &forgev1alpha1.Application{})
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected Application to be fully removed after finalizer cleanup, got err=%v", err)
 	}
@@ -119,7 +119,7 @@ func TestHandleFinalizer_ReturnsErrorAndKeepsFinalizerWhenCleanupFails(t *testin
 	app.Finalizers = []string{ApplicationFinalizer}
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
 		Provider: forgev1alpha1.ProviderAWSS3,
-		Bucket:   "demo-bucket",
+		Bucket:   testBucket,
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -129,7 +129,7 @@ func TestHandleFinalizer_ReturnsErrorAndKeepsFinalizerWhenCleanupFails(t *testin
 	}
 
 	pending := &forgev1alpha1.Application{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, pending); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, pending); err != nil {
 		t.Fatalf("failed to get pending-deletion Application: %v", err)
 	}
 
@@ -142,7 +142,7 @@ func TestHandleFinalizer_ReturnsErrorAndKeepsFinalizerWhenCleanupFails(t *testin
 	}
 
 	got := &forgev1alpha1.Application{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, got); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
 		t.Fatalf("expected Application to still exist after failed cleanup: %v", err)
 	}
 	found := false
@@ -170,8 +170,8 @@ func TestFinalizeApplication_NoOpWhenStorageIsNil(t *testing.T) {
 func TestFinalizeApplication_NoOpForUnrecognizedProvider(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Provider: "Static",
-		Bucket:   "demo-bucket",
+		Provider: providerStatic,
+		Bucket:   testBucket,
 	}
 	r := &ApplicationReconciler{}
 
@@ -187,8 +187,8 @@ func TestFinalizeApplication_ReturnsErrorWhenAWSManagerCreationFails(t *testing.
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
 		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     "demo-bucket",
-		SecretName: "missing-creds",
+		Bucket:     testBucket,
+		SecretName: testMissingCredsSecret,
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -205,7 +205,7 @@ func TestFinalizeApplication_ReturnsErrorWhenAkamaiManagerCreationFails(t *testi
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
 		Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
-		Bucket:   "demo-bucket",
+		Bucket:   testBucket,
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -222,8 +222,8 @@ func TestFinalizeApplication_SetsStorageReadyCleanupFailedOnError(t *testing.T) 
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
 		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     "demo-bucket",
-		SecretName: "missing-creds",
+		Bucket:     testBucket,
+		SecretName: testMissingCredsSecret,
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -233,7 +233,7 @@ func TestFinalizeApplication_SetsStorageReadyCleanupFailedOnError(t *testing.T) 
 	}
 
 	got := &forgev1alpha1.Application{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, got); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
 		t.Fatalf("failed to get Application: %v", err)
 	}
 

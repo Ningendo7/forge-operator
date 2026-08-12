@@ -19,7 +19,7 @@ func (r *ApplicationReconciler) desiredService(
 ) *corev1.Service {
 
 	labels := map[string]string{
-		"app": application.Name,
+		appLabelKey: application.Name,
 	}
 
 	serviceType := corev1.ServiceTypeClusterIP
@@ -80,7 +80,7 @@ func (r *ApplicationReconciler) reconcileService(
 	err := r.Patch(
 		ctx,
 		desired,
-		client.Apply,
+		client.Apply, //nolint:staticcheck // SSA patch via client.Apply is the standard controller-runtime pattern
 		client.ForceOwnership,
 		client.FieldOwner("forge-operator"),
 	)

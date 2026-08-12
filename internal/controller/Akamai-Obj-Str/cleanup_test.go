@@ -15,12 +15,12 @@ func TestFindAccessKeyIDByLabel_ReturnsMatchingID(t *testing.T) {
 		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
 			return []linodego.ObjectStorageKey{
 				{Label: "other-key", ID: 1},
-				{Label: "demo-app-key", ID: 42},
+				{Label: testAccessKeyLabel, ID: 42},
 			}, nil
 		},
 	})
 
-	id, err := m.findAccessKeyIDByLabel(context.Background(), "demo-app-key")
+	id, err := m.findAccessKeyIDByLabel(context.Background(), testAccessKeyLabel)
 	if err != nil {
 		t.Fatalf("findAccessKeyIDByLabel returned error: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestFindAccessKeyIDByLabel_PropagatesListError(t *testing.T) {
 		},
 	})
 
-	_, err := m.findAccessKeyIDByLabel(context.Background(), "demo-app-key")
+	_, err := m.findAccessKeyIDByLabel(context.Background(), testAccessKeyLabel)
 	if err == nil {
 		t.Fatalf("expected error from findAccessKeyIDByLabel, got nil")
 	}
@@ -64,7 +64,7 @@ func TestDeleteApplicationAccessKey_DeletesWhenFound(t *testing.T) {
 	deleteCalled := false
 	m := newTestManager(&mockAkamaiClient{
 		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
-			return []linodego.ObjectStorageKey{{Label: "demo-app-key", ID: 42}}, nil
+			return []linodego.ObjectStorageKey{{Label: testAccessKeyLabel, ID: 42}}, nil
 		},
 		deleteObjectStorageKeyFunc: func(ctx context.Context, keyID int) error {
 			deleteCalled = true
@@ -106,7 +106,7 @@ func TestDeleteApplicationAccessKey_NoOpWhenKeyMissing(t *testing.T) {
 func TestDeleteApplicationAccessKey_PropagatesDeleteError(t *testing.T) {
 	m := newTestManager(&mockAkamaiClient{
 		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
-			return []linodego.ObjectStorageKey{{Label: "demo-app-key", ID: 42}}, nil
+			return []linodego.ObjectStorageKey{{Label: testAccessKeyLabel, ID: 42}}, nil
 		},
 		deleteObjectStorageKeyFunc: func(ctx context.Context, keyID int) error {
 			return errors.New("delete failed")
@@ -184,7 +184,7 @@ func TestDeleteBucket_NoOpWhenBucketNameEmpty(t *testing.T) {
 func TestDeleteBucket_HappyPath(t *testing.T) {
 	m := newTestManager(&mockAkamaiClient{
 		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
-			return []linodego.ObjectStorageKey{{Label: "demo-app-key", ID: 42}}, nil
+			return []linodego.ObjectStorageKey{{Label: testAccessKeyLabel, ID: 42}}, nil
 		},
 		deleteObjectStorageKeyFunc: func(ctx context.Context, keyID int) error {
 			return nil

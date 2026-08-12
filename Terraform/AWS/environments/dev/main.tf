@@ -7,88 +7,134 @@
 module "vpc" {
   source = "../../modules/vpc"
 
-         env       = var.environment
-         cluster_name = var.cluster_name
-         vpc_cidr  = var.vpc_cidr
-         az_network_config = var.az_network_config
-         enable_single_nat_gateway = var.enable_single_nat_gateway
-  
-         tags = local.common_tags
+  env                       = var.environment
+  cluster_name              = var.cluster_name
+  vpc_cidr                  = var.vpc_cidr
+  az_network_config         = var.az_network_config
+  enable_single_nat_gateway = var.enable_single_nat_gateway
+
+  tags = local.common_tags
 }
 
 # Module 2: Networking (creates security groups, needs VPC)
 # Depends on: VPC module (needs vpc_id)
 module "networking" {
-         source = "../../modules/networking"
+  source = "../../modules/networking"
 
-         env              = var.environment
-         vpc_id           = module.vpc.vpc_id
-         private_subnet_ids = module.vpc.private_subnet_ids
-  
-         tags = local.common_tags
+  env                = var.environment
+  vpc_id             = module.vpc.vpc_id
+  private_subnet_ids = module.vpc.private_subnet_ids
+
+  tags = local.common_tags
 }
 
 # Module 3: IAM (creates cluster and node roles, no infrastructure dependencies)
 module "iam" {
-         source = "../../modules/iam"
+  source = "../../modules/iam"
 
-         env          = var.environment
-         cluster_name = var.cluster_name
-  
-         tags = local.common_tags
+  env          = var.environment
+  cluster_name = var.cluster_name
+
+  tags = local.common_tags
 }
 
 # Module 4: EKS (creates cluster, needs VPC, Networking, and IAM)
 # Depends on: VPC (private_subnet_ids), Networking (cluster_security_group_id), IAM (role ARNs)
 module "eks" {
-         source = "../../modules/eks"
+  source = "../../modules/eks"
 
-         env                       = var.environment
-         cluster_name              = var.cluster_name
-         cluster_version           = var.cluster_version
-  
-         # From IAM module
-         cluster_role_arn          = module.iam.cluster_role_arn
-         node_role_arn             = module.iam.node_role_arn
-  
-         # From VPC module
-         private_subnet_ids        = module.vpc.private_subnet_ids
-  
-         # From Networking module
-         cluster_security_group_id = module.networking.node_security_group_id
-  
-         # Node group sizing
-         desired_node_capacity     = var.desired_node_capacity
-         node_min_capacity         = var.node_min_capacity
-         node_max_capacity         = var.node_max_capacity
-         node_max_unavailable      = var.node_max_unavailable
-         node_ami_type             = var.node_ami_type
-         node_instance_types       = var.node_instance_types
-         node_capacity_type        = var.node_capacity_type
-  
-         tags = local.common_tags
+  env             = var.environment
+  cluster_name    = var.cluster_name
+  cluster_version = var.cluster_version
+
+  # From IAM module
+  cluster_role_arn = module.iam.cluster_role_arn
+  node_role_arn    = module.iam.node_role_arn
+
+  # From VPC module
+  private_subnet_ids = module.vpc.private_subnet_ids
+
+  # From Networking module
+  cluster_security_group_id = module.networking.node_security_group_id
+
+  # Node group sizing
+  desired_node_capacity = var.desired_node_capacity
+  node_min_capacity     = var.node_min_capacity
+  node_max_capacity     = var.node_max_capacity
+  node_max_unavailable  = var.node_max_unavailable
+  node_ami_type         = var.node_ami_type
+  node_instance_types   = var.node_instance_types
+  node_capacity_type    = var.node_capacity_type
+
+  tags = local.common_tags
 }
 
 # Module 5: IRSA 
 module "irsa" {
 
-         source = "../../modules/irsa"
-         role_name = "dev-app-operator-irsa-role"
+  source    = "../../modules/irsa"
+  role_name = "dev-app-operator-irsa-role"
 
-         oidc_providers = {
-                  (module.eks.oidc_provider_url) = {
-                           provider_arn = module.eks.oidc_provider_arn
-                           namespace_service_accounts = {
-                                    "operators" = ["app-controller-sa"]
-                           }
-                  }
-         }
-         
-         policy_arns = [
-                  aws_iam_policy.s3operator_permissions.arn
-         ]
-  
-         tags = local.common_tags
+  oidc_providers = {
+    (module.eks.oidc_provider_url) = {
+      provider_arn = module.eks.oidc_provider_arn
+      namespace_service_accounts = {
+        "operators" = ["app-controller-sa"]
+      }
+    }
+  }
+
+  policy_arns = [
+    aws_iam_policy.s3operator_permissions.arn
+  ]
+
+  tags = local.common_tags
+}
+
+# Module 5b: IRSA for the VPC CNI add-on (optional; scopes CNI permissions to
+# a dedicated role instead of the broader node role)
+module "vpc_cni_irsa" {
+  count = var.enable_vpc_cni_irsa ? 1 : 0
+
+  source           = "../../modules/irsa"
+  role_name        = "${var.environment}-vpc-cni-irsa-role"
+  role_description = "IRSA role for the VPC CNI add-on"
+
+  oidc_providers = {
+    (module.eks.oidc_provider_url) = {
+      provider_arn = module.eks.oidc_provider_arn
+      namespace_service_accounts = {
+        "kube-system" = ["aws-node"]
+      }
+    }
+  }
+
+  policy_arns = [
+    "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  ]
+
+  tags = local.common_tags
+}
+
+data "aws_eks_addon_version" "vpc_cni" {
+  addon_name         = "vpc-cni"
+  kubernetes_version = var.cluster_version
+  most_recent        = true
+}
+
+resource "aws_eks_addon" "vpc_cni" {
+  cluster_name                = module.eks.cluster_name
+  addon_name                  = "vpc-cni"
+  addon_version               = data.aws_eks_addon_version.vpc_cni.version
+  service_account_role_arn    = try(module.vpc_cni_irsa[0].role_arn, null)
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "PRESERVE"
+
+  tags = merge(local.common_tags, {
+    Name = "${var.environment}-${var.cluster_name}-vpc-cni"
+  })
+
+  depends_on = [module.eks]
 }
 
 # Module 6: Monitoring (creates observability resources, optional)
@@ -108,9 +154,9 @@ module "irsa" {
 
 # Local values for consistent tagging
 locals {
-         common_tags = merge(var.tags, {
-                  Environment = var.environment
-                  Project     = var.project_name
-                  ManagedBy   = "Terraform"
+  common_tags = merge(var.tags, {
+    Environment = var.environment
+    Project     = var.project_name
+    ManagedBy   = "Terraform"
   })
 }

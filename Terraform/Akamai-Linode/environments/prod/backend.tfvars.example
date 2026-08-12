@@ -1,0 +1,23 @@
+# Copy this file to backend.tfvars (gitignored) and fill in real values, then run:
+#   terraform init -backend-config=backend.tfvars
+#
+# Use a separate bucket or at least a separate key from dev, so a prod apply
+# can never read or write dev's state.
+#
+# variables.tf has no defaults, so every apply/plan also needs:
+#   terraform plan -var-file=prod.tfvars
+
+bucket  = "<your-akamai-object-storage-bucket-for-tfstate>"
+key     = "prod/terraform.tfstate"
+region  = "us-east"
+# Name of the AWS-credentials-file profile holding your Akamai Object Storage
+# S3-compatible access key/secret (see ~/.aws/credentials).
+profile = "<your-aws-credentials-profile-name>"
+
+endpoints = {
+  s3 = "https://us-east-1.linodeobjects.com"
+}
+
+skip_credentials_validation = true
+skip_region_validation      = true
+skip_requesting_account_id  = true

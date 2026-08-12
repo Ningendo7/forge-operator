@@ -137,13 +137,13 @@ func TestCreateBucket_SetsLocationConstraintForOtherRegions(t *testing.T) {
 			if params.CreateBucketConfiguration == nil {
 				t.Fatalf("expected CreateBucketConfiguration to be set for non-default region")
 			}
-			if string(params.CreateBucketConfiguration.LocationConstraint) != "eu-west-1" {
+			if string(params.CreateBucketConfiguration.LocationConstraint) != testEUWestRegion {
 				t.Errorf("expected LocationConstraint eu-west-1, got %q", params.CreateBucketConfiguration.LocationConstraint)
 			}
 			return &s3sdk.CreateBucketOutput{}, nil
 		},
 	}, nil)
-	m.region = "eu-west-1"
+	m.region = testEUWestRegion
 
 	if err := m.CreateBucket(context.Background()); err != nil {
 		t.Fatalf("CreateBucket returned error: %v", err)
@@ -239,7 +239,7 @@ func TestReconcileAppIRSA_CreatesRoleWhenNotFound(t *testing.T) {
 		createRoleFunc: func(ctx context.Context, params *iam.CreateRoleInput, optFns ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
 			createCalled = true
 			return &iam.CreateRoleOutput{
-				Role: &iamtypes.Role{Arn: aws.String("arn:aws:iam::123456789012:role/app-irsa-demo-app")},
+				Role: &iamtypes.Role{Arn: aws.String(testIRSARoleARN)},
 			}, nil
 		},
 		putRolePolicyFunc: func(ctx context.Context, params *iam.PutRolePolicyInput, optFns ...func(*iam.Options)) (*iam.PutRolePolicyOutput, error) {
@@ -258,7 +258,7 @@ func TestReconcileAppIRSA_CreatesRoleWhenNotFound(t *testing.T) {
 	if !putPolicyCalled {
 		t.Fatalf("expected PutRolePolicy to be called")
 	}
-	if roleArn != "arn:aws:iam::123456789012:role/app-irsa-demo-app" {
+	if roleArn != testIRSARoleARN {
 		t.Errorf("expected role arn to be returned, got %q", roleArn)
 	}
 }
@@ -269,7 +269,7 @@ func TestReconcileAppIRSA_UpdatesTrustPolicyWhenRoleExists(t *testing.T) {
 	m := newTestManager(nil, &mockIAMClient{
 		getRoleFunc: func(ctx context.Context, params *iam.GetRoleInput, optFns ...func(*iam.Options)) (*iam.GetRoleOutput, error) {
 			return &iam.GetRoleOutput{
-				Role: &iamtypes.Role{Arn: aws.String("arn:aws:iam::123456789012:role/app-irsa-demo-app")},
+				Role: &iamtypes.Role{Arn: aws.String(testIRSARoleARN)},
 			}, nil
 		},
 		createRoleFunc: func(ctx context.Context, params *iam.CreateRoleInput, optFns ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
@@ -295,7 +295,7 @@ func TestReconcileAppIRSA_UpdatesTrustPolicyWhenRoleExists(t *testing.T) {
 	if !updateCalled {
 		t.Fatalf("expected UpdateAssumeRolePolicy to be called when role already exists")
 	}
-	if roleArn != "arn:aws:iam::123456789012:role/app-irsa-demo-app" {
+	if roleArn != testIRSARoleARN {
 		t.Errorf("expected role arn to be returned, got %q", roleArn)
 	}
 }
@@ -320,7 +320,7 @@ func TestReconcileAppIRSA_PropagatesPutRolePolicyError(t *testing.T) {
 	m := newTestManager(nil, &mockIAMClient{
 		getRoleFunc: func(ctx context.Context, params *iam.GetRoleInput, optFns ...func(*iam.Options)) (*iam.GetRoleOutput, error) {
 			return &iam.GetRoleOutput{
-				Role: &iamtypes.Role{Arn: aws.String("arn:aws:iam::123456789012:role/app-irsa-demo-app")},
+				Role: &iamtypes.Role{Arn: aws.String(testIRSARoleARN)},
 			}, nil
 		},
 		updateAssumeRolePolicyFunc: func(ctx context.Context, params *iam.UpdateAssumeRolePolicyInput, optFns ...func(*iam.Options)) (*iam.UpdateAssumeRolePolicyOutput, error) {
@@ -353,7 +353,7 @@ func TestReconcileBucket_HappyPathReturnsRoleARN(t *testing.T) {
 	}, &mockIAMClient{
 		getRoleFunc: func(ctx context.Context, params *iam.GetRoleInput, optFns ...func(*iam.Options)) (*iam.GetRoleOutput, error) {
 			return &iam.GetRoleOutput{
-				Role: &iamtypes.Role{Arn: aws.String("arn:aws:iam::123456789012:role/app-irsa-demo-app")},
+				Role: &iamtypes.Role{Arn: aws.String(testIRSARoleARN)},
 			}, nil
 		},
 		updateAssumeRolePolicyFunc: func(ctx context.Context, params *iam.UpdateAssumeRolePolicyInput, optFns ...func(*iam.Options)) (*iam.UpdateAssumeRolePolicyOutput, error) {
@@ -368,7 +368,7 @@ func TestReconcileBucket_HappyPathReturnsRoleARN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReconcileBucket returned error: %v", err)
 	}
-	if result.RoleARN != "arn:aws:iam::123456789012:role/app-irsa-demo-app" {
+	if result.RoleARN != testIRSARoleARN {
 		t.Errorf("expected role arn to be returned, got %q", result.RoleARN)
 	}
 }

@@ -237,7 +237,7 @@ func (r *ApplicationReconciler) desiredDeployment(
 ) *appsv1.Deployment {
 
 	labels := map[string]string{
-		"app": application.Name,
+		appLabelKey: application.Name,
 	}
 
 	var replicas int32 = 1
@@ -251,7 +251,7 @@ func (r *ApplicationReconciler) desiredDeployment(
 		// Needed for Server-Side Apply to work correctly
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "apps/v1",
-			Kind:       "Deployment",
+			Kind:       deploymentKind,
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      naming.Deployment(application),
@@ -292,7 +292,7 @@ func (r *ApplicationReconciler) reconcileDeployment(
 	err := r.Patch(
 		ctx,
 		desired,
-		client.Apply,
+		client.Apply, //nolint:staticcheck // SSA patch via client.Apply is the standard controller-runtime pattern
 		client.ForceOwnership,
 		client.FieldOwner("forge-operator"),
 	)

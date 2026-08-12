@@ -88,7 +88,7 @@ func (m *Manager) CreateBucket(
 		Bucket: aws.String(m.bucket),
 	}
 
-	if m.region != "us-east-1" {
+	if m.region != defaultRegion {
 		input.CreateBucketConfiguration = &s3types.CreateBucketConfiguration{
 			LocationConstraint: s3types.BucketLocationConstraint(m.region),
 		}

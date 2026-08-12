@@ -20,7 +20,7 @@ func TestIsIngressReady_NotFound(t *testing.T) {
 	fakeClient := newIngressTestClient().Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, msg, err := s.IsIngressReady(context.Background(), "default", "demo-app")
+	ready, msg, err := s.IsIngressReady(context.Background(), testNamespace, testAppName)
 	if err != nil {
 		t.Fatalf("expected nil error for not-found ingress, got %v", err)
 	}
@@ -34,12 +34,12 @@ func TestIsIngressReady_NotFound(t *testing.T) {
 
 func TestIsIngressReady_PendingWhenLoadBalancerNil(t *testing.T) {
 	ing := &networkingv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
 	}
 	fakeClient := newIngressTestClient(ing).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, _, err := s.IsIngressReady(context.Background(), "default", "demo-app")
+	ready, _, err := s.IsIngressReady(context.Background(), testNamespace, testAppName)
 	if err != nil {
 		t.Fatalf("IsIngressReady returned error: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestIsIngressReady_PendingWhenLoadBalancerNil(t *testing.T) {
 
 func TestIsIngressReady_ReadyWithIP(t *testing.T) {
 	ing := &networkingv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
 		Status: networkingv1.IngressStatus{
 			LoadBalancer: networkingv1.IngressLoadBalancerStatus{
 				Ingress: []networkingv1.IngressLoadBalancerIngress{{IP: "203.0.113.5"}},
@@ -60,7 +60,7 @@ func TestIsIngressReady_ReadyWithIP(t *testing.T) {
 	fakeClient := newIngressTestClient(ing).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, msg, err := s.IsIngressReady(context.Background(), "default", "demo-app")
+	ready, msg, err := s.IsIngressReady(context.Background(), testNamespace, testAppName)
 	if err != nil {
 		t.Fatalf("IsIngressReady returned error: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestIsIngressReady_ReadyWithIP(t *testing.T) {
 
 func TestIsIngressReady_ReadyWithHostname(t *testing.T) {
 	ing := &networkingv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
 		Status: networkingv1.IngressStatus{
 			LoadBalancer: networkingv1.IngressLoadBalancerStatus{
 				Ingress: []networkingv1.IngressLoadBalancerIngress{{Hostname: "lb.example.com"}},
@@ -81,7 +81,7 @@ func TestIsIngressReady_ReadyWithHostname(t *testing.T) {
 	fakeClient := newIngressTestClient(ing).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, msg, err := s.IsIngressReady(context.Background(), "default", "demo-app")
+	ready, msg, err := s.IsIngressReady(context.Background(), testNamespace, testAppName)
 	if err != nil {
 		t.Fatalf("IsIngressReady returned error: %v", err)
 	}

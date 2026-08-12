@@ -40,7 +40,7 @@ func TestReconcile_ReturnsNilWhenApplicationNotFound(t *testing.T) {
 	}
 
 	result, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: client.ObjectKey{Name: "missing-app", Namespace: "default"},
+		NamespacedName: client.ObjectKey{Name: "missing-app", Namespace: testNamespace},
 	})
 	if err != nil {
 		t.Fatalf("expected nil error when Application is not found, got %v", err)
@@ -61,14 +61,14 @@ func TestReconcile_SetsFailedStatusWhenEnsureDesiredStateFails(t *testing.T) {
 	}
 
 	_, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: client.ObjectKey{Name: "demo-app", Namespace: "default"},
+		NamespacedName: client.ObjectKey{Name: testAppName, Namespace: testNamespace},
 	})
 	if err == nil {
 		t.Fatalf("expected error when ensureDesiredState fails, got nil")
 	}
 
 	got := &forgev1alpha1.Application{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, got); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
 		t.Fatalf("failed to get Application: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestReconcile_RequeuesWhenComputeNotYetReady(t *testing.T) {
 	}
 
 	result, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: client.ObjectKey{Name: "demo-app", Namespace: "default"},
+		NamespacedName: client.ObjectKey{Name: testAppName, Namespace: testNamespace},
 	})
 	if err != nil {
 		t.Fatalf("Reconcile returned error: %v", err)
@@ -99,16 +99,16 @@ func TestReconcile_RequeuesWhenComputeNotYetReady(t *testing.T) {
 	}
 
 	got := &forgev1alpha1.Application{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, got); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
 		t.Fatalf("failed to get Application: %v", err)
 	}
 	ready := findAppCondition(got, statusmanager.TypeReady)
-	if ready == nil || ready.Status != "False" {
+	if ready == nil || ready.Status != testConditionFalse {
 		t.Fatalf("expected Ready=False while compute is not yet healthy, got %#v", ready)
 	}
 
 	dep := &appsv1.Deployment{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-deployment", Namespace: "default"}, dep); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testDeploymentName, Namespace: testNamespace}, dep); err != nil {
 		t.Fatalf("expected Deployment to have been created by ensureDesiredState: %v", err)
 	}
 }
@@ -125,14 +125,14 @@ func TestReconcile_SetsReadyWhenComputeIsHealthy(t *testing.T) {
 
 	// First reconcile creates the child resources (Deployment will not be ready yet).
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: client.ObjectKey{Name: "demo-app", Namespace: "default"},
+		NamespacedName: client.ObjectKey{Name: testAppName, Namespace: testNamespace},
 	}); err != nil {
 		t.Fatalf("first Reconcile returned error: %v", err)
 	}
 
 	// Simulate the Deployment becoming healthy, as a real deployment controller would report.
 	dep := &appsv1.Deployment{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-deployment", Namespace: "default"}, dep); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testDeploymentName, Namespace: testNamespace}, dep); err != nil {
 		t.Fatalf("failed to get Deployment: %v", err)
 	}
 	dep.Status.UpdatedReplicas = 1
@@ -143,7 +143,7 @@ func TestReconcile_SetsReadyWhenComputeIsHealthy(t *testing.T) {
 	}
 
 	result, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: client.ObjectKey{Name: "demo-app", Namespace: "default"},
+		NamespacedName: client.ObjectKey{Name: testAppName, Namespace: testNamespace},
 	})
 	if err != nil {
 		t.Fatalf("second Reconcile returned error: %v", err)
@@ -153,7 +153,7 @@ func TestReconcile_SetsReadyWhenComputeIsHealthy(t *testing.T) {
 	}
 
 	got := &forgev1alpha1.Application{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, got); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
 		t.Fatalf("failed to get Application: %v", err)
 	}
 	ready := findAppCondition(got, statusmanager.TypeReady)
@@ -178,7 +178,7 @@ func TestReconcile_ReturnsEarlyWhenDeleting(t *testing.T) {
 	}
 
 	result, err := r.Reconcile(context.Background(), reconcile.Request{
-		NamespacedName: client.ObjectKey{Name: "demo-app", Namespace: "default"},
+		NamespacedName: client.ObjectKey{Name: testAppName, Namespace: testNamespace},
 	})
 	if err != nil {
 		t.Fatalf("Reconcile returned error: %v", err)
@@ -187,7 +187,7 @@ func TestReconcile_ReturnsEarlyWhenDeleting(t *testing.T) {
 		t.Fatalf("expected no requeue on deletion path, got %v", result.RequeueAfter)
 	}
 
-	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, &forgev1alpha1.Application{})
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, &forgev1alpha1.Application{})
 	if err == nil {
 		t.Fatalf("expected Application to be fully removed after finalizer cleanup")
 	}

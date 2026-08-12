@@ -14,19 +14,19 @@ import (
 func TestDesiredSecret_DefaultsToOpaqueType(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Secret = &forgev1alpha1.SecretSpec{
-		StringData: map[string]string{"API_KEY": "abc123"},
+		StringData: map[string]string{testAPIKey: testAPIKeyValue},
 	}
 
 	r := &ApplicationReconciler{}
 	secret := r.desiredSecret(app)
 
-	if secret.Name != "demo-app-secret" {
+	if secret.Name != testSecretAppName {
 		t.Fatalf("expected default secret name demo-app-secret, got %q", secret.Name)
 	}
 	if secret.Type != corev1.SecretTypeOpaque {
 		t.Fatalf("expected default secret type %q, got %q", corev1.SecretTypeOpaque, secret.Type)
 	}
-	if secret.StringData["API_KEY"] != "abc123" {
+	if secret.StringData[testAPIKey] != testAPIKeyValue {
 		t.Fatalf("expected secret data API_KEY to be present")
 	}
 }
@@ -34,18 +34,18 @@ func TestDesiredSecret_DefaultsToOpaqueType(t *testing.T) {
 func TestDesiredSecret_UsesConfiguredValues(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Secret = &forgev1alpha1.SecretSpec{
-		Name:       "custom-secret",
-		StringData: map[string]string{"API_KEY": "abc123"},
+		Name:       testCustomSecretName,
+		StringData: map[string]string{testAPIKey: testAPIKeyValue},
 		Type:       corev1.SecretTypeOpaque,
 	}
 
 	r := &ApplicationReconciler{}
 	secret := r.desiredSecret(app)
 
-	if secret.Name != "custom-secret" {
+	if secret.Name != testCustomSecretName {
 		t.Fatalf("expected secret name custom-secret, got %q", secret.Name)
 	}
-	if secret.StringData["API_KEY"] != "abc123" {
+	if secret.StringData[testAPIKey] != testAPIKeyValue {
 		t.Fatalf("expected secret data API_KEY to be present")
 	}
 	if secret.Type != corev1.SecretTypeOpaque {
@@ -72,7 +72,7 @@ func TestReconcileSecret_CreatesSecret(t *testing.T) {
 
 	app := newTestApplication()
 	app.Spec.Secret = &forgev1alpha1.SecretSpec{
-		StringData: map[string]string{"API_KEY": "abc123"},
+		StringData: map[string]string{testAPIKey: testAPIKeyValue},
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -83,10 +83,10 @@ func TestReconcileSecret_CreatesSecret(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-secret", Namespace: "default"}, secret); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testSecretAppName, Namespace: testNamespace}, secret); err != nil {
 		t.Fatalf("failed to get Secret: %v", err)
 	}
-	if secret.StringData["API_KEY"] != "abc123" {
+	if secret.StringData[testAPIKey] != testAPIKeyValue {
 		t.Errorf("expected secret data API_KEY to be present")
 	}
 }
@@ -107,7 +107,7 @@ func TestReconcileSecret_CreatesWhenSpecPresentButDataEmpty(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-secret", Namespace: "default"}, secret); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testSecretAppName, Namespace: testNamespace}, secret); err != nil {
 		t.Fatalf("expected Secret to be created even with empty data, got: %v", err)
 	}
 }
@@ -121,7 +121,7 @@ func TestReconcileSecret_UsesManagedNameIndependentOfContainerMountRef(t *testin
 	app.Spec.Container.SecretName = "some-other-preexisting-secret"
 	app.Spec.Secret = &forgev1alpha1.SecretSpec{
 		Name:       "custom-managed-secret",
-		StringData: map[string]string{"API_KEY": "abc123"},
+		StringData: map[string]string{testAPIKey: testAPIKeyValue},
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -139,7 +139,7 @@ func TestReconcileSecret_UsesManagedNameIndependentOfContainerMountRef(t *testin
 	}
 
 	deleted := &corev1.Secret{}
-	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "custom-managed-secret", Namespace: "default"}, deleted)
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "custom-managed-secret", Namespace: testNamespace}, deleted)
 	if err == nil {
 		t.Fatalf("expected managed Secret custom-managed-secret to be deleted, but it still exists")
 	}
@@ -152,8 +152,8 @@ func TestReconcileSecret_RenameCleansUpPreviousName(t *testing.T) {
 
 	app := newTestApplication()
 	app.Spec.Secret = &forgev1alpha1.SecretSpec{
-		Name:       "old-name",
-		StringData: map[string]string{"API_KEY": "abc123"},
+		Name:       testOldName,
+		StringData: map[string]string{testAPIKey: testAPIKeyValue},
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -163,15 +163,15 @@ func TestReconcileSecret_RenameCleansUpPreviousName(t *testing.T) {
 		t.Fatalf("failed to create secret: %v", err)
 	}
 
-	app.Spec.Secret.Name = "new-name"
+	app.Spec.Secret.Name = testNewName
 	if err := r.reconcileSecret(context.Background(), app); err != nil {
 		t.Fatalf("reconcileSecret returned error on rename: %v", err)
 	}
 
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "new-name", Namespace: "default"}, &corev1.Secret{}); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testNewName, Namespace: testNamespace}, &corev1.Secret{}); err != nil {
 		t.Fatalf("expected new-name Secret to exist: %v", err)
 	}
-	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "old-name", Namespace: "default"}, &corev1.Secret{})
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testOldName, Namespace: testNamespace}, &corev1.Secret{})
 	if err == nil {
 		t.Fatalf("expected old-name Secret to have been cleaned up after rename")
 	}
@@ -183,8 +183,8 @@ func TestReconcileSecret_DisablingAppSecretDoesNotDeleteStorageSecret(t *testing
 	_ = corev1.AddToScheme(scheme)
 
 	app := newTestApplication()
-	app.Spec.Secret = &forgev1alpha1.SecretSpec{StringData: map[string]string{"API_KEY": "abc123"}}
-	app.Spec.Storage = &forgev1alpha1.StorageSpec{Provider: forgev1alpha1.ProviderAWSS3, Bucket: "demo-bucket"}
+	app.Spec.Secret = &forgev1alpha1.SecretSpec{StringData: map[string]string{testAPIKey: testAPIKeyValue}}
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Provider: forgev1alpha1.ProviderAWSS3, Bucket: testBucket}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -201,7 +201,7 @@ func TestReconcileSecret_DisablingAppSecretDoesNotDeleteStorageSecret(t *testing
 		t.Fatalf("reconcileSecret returned error on disable: %v", err)
 	}
 
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-storage", Namespace: "default"}, &corev1.Secret{}); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testStorageSecretName, Namespace: testNamespace}, &corev1.Secret{}); err != nil {
 		t.Fatalf("expected storage Secret to survive disabling the unrelated app Secret: %v", err)
 	}
 }
@@ -213,7 +213,7 @@ func TestReconcileSecret_Idempotent(t *testing.T) {
 
 	app := newTestApplication()
 	app.Spec.Secret = &forgev1alpha1.SecretSpec{
-		StringData: map[string]string{"API_KEY": "abc123"},
+		StringData: map[string]string{testAPIKey: testAPIKeyValue},
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -227,7 +227,7 @@ func TestReconcileSecret_Idempotent(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-secret", Namespace: "default"}, secret); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testSecretAppName, Namespace: testNamespace}, secret); err != nil {
 		t.Fatalf("failed to get Secret after second reconciliation: %v", err)
 	}
 }
@@ -239,7 +239,7 @@ func TestReconcileSecret_DeletesWhenDisabled(t *testing.T) {
 
 	app := newTestApplication()
 	app.Spec.Secret = &forgev1alpha1.SecretSpec{
-		StringData: map[string]string{"API_KEY": "abc123"},
+		StringData: map[string]string{testAPIKey: testAPIKeyValue},
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -255,7 +255,7 @@ func TestReconcileSecret_DeletesWhenDisabled(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{}
-	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-secret", Namespace: "default"}, secret)
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testSecretAppName, Namespace: testNamespace}, secret)
 	if err == nil {
 		t.Fatalf("expected Secret to be deleted, but it still exists")
 	}
@@ -267,9 +267,9 @@ func TestReconcileSecret_SetsControllerReference(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	app := newTestApplication()
-	app.ObjectMeta.UID = "12345"
+	app.UID = "12345"
 	app.Spec.Secret = &forgev1alpha1.SecretSpec{
-		StringData: map[string]string{"API_KEY": "abc123"},
+		StringData: map[string]string{testAPIKey: testAPIKeyValue},
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
@@ -280,7 +280,7 @@ func TestReconcileSecret_SetsControllerReference(t *testing.T) {
 	}
 
 	secret := &corev1.Secret{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app-secret", Namespace: "default"}, secret); err != nil {
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testSecretAppName, Namespace: testNamespace}, secret); err != nil {
 		t.Fatalf("failed to get Secret: %v", err)
 	}
 
@@ -301,7 +301,7 @@ func TestReconcileSecret_ReturnsErrorWhenPatchFails(t *testing.T) {
 
 	app := newTestApplication()
 	app.Spec.Secret = &forgev1alpha1.SecretSpec{
-		StringData: map[string]string{"API_KEY": "abc123"},
+		StringData: map[string]string{testAPIKey: testAPIKeyValue},
 	}
 
 	baseClient := fake.NewClientBuilder().WithScheme(scheme).Build()

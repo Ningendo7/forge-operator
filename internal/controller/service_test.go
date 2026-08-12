@@ -135,7 +135,7 @@ func TestReconcileService_CreateService(t *testing.T) {
 	}
 
 	service := &corev1.Service{}
-	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, service)
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, service)
 	if err != nil {
 		t.Fatalf("failed to get Service: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestReconcileService_Idempotent(t *testing.T) {
 	}
 
 	service := &corev1.Service{}
-	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, service)
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, service)
 	if err != nil {
 		t.Fatalf("failed to get Service after second reconciliation: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestReconcileService_UpdateServicePort(t *testing.T) {
 	}
 
 	service := &corev1.Service{}
-	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, service)
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, service)
 	if err != nil {
 		t.Fatalf("failed to get Service after second reconciliation: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestReconcileService_SetsControllerReference(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	app := newTestApplication()
-	app.ObjectMeta.UID = "12345"
+	app.UID = "12345"
 	app.Spec.Service = forgev1alpha1.ServiceSpec{
 		Port: 80,
 	}
@@ -255,7 +255,7 @@ func TestReconcileService_SetsControllerReference(t *testing.T) {
 	}
 
 	service := &corev1.Service{}
-	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: "default"}, service)
+	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, service)
 	if err != nil {
 		t.Fatalf("failed to get Service: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestReconcileService_ReturnsErrorWhenPatchFails(t *testing.T) {
 	_ = corev1.AddToScheme(scheme)
 
 	app := newTestApplication()
-	app.ObjectMeta.UID = "12345"
+	app.UID = "12345"
 	app.Spec.Service = forgev1alpha1.ServiceSpec{
 		Port: 80,
 	}

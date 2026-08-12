@@ -60,7 +60,7 @@ output "node_security_group_id" {
 # IRSA outputs (only if enabled)
 output "vpc_cni_role_arn" {
   description = "IAM role ARN for VPC CNI add-on (IRSA)"
-  value       = try(module.irsa[0].vpc_cni_role_arn, null)
+  value       = try(module.vpc_cni_irsa[0].role_arn, null)
 }
 
 # Configure kubectl

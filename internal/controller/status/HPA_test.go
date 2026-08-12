@@ -20,7 +20,7 @@ func TestIsHPAReady_NotFound(t *testing.T) {
 	fakeClient := newHPATestClient().Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, msg, err := s.IsHPAReady(context.Background(), "default", "demo-app-hpa")
+	ready, msg, err := s.IsHPAReady(context.Background(), testNamespace, testHPAName)
 	if err != nil {
 		t.Fatalf("expected nil error for not-found HPA, got %v", err)
 	}
@@ -35,13 +35,13 @@ func TestIsHPAReady_NotFound(t *testing.T) {
 func TestIsHPAReady_ObservedGenerationLagsSpec(t *testing.T) {
 	observed := int64(1)
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-hpa", Namespace: "default", Generation: 2},
+		ObjectMeta: metav1.ObjectMeta{Name: testHPAName, Namespace: testNamespace, Generation: 2},
 		Status:     autoscalingv2.HorizontalPodAutoscalerStatus{ObservedGeneration: &observed},
 	}
 	fakeClient := newHPATestClient(hpa).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, _, err := s.IsHPAReady(context.Background(), "default", "demo-app-hpa")
+	ready, _, err := s.IsHPAReady(context.Background(), testNamespace, testHPAName)
 	if err != nil {
 		t.Fatalf("IsHPAReady returned error: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestIsHPAReady_ObservedGenerationLagsSpec(t *testing.T) {
 
 func TestIsHPAReady_AbleToScaleFalse(t *testing.T) {
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-hpa", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testHPAName, Namespace: testNamespace},
 		Status: autoscalingv2.HorizontalPodAutoscalerStatus{
 			Conditions: []autoscalingv2.HorizontalPodAutoscalerCondition{
 				{Type: autoscalingv2.AbleToScale, Status: "False", Message: "failed to get metrics"},
@@ -62,7 +62,7 @@ func TestIsHPAReady_AbleToScaleFalse(t *testing.T) {
 	fakeClient := newHPATestClient(hpa).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, msg, err := s.IsHPAReady(context.Background(), "default", "demo-app-hpa")
+	ready, msg, err := s.IsHPAReady(context.Background(), testNamespace, testHPAName)
 	if err != nil {
 		t.Fatalf("IsHPAReady returned error: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestIsHPAReady_AbleToScaleFalse(t *testing.T) {
 
 func TestIsHPAReady_ReadyWhenNoIssues(t *testing.T) {
 	hpa := &autoscalingv2.HorizontalPodAutoscaler{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-hpa", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testHPAName, Namespace: testNamespace},
 		Status: autoscalingv2.HorizontalPodAutoscalerStatus{
 			CurrentReplicas: 2,
 			Conditions: []autoscalingv2.HorizontalPodAutoscalerCondition{
@@ -87,7 +87,7 @@ func TestIsHPAReady_ReadyWhenNoIssues(t *testing.T) {
 	fakeClient := newHPATestClient(hpa).Build()
 	s := NewStatusManager(fakeClient)
 
-	ready, msg, err := s.IsHPAReady(context.Background(), "default", "demo-app-hpa")
+	ready, msg, err := s.IsHPAReady(context.Background(), testNamespace, testHPAName)
 	if err != nil {
 		t.Fatalf("IsHPAReady returned error: %v", err)
 	}

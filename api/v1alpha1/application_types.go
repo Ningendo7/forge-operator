@@ -316,7 +316,7 @@ type ServiceAccountSpec struct {
 	// +optional
 	Name string `json:"name,omitempty"`
 	// Create a new ServiceAccount if it doesn't exist.
-	//Defaults to true
+	// Defaults to true
 	Create *bool `json:"create,omitempty"`
 }
 

@@ -79,7 +79,7 @@ func TestEnsureBucketExists_CreatesBucketWhenNotFound(t *testing.T) {
 		},
 		createObjectStorageBucketFunc: func(ctx context.Context, opts linodego.ObjectStorageBucketCreateOptions) (*linodego.ObjectStorageBucket, error) {
 			createCalled = true
-			if opts.Label != "demo-bucket" || opts.Cluster != "us-east-1" {
+			if opts.Label != testBucket || opts.Cluster != testRegion { //nolint:staticcheck // asserts the Cluster field the manager currently sets
 				t.Errorf("unexpected create options: %#v", opts)
 			}
 			return &linodego.ObjectStorageBucket{Label: opts.Label}, nil
@@ -134,7 +134,7 @@ func TestEnsureAccessKey_ReusesExistingKey(t *testing.T) {
 	m := newTestManager(&mockAkamaiClient{
 		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
 			return []linodego.ObjectStorageKey{
-				{Label: "demo-app-key", AccessKey: "existing-access-key"},
+				{Label: testAccessKeyLabel, AccessKey: testExistingAccessKey},
 			}, nil
 		},
 		createObjectStorageKeyFunc: func(ctx context.Context, opts linodego.ObjectStorageKeyCreateOptions) (*linodego.ObjectStorageKey, error) {
@@ -147,7 +147,7 @@ func TestEnsureAccessKey_ReusesExistingKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureAccessKey returned error: %v", err)
 	}
-	if result.AccessKey != "existing-access-key" {
+	if result.AccessKey != testExistingAccessKey {
 		t.Errorf("expected existing access key to be reused, got %q", result.AccessKey)
 	}
 	if result.SecretKey != "" {
@@ -164,7 +164,7 @@ func TestEnsureAccessKey_CreatesNewKeyWhenNoneExists(t *testing.T) {
 			return []linodego.ObjectStorageKey{}, nil
 		},
 		createObjectStorageKeyFunc: func(ctx context.Context, opts linodego.ObjectStorageKeyCreateOptions) (*linodego.ObjectStorageKey, error) {
-			if opts.Label != "demo-app-key" {
+			if opts.Label != testAccessKeyLabel {
 				t.Errorf("expected key label demo-app-key, got %q", opts.Label)
 			}
 			return &linodego.ObjectStorageKey{AccessKey: "new-access-key", SecretKey: "new-secret-key"}, nil
@@ -223,7 +223,7 @@ func TestResolveEndpoint_UsesConfiguredEndpoint(t *testing.T) {
 func TestResolveEndpoint_DefaultsToRegionBasedEndpoint(t *testing.T) {
 	m := newTestManager(nil)
 	m.storage.Endpoint = ""
-	m.region = "us-east-1"
+	m.region = testRegion
 
 	if got := m.resolveEndpoint(); got != "us-east-1.linodeobjects.com" {
 		t.Fatalf("expected default region-based endpoint, got %q", got)
@@ -238,7 +238,7 @@ func TestReconcileBucket_HappyPath(t *testing.T) {
 			return &linodego.ObjectStorageBucket{Label: bucket}, nil
 		},
 		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
-			return []linodego.ObjectStorageKey{{Label: "demo-app-key", AccessKey: "existing-access-key"}}, nil
+			return []linodego.ObjectStorageKey{{Label: testAccessKeyLabel, AccessKey: testExistingAccessKey}}, nil
 		},
 	})
 
@@ -246,7 +246,7 @@ func TestReconcileBucket_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReconcileBucket returned error: %v", err)
 	}
-	if result.AccessKey != "existing-access-key" {
+	if result.AccessKey != testExistingAccessKey {
 		t.Errorf("expected access key to be returned, got %q", result.AccessKey)
 	}
 	if result.Endpoint != "us-east-1.linodeobjects.com" {

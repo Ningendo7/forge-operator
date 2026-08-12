@@ -101,10 +101,7 @@ func (m *Manager) deleteAllObjectVersions(
 		// Chunk the batch deletion into batches of 1000 objects to avoid exceeding AWS limits
 		batchSize := 1000
 		for i := 0; i < len(objectsToDelete); i += batchSize {
-			end := i + batchSize
-			if end > len(objectsToDelete) {
-				end = len(objectsToDelete)
-			}
+			end := min(i+batchSize, len(objectsToDelete))
 
 			out, err := m.s3client.DeleteObjects(ctx, &s3sdk.DeleteObjectsInput{
 				Bucket: aws.String(m.bucket),

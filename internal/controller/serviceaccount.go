@@ -39,7 +39,7 @@ func (r *ApplicationReconciler) desiredServiceAccount(
 	application *forgev1alpha1.Application,
 ) *corev1.ServiceAccount {
 
-	labels := map[string]string{"app": application.Name}
+	labels := map[string]string{appLabelKey: application.Name}
 	name := serviceAccountNameFor(application)
 
 	return &corev1.ServiceAccount{
@@ -78,7 +78,7 @@ func (r *ApplicationReconciler) reconcileServiceAccount(
 	if err := r.Patch(
 		ctx,
 		desired,
-		client.Apply,
+		client.Apply, //nolint:staticcheck // SSA patch via client.Apply is the standard controller-runtime pattern
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	); err != nil {
@@ -112,7 +112,7 @@ func (r *ApplicationReconciler) annotateServiceAccountWithIRSA(
 	if err := r.Patch(
 		ctx,
 		desired,
-		client.Apply,
+		client.Apply, //nolint:staticcheck // SSA patch via client.Apply is the standard controller-runtime pattern
 		client.FieldOwner("forge-operator"),
 		client.ForceOwnership,
 	); err != nil {

@@ -11,7 +11,8 @@ resource "linode_lke_cluster" "lke-cluster" {
 
   pool {
 
-    type = var.node_type
+    type        = var.node_type
+    firewall_id = var.firewall_id
 
     autoscaler {
       min = var.min_nodes

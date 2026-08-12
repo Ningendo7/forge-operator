@@ -72,7 +72,7 @@ func (r *ApplicationReconciler) reconcileStorage(
 		if err := r.reconcileAkamaiStorage(ctx, application); err != nil {
 			return fmt.Errorf("failed to reconcile Akamai storage: %w", err)
 		}
-	case "MinIO", "minio", "Static":
+	case "MinIO", "minio", providerStatic:
 
 	default:
 		err := fmt.Errorf("unsupported storage provider: %s", application.Spec.Storage.Provider)
