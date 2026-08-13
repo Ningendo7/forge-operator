@@ -141,8 +141,6 @@ type StorageStatus struct {
 	// Akamai contains Akamai-specific status information.
 	// +optional
 	Akamai *AkamaiStorageStatus `json:"akamai,omitempty"`
-
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // AWSStorageStatus defines AWS-specific status outputs.

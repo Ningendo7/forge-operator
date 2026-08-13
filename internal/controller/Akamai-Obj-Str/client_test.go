@@ -11,6 +11,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+const (
+	testDefaultTokenSecretName = "demo-app-akamai-token"
+	testAPITokenKey            = "apiToken"
+)
+
 func TestNewManager_ReturnsErrorWhenStorageSpecIsNil(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)
@@ -19,7 +24,7 @@ func TestNewManager_ReturnsErrorWhenStorageSpecIsNil(t *testing.T) {
 	app := newTestApp()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app)
+	_, err := NewManager(context.Background(), fakeClient, app, testRegion)
 	if err == nil {
 		t.Fatalf("expected error when storage spec is nil, got nil")
 	}
@@ -34,7 +39,7 @@ func TestNewManager_ReturnsErrorWhenSecretMissing(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app)
+	_, err := NewManager(context.Background(), fakeClient, app, testRegion)
 	if err == nil {
 		t.Fatalf("expected error when credentials secret is missing, got nil")
 	}
@@ -48,12 +53,12 @@ func TestNewManager_ReturnsErrorWhenAPITokenMissing(t *testing.T) {
 	app := newTestApp()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-akamai-token", Namespace: testNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testDefaultTokenSecretName, Namespace: testNamespace},
 		Data:       map[string][]byte{"other-key": []byte("value")},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app)
+	_, err := NewManager(context.Background(), fakeClient, app, testRegion)
 	if err == nil {
 		t.Fatalf("expected error when apiToken key is missing from secret, got nil")
 	}
@@ -67,12 +72,12 @@ func TestNewManager_UsesDefaultSecretNameAndRegion(t *testing.T) {
 	app := newTestApp()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-akamai-token", Namespace: testNamespace},
-		Data:       map[string][]byte{"apiToken": []byte("token123")},
+		ObjectMeta: metav1.ObjectMeta{Name: testDefaultTokenSecretName, Namespace: testNamespace},
+		Data:       map[string][]byte{testAPITokenKey: []byte("token123")},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app)
+	manager, err := NewManager(context.Background(), fakeClient, app, testRegion)
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -80,7 +85,32 @@ func TestNewManager_UsesDefaultSecretNameAndRegion(t *testing.T) {
 		t.Errorf("expected bucket demo-bucket, got %q", manager.bucket)
 	}
 	if manager.region != testRegion {
-		t.Errorf("expected default region us-east-1, got %q", manager.region)
+		t.Errorf("expected the caller-supplied default region %q, got %q", testRegion, manager.region)
+	}
+}
+
+func TestNewManager_EmptyRegionWhenNeitherSpecNorDefaultIsSet(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApp()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testDefaultTokenSecretName, Namespace: testNamespace},
+		Data:       map[string][]byte{testAPITokenKey: []byte("token123")},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+
+	// No spec.storage.region and no caller-supplied default: region must end
+	// up empty rather than silently falling back to some hardcoded guess
+	// that may not match wherever this operator is actually deployed.
+	manager, err := NewManager(context.Background(), fakeClient, app, "")
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	if manager.region != "" {
+		t.Errorf("expected empty region when neither spec nor default is set, got %q", manager.region)
 	}
 }
 
@@ -97,16 +127,18 @@ func TestNewManager_UsesConfiguredSecretNameAndRegion(t *testing.T) {
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "custom-creds", Namespace: testNamespace},
-		Data:       map[string][]byte{"apiToken": []byte("token123")},
+		Data:       map[string][]byte{testAPITokenKey: []byte("token123")},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app)
+	// A different value than the spec's "eu-central", to prove
+	// spec.storage.region takes precedence over the caller-supplied default.
+	manager, err := NewManager(context.Background(), fakeClient, app, "operator-default-region")
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
 	if manager.region != "eu-central" {
-		t.Errorf("expected region eu-central, got %q", manager.region)
+		t.Errorf("expected spec.storage.region (eu-central) to win over the default, got %q", manager.region)
 	}
 	if manager.akamaiClient == nil {
 		t.Fatalf("expected akamai client to be initialized")
@@ -130,7 +162,7 @@ func TestNewManager_UsesDistinctDefaultFromOutputStorageSecret(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(outputSecret).Build()
 
-	if _, err := NewManager(context.Background(), fakeClient, app); err == nil {
+	if _, err := NewManager(context.Background(), fakeClient, app, testRegion); err == nil {
 		t.Fatalf("expected error: NewManager should not have found an apiToken in the output storage Secret")
 	}
 }

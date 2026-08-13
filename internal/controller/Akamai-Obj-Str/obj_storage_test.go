@@ -167,6 +167,19 @@ func TestEnsureAccessKey_CreatesNewKeyWhenNoneExists(t *testing.T) {
 			if opts.Label != testAccessKeyLabel {
 				t.Errorf("expected key label demo-app-key, got %q", opts.Label)
 			}
+			// The whole reason BucketAccess is used instead of an unscoped
+			// key: without a correct BucketName, the generated key would
+			// grant access beyond this Application's own bucket.
+			if opts.BucketAccess == nil || len(*opts.BucketAccess) != 1 {
+				t.Fatalf("expected exactly one BucketAccess entry, got %#v", opts.BucketAccess)
+			}
+			access := (*opts.BucketAccess)[0]
+			if access.BucketName != testBucket {
+				t.Errorf("expected key scoped to bucket %q, got %q", testBucket, access.BucketName)
+			}
+			if access.Permissions != "read_write" {
+				t.Errorf("expected read_write permissions, got %q", access.Permissions)
+			}
 			return &linodego.ObjectStorageKey{AccessKey: "new-access-key", SecretKey: "new-secret-key"}, nil
 		},
 	})

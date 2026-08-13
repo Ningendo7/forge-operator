@@ -45,6 +45,14 @@ type ApplicationReconciler struct {
 	OIDCProviderARN string
 	OIDCProviderURL string
 
+	// DefaultAkamaiRegion is used for Akamai/Linode storage when an
+	// Application doesn't set spec.storage.region itself. It should match
+	// wherever this operator's own deployment's Akamai/Linode infrastructure
+	// actually lives (see DEFAULT_AKAMAI_REGION in cmd/main.go) — there's no
+	// further built-in fallback, since a value baked into the binary would
+	// only ever be correct for one specific deployment.
+	DefaultAkamaiRegion string
+
 	StatusManager *statusmanager.StatusManager
 }
 

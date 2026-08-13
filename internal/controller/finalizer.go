@@ -88,6 +88,7 @@ func (r *ApplicationReconciler) finalizeApplication(
 				ctx,
 				r.Client,
 				application,
+				r.DefaultAkamaiRegion,
 			)
 			if err != nil {
 				return r.failStorageCleanup(ctx, application, fmt.Errorf("failed to create Akamai storage manager for cleanup: %w", err))

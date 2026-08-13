@@ -185,12 +185,14 @@ func main() {
 
 	oidcProviderARN := os.Getenv("OIDC_PROVIDER_ARN")
 	oidcProviderURL := os.Getenv("OIDC_PROVIDER_URL")
+	defaultAkamaiRegion := os.Getenv("DEFAULT_AKAMAI_REGION")
 	if err := (&controller.ApplicationReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		OIDCProviderARN: oidcProviderARN,
-		OIDCProviderURL: oidcProviderURL,
-		StatusManager:   statusmanager.NewStatusManager(mgr.GetClient()),
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		OIDCProviderARN:     oidcProviderARN,
+		OIDCProviderURL:     oidcProviderURL,
+		DefaultAkamaiRegion: defaultAkamaiRegion,
+		StatusManager:       statusmanager.NewStatusManager(mgr.GetClient()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "application")
 		os.Exit(1)

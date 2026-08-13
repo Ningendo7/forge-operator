@@ -27,6 +27,24 @@ manager:
   args:
     - --leader-elect
 
+  ## Extra environment variables for the manager container. Notably:
+  ## - OIDC_PROVIDER_ARN / OIDC_PROVIDER_URL: required for AWS IRSA (see
+  ##   the Authentication Flows section in the README) — without these,
+  ##   AWS storage reconciliation cannot construct the IRSA trust policy.
+  ## - DEFAULT_AKAMAI_REGION: fallback region for Akamai/Linode storage
+  ##   when an Application doesn't set spec.storage.region itself. Should
+  ##   match wherever your Akamai/Linode infrastructure actually runs —
+  ##   there's no built-in default, since one baked into the chart would
+  ##   only ever be correct for a specific deployment.
+  ##
+  # env:
+  #   - name: OIDC_PROVIDER_ARN
+  #     value: "arn:aws:iam::123456789012:role/example"
+  #   - name: OIDC_PROVIDER_URL
+  #     value: "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
+  #   - name: DEFAULT_AKAMAI_REGION
+  #     value: "us-iad"
+
   ## Image pull secrets
   ##
   # imagePullSecrets:

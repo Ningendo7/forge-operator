@@ -94,9 +94,15 @@ func (m *Manager) ensureAccessKey(
 		}
 	}
 
-	// Create a new scoped access key
+	// Create a new scoped access key. BucketName is what actually confines
+	// this key to the Application's own bucket rather than every bucket in
+	// the account/region — it's a required field on Linode's side (no
+	// omitempty on the wire type), so leaving it unset previously meant this
+	// wasn't achieving the least-privilege scoping the BucketAccess field
+	// exists for.
 	perm := linodego.ObjectStorageKeyBucketAccess{
 		Cluster:     m.region,
+		BucketName:  m.bucket,
 		Permissions: "read_write",
 	}
 

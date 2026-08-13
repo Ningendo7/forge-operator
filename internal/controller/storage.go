@@ -51,8 +51,9 @@ var newAkamaiStorageManager = func(
 	ctx context.Context,
 	c client.Client,
 	application *forgev1alpha1.Application,
+	defaultRegion string,
 ) (akamaiStorageManager, error) {
-	return akamaiobjstr.NewManager(ctx, c, application)
+	return akamaiobjstr.NewManager(ctx, c, application, defaultRegion)
 }
 
 func (r *ApplicationReconciler) reconcileStorage(
@@ -168,6 +169,7 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 		ctx,
 		r.Client,
 		application,
+		r.DefaultAkamaiRegion,
 	)
 	if err != nil {
 		storagestatus.SetNotReady(application, err)

@@ -13,8 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const defaultRegion = "us-east-1"
-
 // AKAMAIAPI defines the interface for interacting with Linode Object Storage.
 type AKAMAIAPI interface {
 	ListObjectStorageBuckets(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageBucket, error)
@@ -51,10 +49,20 @@ type AccessKeyResult struct {
 }
 
 // NewManager creates a new Manager instance for managing Akamai interactions.
+// defaultRegion is used only when the Application doesn't set
+// spec.storage.region itself; it's the operator's own DEFAULT_AKAMAI_REGION
+// configuration (see cmd/main.go), not a value guessed here. There's no
+// further hardcoded fallback: this repo's own Terraform provisions its LKE
+// cluster in a specific region, and a literal baked into this package would
+// only ever be correct for that one deployment. If both are unset, region
+// ends up empty and Linode's API rejects the request with a clear error,
+// which is preferable to silently defaulting to a region that may not match
+// wherever the operator is actually running.
 func NewManager(
 	ctx context.Context,
 	k8sClient client.Client,
 	app *forgev1alpha1.Application,
+	defaultRegion string,
 ) (*Manager, error) {
 
 	storage := app.Spec.Storage

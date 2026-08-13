@@ -595,6 +595,7 @@ func withAkamaiStorageManager(t *testing.T, m *mockAkamaiStorageManager) {
 		ctx context.Context,
 		c client.Client,
 		application *forgev1alpha1.Application,
+		defaultRegion string,
 	) (akamaiStorageManager, error) {
 		return m, nil
 	}
@@ -608,6 +609,7 @@ func withFailingAkamaiStorageManagerConstruction(t *testing.T, constructErr erro
 		ctx context.Context,
 		c client.Client,
 		application *forgev1alpha1.Application,
+		defaultRegion string,
 	) (akamaiStorageManager, error) {
 		return nil, constructErr
 	}

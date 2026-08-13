@@ -139,6 +139,17 @@ Two distinct Secrets are involved, and they must **not** share a name:
 - **Input** — a Secret you create yourself, named `<application-name>-akamai-token` by default (override via `spec.storage.akamai.accessKeySecretRef`), holding your Akamai/Linode API token under the `apiToken` key.
 - **Output** — the Secret the operator generates and owns, named `<application-name>-storage` by default (override via `spec.storage.secretName`), holding the bucket's generated access/secret key. This Secret is deleted along with the `Application` (it's controller-owned), so it must never be the same Secret as the input token above.
 
+Akamai has no IRSA-equivalent (no OIDC/workload-identity federation for short-lived credentials), so a long-lived personal access token stored in a Secret is the only mechanism the platform supports — this isn't a stand-in for something more sophisticated. To bootstrap the input token:
+
+1. In [Cloud Manager](https://cloud.linode.com/profile/tokens), go to **My Profile → API Tokens → Create a Personal Access Token**.
+2. Set an expiry (rotate it before then), and scope it to **Object Storage: Read/Write** only — leave every other product/service at **No Access**. Akamai's token scoping is per-product, not fully granular IAM roles, but this still keeps the token from being able to touch Linodes, LKE, DNS, etc. if it ever leaks.
+3. Create the Secret with that token:
+   ```sh
+   kubectl create secret generic <application-name>-akamai-token \
+     --namespace <application-namespace> \
+     --from-literal=apiToken=<the-token-you-just-created>
+   ```
+
 ## Storage Lifecycle
 
 Creation:
@@ -215,15 +226,30 @@ Full reference: [charts/chart/values.yaml](charts/chart/values.yaml). The ones y
 | `webhook.enabled` / `webhook.port` | Register the Application admission webhooks (default `true`) — see [Webhooks](#webhooks) |
 | `certManager.enabled` | Use cert-manager for the webhook server's and metrics endpoint's TLS certificates (default `true`); required for `webhook.enabled` to actually work, since `failurePolicy: Fail` means an untrusted cert blocks every `Application` create/update |
 | `prometheus.enabled` | Install a `ServiceMonitor` (requires prometheus-operator CRDs) |
+| `manager.env` | Extra environment variables on the manager container — this is how you set the variables below |
 
 ### Controller environment variables
 
-Set on the manager Deployment (via `manager.args`/env in the chart, or directly if deploying manifests by hand):
+Set via `manager.env` in Helm values:
+
+```yaml
+manager:
+  env:
+    - name: OIDC_PROVIDER_ARN
+      value: "arn:aws:iam::123456789012:role/example"
+    - name: OIDC_PROVIDER_URL
+      value: "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
+    - name: DEFAULT_AKAMAI_REGION
+      value: "us-iad"
+```
 
 | Variable | Purpose |
 | --- | --- |
 | `OIDC_PROVIDER_ARN` | Required for AWS IRSA role trust policies |
 | `OIDC_PROVIDER_URL` | Required for AWS IRSA role trust policies |
+| `DEFAULT_AKAMAI_REGION` | Fallback region for Akamai/Linode storage when an `Application` doesn't set `spec.storage.region` itself (which always takes precedence). Should match wherever your Akamai/Linode infrastructure actually runs — there's no built-in default; an unset default plus an unset `spec.storage.region` fails loudly with a clear error from Linode's API rather than silently guessing a region |
+
+If deploying via kustomize instead of Helm, there's no built-in mechanism for this — add your own patch targeting `spec.template.spec.containers[0].env` (see [`config/default/manager_webhook_patch.yaml`](config/default/manager_webhook_patch.yaml) for the JSON-patch style already used there).
 
 ### Leader election
 
