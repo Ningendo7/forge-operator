@@ -17,15 +17,31 @@ jobs:
   # between them; calling them as reusable workflows here means each one
   # runs a single time (their own `push` trigger is now branches-only, not
   # tags) and its result actually gates the release.
+  # A reusable workflow's jobs can only be granted permissions that are a
+  # subset of what the calling job itself holds. release.yml's top-level
+  # `permissions: {}` means these calling jobs inherit "none" unless given
+  # their own block — so each needs to explicitly hold at least what the
+  # called workflow's own job requests (contents: read, in all five cases)
+  # for that permission to actually flow through.
   test:
+    permissions:
+      contents: read
     uses: ./.github/workflows/test.yml
   lint:
+    permissions:
+      contents: read
     uses: ./.github/workflows/lint.yml
   build:
+    permissions:
+      contents: read
     uses: ./.github/workflows/build.yml
   test-e2e:
+    permissions:
+      contents: read
     uses: ./.github/workflows/test-e2e.yml
   test-chart:
+    permissions:
+      contents: read
     uses: ./.github/workflows/test-chart.yml
 
   release:
