@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -71,8 +72,14 @@ func storageSecretNameFor(application *forgev1alpha1.Application) string {
 	return application.Name + "-storage"
 }
 
+// desiredStorage builds the operator-managed storage credentials Secret.
+// akamaiCreds is passed explicitly by the caller (never read from
+// application.Status) because the raw access/secret key pair must never be
+// persisted anywhere other than this Secret; see AkamaiStorageStatus's doc
+// comment for why.
 func (r *ApplicationReconciler) desiredStorage(
 	application *forgev1alpha1.Application,
+	akamaiCreds *akamaiobjstr.StorageResult,
 ) *corev1.Secret {
 
 	if application.Spec.Storage == nil {
@@ -93,17 +100,16 @@ func (r *ApplicationReconciler) desiredStorage(
 		secretData["role_arn"] = application.Status.Storage.AWS.RoleARN
 	}
 
-	// Inject Akamai Object Storage credentials if present in status
-	if application.Status.Storage != nil && application.Status.Storage.Akamai != nil {
-		akamai := application.Status.Storage.Akamai
-		secretData["access_key"] = akamai.AccessKey
+	// Inject Akamai Object Storage credentials, supplied directly by the caller.
+	if akamaiCreds != nil {
+		secretData["access_key"] = akamaiCreds.AccessKey
 
-		// Avoid overwriting with empty value if status isn't populated yet.
-		if akamai.SecretKey != "" {
-			secretData["secret_key"] = akamai.SecretKey
+		// Avoid overwriting with empty value if Akamai didn't reissue one.
+		if akamaiCreds.SecretKey != "" {
+			secretData["secret_key"] = akamaiCreds.SecretKey
 		}
 
-		secretData["endpoint"] = akamai.Endpoint
+		secretData["endpoint"] = akamaiCreds.Endpoint
 	}
 
 	return &corev1.Secret{
@@ -192,6 +198,7 @@ func (r *ApplicationReconciler) reconcileSecret(
 func (r *ApplicationReconciler) reconcileStorageSecret(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
+	akamaiCreds *akamaiobjstr.StorageResult,
 ) error {
 
 	logger := logf.FromContext(ctx)
@@ -202,7 +209,7 @@ func (r *ApplicationReconciler) reconcileStorageSecret(
 
 	logger.Info("Reconciling Storage Secret")
 
-	desired := r.desiredStorage(application)
+	desired := r.desiredStorage(application, akamaiCreds)
 	if desired == nil {
 		return nil
 	}

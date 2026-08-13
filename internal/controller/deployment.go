@@ -8,8 +8,10 @@ import (
 	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -232,18 +234,40 @@ func (r *ApplicationReconciler) desiredPodSpec(
 	return podSpec
 }
 
+// desiredReplicas resolves spec.replicas to the count the operator itself
+// should own and enforce. It's used both when there's no HPA, and to seed a
+// brand-new Deployment's initial replica count when an HPA is configured.
+func desiredReplicas(application *forgev1alpha1.Application) int32 {
+	if application.Spec.Replicas != nil {
+		return *application.Spec.Replicas
+	}
+	return 1
+}
+
+// desiredDeployment builds the Deployment to server-side-apply. deploymentExists
+// reports whether a Deployment already exists for this Application: when an
+// HPA is configured and the Deployment already exists, Replicas is left nil so
+// it's omitted from the applied patch entirely (Replicas has an `omitempty`
+// json tag), releasing the operator's field ownership rather than force-setting
+// it. Otherwise SSA's ForceOwnership would fight the HPA over spec.replicas on
+// every reconcile, since each write to it would overwrite the other. spec.replicas
+// therefore only ever seeds the Deployment's initial replica count once an HPA
+// takes over; after that, the HPA is the sole owner of scaling.
 func (r *ApplicationReconciler) desiredDeployment(
 	application *forgev1alpha1.Application,
+	deploymentExists bool,
 ) *appsv1.Deployment {
 
 	labels := map[string]string{
 		appLabelKey: application.Name,
 	}
 
-	var replicas int32 = 1
+	hpaEnabled := application.Spec.Autoscaling != nil
 
-	if application.Spec.Replicas != nil {
-		replicas = *application.Spec.Replicas
+	var replicas *int32
+	if !hpaEnabled || !deploymentExists {
+		r := desiredReplicas(application)
+		replicas = &r
 	}
 
 	return &appsv1.Deployment{
@@ -258,7 +282,7 @@ func (r *ApplicationReconciler) desiredDeployment(
 			Namespace: application.Namespace,
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
+			Replicas: replicas,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
@@ -281,7 +305,17 @@ func (r *ApplicationReconciler) reconcileDeployment(
 	logger := logf.FromContext(ctx)
 	logger.Info("Reconciling Deployment via Server-Side Apply")
 
-	desired := r.desiredDeployment(application)
+	existing := &appsv1.Deployment{}
+	deploymentExists := true
+	key := types.NamespacedName{Name: naming.Deployment(application), Namespace: application.Namespace}
+	if err := r.Get(ctx, key, existing); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to get existing Deployment: %w", err)
+		}
+		deploymentExists = false
+	}
+
+	desired := r.desiredDeployment(application, deploymentExists)
 
 	if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
 		return fmt.Errorf("failed to set controller reference: %w", err)

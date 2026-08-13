@@ -22,7 +22,7 @@ func TestDesiredStorage_ReturnsNilWhenStorageIsNil(t *testing.T) {
 	app := newTestApplication()
 
 	r := &ApplicationReconciler{}
-	if got := r.desiredStorage(app); got != nil {
+	if got := r.desiredStorage(app, nil); got != nil {
 		t.Fatalf("expected nil secret when storage spec is nil, got %#v", got)
 	}
 }
@@ -35,7 +35,7 @@ func TestDesiredStorage_UsesDefaultName(t *testing.T) {
 	}
 
 	r := &ApplicationReconciler{}
-	secret := r.desiredStorage(app)
+	secret := r.desiredStorage(app, nil)
 
 	if secret.Name != testStorageSecretName {
 		t.Fatalf("expected default secret name demo-app-storage, got %q", secret.Name)
@@ -51,7 +51,7 @@ func TestDesiredStorage_UsesConfiguredName(t *testing.T) {
 	}
 
 	r := &ApplicationReconciler{}
-	secret := r.desiredStorage(app)
+	secret := r.desiredStorage(app, nil)
 
 	if secret.Name != "custom-storage-secret" {
 		t.Fatalf("expected configured secret name, got %q", secret.Name)
@@ -68,7 +68,7 @@ func TestDesiredStorage_PopulatesBasicFields(t *testing.T) {
 	}
 
 	r := &ApplicationReconciler{}
-	secret := r.desiredStorage(app)
+	secret := r.desiredStorage(app, nil)
 
 	if secret.StringData["provider"] != string(forgev1alpha1.ProviderAWSS3) {
 		t.Errorf("expected provider %q, got %q", forgev1alpha1.ProviderAWSS3, secret.StringData["provider"])
@@ -95,26 +95,24 @@ func TestDesiredStorage_InjectsAWSRoleARNFromStatus(t *testing.T) {
 	}
 
 	r := &ApplicationReconciler{}
-	secret := r.desiredStorage(app)
+	secret := r.desiredStorage(app, nil)
 
 	if secret.StringData["role_arn"] != testRoleARN {
 		t.Fatalf("expected role_arn to be injected from status, got %q", secret.StringData["role_arn"])
 	}
 }
 
-func TestDesiredStorage_InjectsAkamaiCredentialsFromStatus(t *testing.T) {
+func TestDesiredStorage_InjectsAkamaiCredentialsFromCaller(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Provider: forgev1alpha1.ProviderAkamaiObjectStorage, Bucket: testBucket}
-	app.Status.Storage = &forgev1alpha1.StorageStatus{
-		Akamai: &forgev1alpha1.AkamaiStorageStatus{
-			AccessKey: testAccessKey,
-			SecretKey: testAkamaiSecretKey,
-			Endpoint:  testAkamaiEndpoint,
-		},
+	akamaiCreds := &akamaiobjstr.StorageResult{
+		AccessKey: testAccessKey,
+		SecretKey: testAkamaiSecretKey,
+		Endpoint:  testAkamaiEndpoint,
 	}
 
 	r := &ApplicationReconciler{}
-	secret := r.desiredStorage(app)
+	secret := r.desiredStorage(app, akamaiCreds)
 
 	if secret.StringData["access_key"] != testAccessKey {
 		t.Errorf("expected access_key to be injected, got %q", secret.StringData["access_key"])
@@ -123,22 +121,20 @@ func TestDesiredStorage_InjectsAkamaiCredentialsFromStatus(t *testing.T) {
 		t.Errorf("expected secret_key to be injected, got %q", secret.StringData["secret_key"])
 	}
 	if secret.StringData["endpoint"] != testAkamaiEndpoint {
-		t.Errorf("expected endpoint to be overridden from Akamai status, got %q", secret.StringData["endpoint"])
+		t.Errorf("expected endpoint to be overridden from Akamai creds, got %q", secret.StringData["endpoint"])
 	}
 }
 
-func TestDesiredStorage_OmitsSecretKeyWhenAkamaiStatusHasNone(t *testing.T) {
+func TestDesiredStorage_OmitsSecretKeyWhenAkamaiCredsHaveNone(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Provider: forgev1alpha1.ProviderAkamaiObjectStorage, Bucket: testBucket}
-	app.Status.Storage = &forgev1alpha1.StorageStatus{
-		Akamai: &forgev1alpha1.AkamaiStorageStatus{AccessKey: testAccessKey},
-	}
+	akamaiCreds := &akamaiobjstr.StorageResult{AccessKey: testAccessKey}
 
 	r := &ApplicationReconciler{}
-	secret := r.desiredStorage(app)
+	secret := r.desiredStorage(app, akamaiCreds)
 
 	if _, exists := secret.StringData["secret_key"]; exists {
-		t.Fatalf("expected secret_key to be omitted when status has none, got %q", secret.StringData["secret_key"])
+		t.Fatalf("expected secret_key to be omitted when creds have none, got %q", secret.StringData["secret_key"])
 	}
 }
 
@@ -155,7 +151,7 @@ func TestReconcileStorageSecret_CreatesSecret(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
-	if err := r.reconcileStorageSecret(context.Background(), app); err != nil {
+	if err := r.reconcileStorageSecret(context.Background(), app, nil); err != nil {
 		t.Fatalf("reconcileStorageSecret returned error: %v", err)
 	}
 
@@ -179,10 +175,10 @@ func TestReconcileStorageSecret_Idempotent(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
-	if err := r.reconcileStorageSecret(context.Background(), app); err != nil {
+	if err := r.reconcileStorageSecret(context.Background(), app, nil); err != nil {
 		t.Fatalf("first reconcileStorageSecret returned error: %v", err)
 	}
-	if err := r.reconcileStorageSecret(context.Background(), app); err != nil {
+	if err := r.reconcileStorageSecret(context.Background(), app, nil); err != nil {
 		t.Fatalf("second reconcileStorageSecret returned error: %v", err)
 	}
 }
@@ -198,12 +194,12 @@ func TestReconcileStorageSecret_DeletesWhenStorageDisabled(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
-	if err := r.reconcileStorageSecret(context.Background(), app); err != nil {
+	if err := r.reconcileStorageSecret(context.Background(), app, nil); err != nil {
 		t.Fatalf("failed to create storage secret: %v", err)
 	}
 
 	app.Spec.Storage = nil
-	if err := r.reconcileStorageSecret(context.Background(), app); err != nil {
+	if err := r.reconcileStorageSecret(context.Background(), app, nil); err != nil {
 		t.Fatalf("reconcileStorageSecret returned error on disable: %v", err)
 	}
 
@@ -226,7 +222,7 @@ func TestReconcileStorageSecret_SetsControllerReference(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
-	if err := r.reconcileStorageSecret(context.Background(), app); err != nil {
+	if err := r.reconcileStorageSecret(context.Background(), app, nil); err != nil {
 		t.Fatalf("reconcileStorageSecret returned error: %v", err)
 	}
 
@@ -635,8 +631,15 @@ func TestReconcileAkamaiStorage_SetsReadyStatusOnSuccess(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
-	if err := r.reconcileAkamaiStorage(context.Background(), app); err != nil {
+	result, err := r.reconcileAkamaiStorage(context.Background(), app)
+	if err != nil {
 		t.Fatalf("reconcileAkamaiStorage returned error: %v", err)
+	}
+
+	// The raw credentials come back to the caller for building the storage
+	// Secret, but must never be persisted on Application.status.
+	if result.AccessKey != testAccessKey || result.SecretKey != testAkamaiSecretKey || result.Endpoint != testAkamaiEndpoint {
+		t.Fatalf("expected returned credentials to be populated, got %#v", result)
 	}
 
 	got := &forgev1alpha1.Application{}
@@ -646,21 +649,25 @@ func TestReconcileAkamaiStorage_SetsReadyStatusOnSuccess(t *testing.T) {
 	if got.Status.Storage == nil || got.Status.Storage.Akamai == nil {
 		t.Fatalf("expected status.Storage.Akamai to be set, got %#v", got.Status.Storage)
 	}
-	akamai := got.Status.Storage.Akamai
-	if akamai.AccessKey != testAccessKey || akamai.SecretKey != testAkamaiSecretKey || akamai.Endpoint != testAkamaiEndpoint {
-		t.Fatalf("expected Akamai status fields to be populated, got %#v", akamai)
+	if got.Status.Storage.Akamai.Endpoint != testAkamaiEndpoint {
+		t.Fatalf("expected status.Storage.Akamai.Endpoint to be set, got %#v", got.Status.Storage.Akamai)
 	}
 }
 
-func TestReconcileAkamaiStorage_PreservesPreviousSecretKeyWhenNewResultOmitsIt(t *testing.T) {
+func TestReconcileAkamaiStorage_RecoversPreviousSecretKeyFromExistingSecretWhenNewResultOmitsIt(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
 
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Provider: forgev1alpha1.ProviderAkamaiObjectStorage, Bucket: testBucket}
-	app.Status.Storage = &forgev1alpha1.StorageStatus{
-		Akamai: &forgev1alpha1.AkamaiStorageStatus{SecretKey: "previously-issued-secret"},
+
+	// The secret key is never cached on Application.status (see
+	// AkamaiStorageStatus's doc comment); it's recovered from the storage
+	// Secret this controller previously wrote.
+	existingSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testStorageSecretName, Namespace: testNamespace},
+		Data:       map[string][]byte{"secret_key": []byte("previously-issued-secret")},
 	}
 
 	withAkamaiStorageManager(t, &mockAkamaiStorageManager{
@@ -670,19 +677,15 @@ func TestReconcileAkamaiStorage_PreservesPreviousSecretKeyWhenNewResultOmitsIt(t
 		},
 	})
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app, existingSecret).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
-	if err := r.reconcileAkamaiStorage(context.Background(), app); err != nil {
+	result, err := r.reconcileAkamaiStorage(context.Background(), app)
+	if err != nil {
 		t.Fatalf("reconcileAkamaiStorage returned error: %v", err)
 	}
-
-	got := &forgev1alpha1.Application{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
-		t.Fatalf("failed to get Application: %v", err)
-	}
-	if got.Status.Storage.Akamai.SecretKey != "previously-issued-secret" {
-		t.Fatalf("expected previous secret key to be preserved, got %q", got.Status.Storage.Akamai.SecretKey)
+	if result.SecretKey != "previously-issued-secret" {
+		t.Fatalf("expected previous secret key to be recovered from the existing Secret, got %q", result.SecretKey)
 	}
 }
 
@@ -699,7 +702,7 @@ func TestReconcileAkamaiStorage_SetsNotReadyWhenManagerConstructionFails(t *test
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
-	if err := r.reconcileAkamaiStorage(context.Background(), app); err == nil {
+	if _, err := r.reconcileAkamaiStorage(context.Background(), app); err == nil {
 		t.Fatalf("expected error from reconcileAkamaiStorage, got nil")
 	}
 
@@ -730,7 +733,7 @@ func TestReconcileAkamaiStorage_SetsNotReadyWhenReconcileBucketFails(t *testing.
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
-	if err := r.reconcileAkamaiStorage(context.Background(), app); err == nil {
+	if _, err := r.reconcileAkamaiStorage(context.Background(), app); err == nil {
 		t.Fatalf("expected error from reconcileAkamaiStorage, got nil")
 	}
 

@@ -1,0 +1,74 @@
+name: Terraform Validate
+
+# No-secrets, no-credentials CI: static checks only (fmt + validate). This
+# never touches real state or cloud APIs, so it deliberately does not catch
+# everything `terraform plan`/`apply` would (e.g. a bucket that doesn't
+# exist, drift, provider auth). Plan/apply stay manual, local operations.
+
+on:
+  pull_request:
+    paths:
+      - "Terraform/**"
+
+permissions: {}
+
+jobs:
+  fmt:
+    permissions:
+      contents: read
+    name: Format check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_wrapper: false
+
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive Terraform/
+
+  validate:
+    permissions:
+      contents: read
+    name: Validate (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: aws-dev
+            working-directory: Terraform/AWS/environments/dev
+          - name: aws-prod
+            working-directory: Terraform/AWS/environments/prod
+          - name: akamai-dev
+            working-directory: Terraform/Akamai-Linode/environments/dev
+          - name: akamai-prod
+            working-directory: Terraform/Akamai-Linode/environments/prod
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_wrapper: false
+
+      # -backend=false skips remote state entirely, so this needs no bucket,
+      # no credentials, and no backend.tfvars.
+      - name: terraform init (no backend)
+        working-directory: ${{ matrix.working-directory }}
+        run: terraform init -backend=false
+
+      # Static config validation only: catches syntax errors, type
+      # mismatches, and invalid references without needing var values,
+      # credentials, or network access to AWS/Linode.
+      - name: terraform validate
+        working-directory: ${{ matrix.working-directory }}
+        run: terraform validate

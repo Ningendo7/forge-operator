@@ -8,6 +8,8 @@ import (
 	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -59,19 +61,26 @@ func (r *ApplicationReconciler) reconcileStorage(
 
 	// If storage spec is nil, cleanup any existing storage resources and return
 	if application.Spec.Storage == nil {
-		return r.reconcileStorageSecret(ctx, application)
+		return r.reconcileStorageSecret(ctx, application, nil)
 	}
 
-	// Provision Backend Cloud Storage Resources
+	// Provision Backend Cloud Storage Resources. akamaiCreds is only ever a
+	// local value for the duration of this call: it must never be assigned to
+	// application.Status (see the AkamaiStorageStatus doc comment) since that
+	// gets persisted as plaintext and is far more widely readable than the
+	// storage Secret it ends up in.
+	var akamaiCreds *akamaiobjstr.StorageResult
 	switch application.Spec.Storage.Provider {
 	case forgev1alpha1.ProviderAWSS3:
 		if err := r.reconcileAWSStorage(ctx, application); err != nil {
 			return fmt.Errorf("failed to reconcile AWS storage: %w", err)
 		}
 	case forgev1alpha1.ProviderAkamaiObjectStorage:
-		if err := r.reconcileAkamaiStorage(ctx, application); err != nil {
+		creds, err := r.reconcileAkamaiStorage(ctx, application)
+		if err != nil {
 			return fmt.Errorf("failed to reconcile Akamai storage: %w", err)
 		}
+		akamaiCreds = creds
 	case "MinIO", "minio", providerStatic:
 
 	default:
@@ -82,7 +91,7 @@ func (r *ApplicationReconciler) reconcileStorage(
 	}
 
 	// Reconcile Storage Secret
-	if err := r.reconcileStorageSecret(ctx, application); err != nil {
+	if err := r.reconcileStorageSecret(ctx, application, akamaiCreds); err != nil {
 		return fmt.Errorf("failed to reconcile storage secret: %w", err)
 	}
 
@@ -144,10 +153,14 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 
 }
 
+// reconcileAkamaiStorage provisions the Akamai bucket/access key and returns
+// the raw credentials to its caller for use building the storage Secret.
+// It deliberately does not persist AccessKey/SecretKey anywhere on
+// application.Status: see the AkamaiStorageStatus doc comment for why.
 func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
-) error {
+) (*akamaiobjstr.StorageResult, error) {
 
 	// Initialize Akamai Storage Manager
 	storageManager, err := newAkamaiStorageManager(
@@ -158,7 +171,7 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	if err != nil {
 		storagestatus.SetNotReady(application, err)
 		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
-		return fmt.Errorf("failed to create Akamai storage manager: %w", err)
+		return nil, fmt.Errorf("failed to create Akamai storage manager: %w", err)
 	}
 
 	// Reconcile Bucket and Access Key
@@ -166,32 +179,33 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	if err != nil {
 		storagestatus.SetNotReady(application, err)
 		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
-		return fmt.Errorf("failed to reconcile Akamai bucket: %w", err)
+		return nil, fmt.Errorf("failed to reconcile Akamai bucket: %w", err)
 	}
 
-	akamaiStatus := &forgev1alpha1.AkamaiStorageStatus{
-		AccessKey: result.AccessKey,
-		Endpoint:  result.Endpoint,
-	}
-	// Preserve existing secret key because akamai only returns it once
-	if result.SecretKey != "" {
-		akamaiStatus.SecretKey = result.SecretKey
-	} else if application.Status.Storage != nil && application.Status.Storage.Akamai != nil {
-		akamaiStatus.SecretKey = application.Status.Storage.Akamai.SecretKey
+	// Akamai only returns the secret key once, at creation. On later
+	// reconciles, recover it from the storage Secret this controller
+	// previously wrote, rather than caching it on the Application (status
+	// is far more widely readable than a Secret).
+	if result.SecretKey == "" {
+		existing := &corev1.Secret{}
+		key := types.NamespacedName{Name: storageSecretNameFor(application), Namespace: application.Namespace}
+		if err := r.Get(ctx, key, existing); err == nil {
+			result.SecretKey = string(existing.Data["secret_key"])
+		}
 	}
 
 	storageStatus := &forgev1alpha1.StorageStatus{
 		Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
 		Bucket:   application.Spec.Storage.Bucket,
 		Region:   application.Spec.Storage.Region,
-		Akamai:   akamaiStatus,
+		Akamai:   &forgev1alpha1.AkamaiStorageStatus{Endpoint: result.Endpoint},
 	}
 
 	storagestatus.SetReady(application, storageStatus, "Akamai bucket and access key provisioned")
 
 	if err := r.Status().Update(ctx, application); err != nil {
-		return fmt.Errorf("failed to update storage status: %w", err)
+		return nil, fmt.Errorf("failed to update storage status: %w", err)
 	}
 
-	return nil
+	return result, nil
 }

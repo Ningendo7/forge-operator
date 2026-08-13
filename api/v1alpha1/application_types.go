@@ -153,18 +153,16 @@ type AWSStorageStatus struct {
 }
 
 // AkamaiStorageStatus defines Akamai Object Storage status outputs.
+//
+// Credentials are deliberately not exposed here: status is persisted as
+// plaintext in etcd and readable by anyone with get/list on applications, a
+// much broader audience than whoever has get on secrets. The access/secret
+// key pair is written only to the storage Secret (see Secret.go's
+// desiredStorage); status.storage.akamai never mirrors it.
 type AkamaiStorageStatus struct {
 	// Endpoint is the active S3-compatible host endpoint generated for the bucket.
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
-
-	// AccessKey is the generated access key for the bucket.
-	// +optional
-	AccessKey string `json:"accessKey,omitempty"`
-
-	// SecretKey is the generated secret key for the bucket.
-	// +optional
-	SecretKey string `json:"secretKey,omitempty"`
 }
 
 // ContainerSpec defines container settings.
@@ -357,7 +355,13 @@ type AWSStorageSpec struct {
 
 // AkamaiStorageSpec defines Akamai-specific storage configuration.
 type AkamaiStorageSpec struct {
-	// Access key secret reference
+	// Name of the Secret (key: apiToken) holding the Akamai/Linode API token
+	// used to authenticate to the Object Storage API. Defaults to
+	// "<application-name>-akamai-token" if unset. This must name a Secret
+	// distinct from spec.storage.secretName, which is the operator's own
+	// generated output credentials Secret (bucket access/secret key) — the
+	// two are not interchangeable.
+	// +optional
 	AccessKeySecretRef string `json:"accessKeySecretRef,omitempty"`
 
 	// Optional endpoint override
@@ -367,7 +371,7 @@ type AkamaiStorageSpec struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status"
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status"
 // +kubebuilder:printcolumn:name="Image",type="string",JSONPath=".spec.image"
 // +kubebuilder:printcolumn:name="Replicas",type="integer",JSONPath=".spec.replicas"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

@@ -192,7 +192,7 @@ func TestReconcileSecret_DisablingAppSecretDoesNotDeleteStorageSecret(t *testing
 	if err := r.reconcileSecret(context.Background(), app); err != nil {
 		t.Fatalf("failed to create app secret: %v", err)
 	}
-	if err := r.reconcileStorageSecret(context.Background(), app); err != nil {
+	if err := r.reconcileStorageSecret(context.Background(), app, nil); err != nil {
 		t.Fatalf("failed to create storage secret: %v", err)
 	}
 

@@ -67,9 +67,20 @@ func NewManager(
 		region = defaultRegion
 	}
 
-	secretName := storage.SecretName
+	// This is deliberately a different Secret (and different default name)
+	// than storageSecretNameFor's "<app>-storage": that one is the operator's
+	// own generated output (bucket access/secret key), owned and overwritten
+	// by the controller. Reusing its name here for the user-supplied input
+	// token would mean the operator's SSA-applied output fields and the
+	// controller-owned lifecycle (SetControllerReference, so the Secret gets
+	// garbage collected with the Application) would apply to the user's
+	// manually-created token Secret too.
+	secretName := ""
+	if storage.Akamai != nil {
+		secretName = storage.Akamai.AccessKeySecretRef
+	}
 	if secretName == "" {
-		secretName = app.Name + "-storage"
+		secretName = app.Name + "-akamai-token"
 	}
 
 	var secret corev1.Secret

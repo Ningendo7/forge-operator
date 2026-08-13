@@ -1,8 +1,11 @@
----
+{{- if .Values.crd.enabled }}
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
+    {{- if .Values.crd.keep }}
+    "helm.sh/resource-policy": keep
+    {{- end }}
     controller-gen.kubebuilder.io/version: v0.21.0
   name: applications.forge.ningendo7.github.io
 spec:
@@ -1336,13 +1339,7 @@ spec:
                       Provider == Akamai).
                     properties:
                       accessKeySecretRef:
-                        description: |-
-                          Name of the Secret (key: apiToken) holding the Akamai/Linode API token
-                          used to authenticate to the Object Storage API. Defaults to
-                          "<application-name>-akamai-token" if unset. This must name a Secret
-                          distinct from spec.storage.secretName, which is the operator's own
-                          generated output credentials Secret (bucket access/secret key) — the
-                          two are not interchangeable.
+                        description: Access key secret reference
                         type: string
                       endpoint:
                         description: Optional endpoint override
@@ -1551,3 +1548,4 @@ spec:
     storage: true
     subresources:
       status: {}
+{{- end }}

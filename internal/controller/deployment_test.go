@@ -21,7 +21,7 @@ func TestDesiredDeployment_DefaultReplicas(t *testing.T) {
 	app := newTestApplication()
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 
 	if deployment.Name != testDeploymentName {
 		t.Fatalf("expected deployment name %q, got %q",
@@ -47,10 +47,59 @@ func TestDesiredDeployment_ConfiguredReplicas(t *testing.T) {
 	app.Spec.Replicas = &replicas
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 
 	if *deployment.Spec.Replicas != 3 {
 		t.Fatalf("expected configured replicas to be 3, got %d", *deployment.Spec.Replicas)
+	}
+}
+
+func TestDesiredDeployment_HPAConfigured_SeedsReplicasOnFirstCreate(t *testing.T) {
+	replicas := int32(2)
+	app := newTestApplication()
+	app.Spec.Replicas = &replicas
+	app.Spec.Autoscaling = &forgev1alpha1.AutoscalingSpec{MinReplicas: 1, MaxReplicas: 5}
+
+	r := &ApplicationReconciler{}
+	// deploymentExists=false: this is the initial creation, so spec.replicas
+	// still seeds the starting count even though an HPA is configured.
+	deployment := r.desiredDeployment(app, false)
+
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 2 {
+		t.Fatalf("expected initial replicas to be seeded from spec.replicas (2), got %v", deployment.Spec.Replicas)
+	}
+}
+
+func TestDesiredDeployment_HPAConfigured_OmitsReplicasOnceDeploymentExists(t *testing.T) {
+	replicas := int32(2)
+	app := newTestApplication()
+	app.Spec.Replicas = &replicas
+	app.Spec.Autoscaling = &forgev1alpha1.AutoscalingSpec{MinReplicas: 1, MaxReplicas: 5}
+
+	r := &ApplicationReconciler{}
+	// deploymentExists=true: the HPA may already own spec.replicas on the
+	// live Deployment. Replicas must be nil here so the SSA apply omits the
+	// field (it has an `omitempty` json tag) instead of force-overwriting
+	// whatever the HPA last set.
+	deployment := r.desiredDeployment(app, true)
+
+	if deployment.Spec.Replicas != nil {
+		t.Fatalf("expected replicas to be omitted once the HPA may own it, got %d", *deployment.Spec.Replicas)
+	}
+}
+
+func TestDesiredDeployment_NoHPA_StillOwnsReplicasEvenIfDeploymentExists(t *testing.T) {
+	replicas := int32(3)
+	app := newTestApplication()
+	app.Spec.Replicas = &replicas
+
+	r := &ApplicationReconciler{}
+	// No Autoscaling configured: the operator remains the sole owner of
+	// replica count regardless of whether the Deployment already exists.
+	deployment := r.desiredDeployment(app, true)
+
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 3 {
+		t.Fatalf("expected replicas to stay operator-owned at 3 with no HPA, got %v", deployment.Spec.Replicas)
 	}
 }
 
@@ -59,7 +108,7 @@ func TestDesiredDeployment_UsesApplicationImage(t *testing.T) {
 	app.Spec.Image = testImage127
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 	container := deployment.Spec.Template.Spec.Containers[0]
 
 	if container.Image != testImage127 {
@@ -75,7 +124,7 @@ func TestDesiredDeployment_UsesApplicationEnv(t *testing.T) {
 	}
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 	container := deployment.Spec.Template.Spec.Containers[0]
 
 	if len(container.Env) != 2 {
@@ -93,7 +142,7 @@ func TestDesiredDeployment_DefaultsToRestrictedSecurityContext(t *testing.T) {
 	app := newTestApplication()
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 	podSpec := deployment.Spec.Template.Spec
 	container := podSpec.Containers[0]
 
@@ -122,7 +171,7 @@ func TestDesiredDeployment_UsesConfiguredSecurityContext(t *testing.T) {
 	app.Spec.Container.SecurityContext = &corev1.SecurityContext{ReadOnlyRootFilesystem: &trueVal}
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 	podSpec := deployment.Spec.Template.Spec
 	container := podSpec.Containers[0]
 
@@ -147,7 +196,7 @@ func TestDesiredDeployment_UsesConfiguredProbes(t *testing.T) {
 	}
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 	container := deployment.Spec.Template.Spec.Containers[0]
 
 	if container.LivenessProbe == nil || container.LivenessProbe.HTTPGet.Path != "/healthz" {
@@ -165,7 +214,7 @@ func TestDesiredDeployment_DefaultsToTCPProbesOnContainerPort(t *testing.T) {
 	app := newTestApplication()
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 	container := deployment.Spec.Template.Spec.Containers[0]
 
 	if container.LivenessProbe == nil || container.LivenessProbe.TCPSocket == nil {
@@ -192,7 +241,7 @@ func TestDesiredDeployment_DefaultProbesTargetConfiguredPort(t *testing.T) {
 	app.Spec.Container.Port = 9090
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 	container := deployment.Spec.Template.Spec.Containers[0]
 
 	if container.LivenessProbe.TCPSocket.Port.IntValue() != 9090 {
@@ -207,7 +256,7 @@ func TestDesiredDeployment_DefaultContainerPort(t *testing.T) {
 	app := newTestApplication()
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 	container := deployment.Spec.Template.Spec.Containers[0]
 
 	if container.Ports[0].ContainerPort != 8080 {
@@ -223,7 +272,7 @@ func TestDesiredDeployment_ConfiguredContainerPort(t *testing.T) {
 	}
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 	container := deployment.Spec.Template.Spec.Containers[0]
 
 	if container.Ports[0].ContainerPort != 9090 {
@@ -662,7 +711,7 @@ func TestReconcileDeployment_UsesServiceAccount(t *testing.T) {
 
 	r := &ApplicationReconciler{}
 
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 	serviceAccountName := deployment.Spec.Template.Spec.ServiceAccountName
 
 	if serviceAccountName != testCustomSAName {
@@ -689,7 +738,7 @@ func TestReconcileDeployment_UsesResources(t *testing.T) {
 	}
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 	resources := deployment.Spec.Template.Spec.Containers[0].Resources
 
 	if resources.Requests.Cpu().String() != "250m" {
@@ -713,7 +762,7 @@ func TestDesiredDeployment_DefaultsResourcesWhenUnset(t *testing.T) {
 	app := newTestApplication()
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 	resources := deployment.Spec.Template.Spec.Containers[0].Resources
 
 	if resources.Requests.Cpu().String() != "100m" {
@@ -739,7 +788,7 @@ func TestDesiredDeployment_RespectsPartiallySpecifiedResources(t *testing.T) {
 	}
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 	resources := deployment.Spec.Template.Spec.Containers[0].Resources
 
 	if resources.Limits.Memory().String() != "1Gi" {
@@ -754,7 +803,7 @@ func TestDesiredDeployment_SetsLabels(t *testing.T) {
 	app := newTestApplication()
 
 	r := &ApplicationReconciler{}
-	deployment := r.desiredDeployment(app)
+	deployment := r.desiredDeployment(app, false)
 
 	expected := testAppName
 

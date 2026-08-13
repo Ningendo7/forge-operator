@@ -142,6 +142,51 @@ var _ = Describe("Application integration", func() {
 		}, eventualTimeout, pollInterval).Should(BeTrue())
 	})
 
+	It("only uses spec.replicas to seed the initial count once an HPA is configured, then leaves scaling to it", func() {
+		initialReplicas := int32(1)
+		app := &forgev1alpha1.Application{
+			ObjectMeta: metav1.ObjectMeta{Name: "hpa-handoff-app", Namespace: namespace},
+			Spec: forgev1alpha1.ApplicationSpec{
+				Image:       testImage,
+				Replicas:    &initialReplicas,
+				Autoscaling: &forgev1alpha1.AutoscalingSpec{MinReplicas: 1, MaxReplicas: 5},
+			},
+		}
+		Expect(k8sClient.Create(ctx, app)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, app)
+		})
+
+		deploymentKey := types.NamespacedName{Name: "hpa-handoff-app-deployment", Namespace: namespace}
+		deployment := &appsv1.Deployment{}
+
+		By("seeding the Deployment's initial replica count from spec.replicas")
+		Eventually(func() int32 {
+			if err := k8sClient.Get(ctx, deploymentKey, deployment); err != nil || deployment.Spec.Replicas == nil {
+				return -1
+			}
+			return *deployment.Spec.Replicas
+		}, eventualTimeout, pollInterval).Should(Equal(int32(1)))
+
+		By("simulating the HPA scaling the Deployment directly, the way the real HPA controller would")
+		Eventually(func() error {
+			if err := k8sClient.Get(ctx, deploymentKey, deployment); err != nil {
+				return err
+			}
+			scaled := int32(4)
+			deployment.Spec.Replicas = &scaled
+			return k8sClient.Update(ctx, deployment)
+		}, eventualTimeout, pollInterval).Should(Succeed())
+
+		By("confirming further Application reconciles don't fight the HPA's scaling decision")
+		Consistently(func() int32 {
+			if err := k8sClient.Get(ctx, deploymentKey, deployment); err != nil || deployment.Spec.Replicas == nil {
+				return -1
+			}
+			return *deployment.Spec.Replicas
+		}, 3*time.Second, pollInterval).Should(Equal(int32(4)))
+	})
+
 	It("creates a PDB when configured", func() {
 		minAvailable := intstr.FromInt(1)
 		app := &forgev1alpha1.Application{

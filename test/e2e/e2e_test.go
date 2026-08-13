@@ -269,18 +269,268 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
+	})
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+	// Application lifecycle exercises real-cluster behavior that envtest cannot:
+	// the controller-manager's actually-deployed RBAC (envtest's client is an
+	// admin client and would never notice a missing verb in config/rbac/role.yaml),
+	// a real kubelet actually running the pod, the real disruption controller
+	// enforcing a PodDisruptionBudget (envtest doesn't run kube-controller-manager,
+	// so PDB.status.disruptionsAllowed is never computed there), and real garbage
+	// collection of owned resources on delete. It runs after the "Manager" context
+	// above so the controller-manager and CRDs are already installed and running.
+	Context("Application lifecycle", func() {
+		const appNamespace = "forge-operator-e2e-apps"
+		const appName = "e2e-lifecycle-app"
+		// Runs as non-root and listens on 8080 by default, matching both the
+		// operator's restricted-by-default PodSecurityContext and the
+		// ContainerSpec.Port default, so no overrides are needed to reach Ready.
+		const appImage = "nginxinc/nginx-unprivileged:stable"
+
+		var podName string
+
+		BeforeAll(func() {
+			By("creating a namespace for the Application lifecycle tests")
+			cmd := exec.Command("kubectl", "create", "ns", appNamespace)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create app namespace")
+		})
+
+		AfterAll(func() {
+			By("removing the Application lifecycle test namespace")
+			cmd := exec.Command("kubectl", "delete", "ns", appNamespace, "--ignore-not-found", "--wait=false")
+			_, _ = utils.Run(cmd)
+		})
+
+		AfterEach(func() {
+			specReport := CurrentSpecReport()
+			if specReport.Failed() {
+				By("Fetching Application status for debugging")
+				cmd := exec.Command("kubectl", "get", "application", appName, "-n", appNamespace, "-o", "yaml")
+				if output, err := utils.Run(cmd); err == nil {
+					_, _ = fmt.Fprintf(GinkgoWriter, "Application:\n%s", output)
+				}
+
+				By("Fetching pod events for debugging")
+				cmd = exec.Command("kubectl", "get", "events", "-n", appNamespace, "--sort-by=.lastTimestamp")
+				if output, err := utils.Run(cmd); err == nil {
+					_, _ = fmt.Fprintf(GinkgoWriter, "Events:\n%s", output)
+				}
+			}
+		})
+
+		It("reconciles a real Application into a running, ready pod under the deployed RBAC", func() {
+			By("applying a minimal Application with a PDB")
+			manifest := fmt.Sprintf(`
+apiVersion: forge.ningendo7.github.io/v1alpha1
+kind: Application
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  image: %s
+  replicas: 1
+  pdb:
+    minAvailable: 1
+`, appName, appNamespace, appImage)
+			applyManifest(manifest, "e2e-application-lifecycle.yaml")
+
+			By("waiting for the Deployment to report an available replica")
+			deploymentName := appName + "-deployment"
+			verifyDeploymentAvailable := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", deploymentName,
+					"-n", appNamespace, "-o", "jsonpath={.status.availableReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+			}
+			Eventually(verifyDeploymentAvailable, 3*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("finding the actually-running pod behind the Deployment")
+			verifyPodRunning := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "-n", appNamespace,
+					"-l", fmt.Sprintf("app=%s", appName),
+					"-o", "jsonpath={.items[0].metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty())
+				podName = output
+
+				cmd = exec.Command("kubectl", "get", "pod", podName, "-n", appNamespace,
+					"-o", "jsonpath={.status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(Equal("Running"))
+			}
+			Eventually(verifyPodRunning, 3*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("confirming the Service was created")
+			cmd := exec.Command("kubectl", "get", "service", appName, "-n", appNamespace)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Service should exist")
+
+			By("confirming the Application reports Ready via the real deployed controller")
+			verifyAppReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "application", appName, "-n", appNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}
+			Eventually(verifyAppReady, 2*time.Minute, 2*time.Second).Should(Succeed())
+		})
+
+		It("lets the real disruption controller block eviction once the PDB has no spare budget", func() {
+			pdbName := appName + "-pdb"
+
+			By("waiting for the disruption controller to compute a zero disruption budget")
+			verifyNoDisruptionsAllowed := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pdb", pdbName, "-n", appNamespace,
+					"-o", "jsonpath={.status.disruptionsAllowed}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("0"))
+			}
+			Eventually(verifyNoDisruptionsAllowed, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("attempting to evict the pod via the eviction subresource")
+			evictionRequest := fmt.Sprintf(`{
+	"apiVersion": "policy/v1",
+	"kind": "Eviction",
+	"metadata": {"name": %q, "namespace": %q}
+}`, podName, appNamespace)
+			evictionFile := filepath.Join("/tmp", "e2e-eviction-request.json")
+			Expect(os.WriteFile(evictionFile, []byte(evictionRequest), 0o644)).To(Succeed())
+
+			cmd := exec.Command("kubectl", "create", "--raw",
+				fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/eviction", appNamespace, podName),
+				"-f", evictionFile)
+			output, err := cmd.CombinedOutput()
+			Expect(err).To(HaveOccurred(), "Eviction should have been rejected by the disruption budget")
+			Expect(string(output)).To(ContainSubstring("Cannot evict pod as it would violate the pod's disruption budget."))
+
+			By("confirming the pod was not actually evicted")
+			cmd = exec.Command("kubectl", "get", "pod", podName, "-n", appNamespace,
+				"-o", "jsonpath={.status.phase}")
+			phase, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(phase).To(Equal("Running"))
+		})
+
+		It("converges the real Deployment when the Application is scaled up", func() {
+			By("patching the Application to increase replicas")
+			cmd := exec.Command("kubectl", "patch", "application", appName, "-n", appNamespace,
+				"--type=merge", "-p", `{"spec":{"replicas":2}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to patch Application replicas")
+
+			By("waiting for the Deployment to converge to 2 available replicas")
+			deploymentName := appName + "-deployment"
+			verifyScaledUp := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", deploymentName,
+					"-n", appNamespace, "-o", "jsonpath={.status.availableReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("2"))
+			}
+			Eventually(verifyScaledUp, 3*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("confirming the Application reports Ready again after the update")
+			verifyAppReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "application", appName, "-n", appNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}
+			Eventually(verifyAppReady, 2*time.Minute, 2*time.Second).Should(Succeed())
+		})
+
+		// This is the scenario envtest explicitly can't cover (see the comment
+		// atop application_integration_test.go: AWS/Akamai storage paths are
+		// out of scope there). It doesn't need real Akamai credentials or
+		// network access, though: reconcileAkamaiStorage fails fast, locally,
+		// on the Kubernetes Get for the referenced credentials Secret, before
+		// it would ever make a real Akamai API call. That's enough to prove,
+		// against the actually-deployed controller, that a real storage
+		// misconfiguration surfaces as Degraded (not a crash-loop or a silent
+		// stall) and that fixing it lets the Application recover on its own.
+		It("reports Degraded on a real storage misconfiguration, then recovers to Ready once fixed", func() {
+			By("patching in a storage config that references a nonexistent credentials Secret")
+			cmd := exec.Command("kubectl", "patch", "application", appName, "-n", appNamespace,
+				"--type=merge", "-p",
+				`{"spec":{"storage":{"provider":"Akamai","bucket":"e2e-test-bucket","secretName":"e2e-nonexistent-akamai-token"}}}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to patch Application storage")
+
+			By("waiting for the Application to report Degraded")
+			verifyDegraded := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "application", appName, "-n", appNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='Degraded')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}
+			Eventually(verifyDegraded, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("confirming the controller-manager kept running through the failure, rather than crash-looping")
+			cmd = exec.Command("kubectl", "get", "pod", controllerPodName, "-n", namespace, "-o", "jsonpath={.status.phase}")
+			phase, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(phase).To(Equal("Running"))
+
+			By("removing the broken storage config")
+			cmd = exec.Command("kubectl", "patch", "application", appName, "-n", appNamespace,
+				"--type=merge", "-p", `{"spec":{"storage":null}}`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to remove Application storage")
+
+			By("confirming the Application recovers to Ready on its own")
+			verifyAppReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "application", appName, "-n", appNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}
+			Eventually(verifyAppReady, 2*time.Minute, 2*time.Second).Should(Succeed())
+		})
+
+		It("garbage collects owned resources via the real deployed controller when the Application is deleted", func() {
+			By("deleting the Application")
+			cmd := exec.Command("kubectl", "delete", "application", appName, "-n", appNamespace, "--timeout=60s")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete Application")
+
+			By("confirming the owned Deployment, Service, and PDB were garbage collected")
+			deploymentName := appName + "-deployment"
+			pdbName := appName + "-pdb"
+			verifyResourcesGone := func(g Gomega) {
+				for _, res := range []struct{ kind, name string }{
+					{"deployment", deploymentName},
+					{"service", appName},
+					{"poddisruptionbudget", pdbName},
+				} {
+					cmd := exec.Command("kubectl", "get", res.kind, res.name, "-n", appNamespace)
+					_, err := cmd.CombinedOutput()
+					g.Expect(err).To(HaveOccurred(), fmt.Sprintf("%s/%s should have been garbage collected", res.kind, res.name))
+				}
+			}
+			Eventually(verifyResourcesGone, 2*time.Minute, 2*time.Second).Should(Succeed())
+		})
 	})
 })
+
+// applyManifest writes the given YAML to a temp file named filename under /tmp
+// and applies it with kubectl, so callers can inline manifests as Go string
+// literals the same way serviceAccountToken inlines its JSON request body.
+func applyManifest(yamlContent, filename string) {
+	manifestFile := filepath.Join("/tmp", filename)
+	ExpectWithOffset(1, os.WriteFile(manifestFile, []byte(yamlContent), 0o644)).To(Succeed())
+	cmd := exec.Command("kubectl", "apply", "-f", manifestFile)
+	_, err := utils.Run(cmd)
+	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to apply manifest")
+}
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.
 // It uses the Kubernetes TokenRequest API to generate a token by directly sending a request

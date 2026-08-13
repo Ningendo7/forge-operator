@@ -48,7 +48,7 @@ func TestNewManager_ReturnsErrorWhenAPITokenMissing(t *testing.T) {
 	app := newTestApp()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-storage", Namespace: testNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-akamai-token", Namespace: testNamespace},
 		Data:       map[string][]byte{"other-key": []byte("value")},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
@@ -67,7 +67,7 @@ func TestNewManager_UsesDefaultSecretNameAndRegion(t *testing.T) {
 	app := newTestApp()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-storage", Namespace: testNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-akamai-token", Namespace: testNamespace},
 		Data:       map[string][]byte{"apiToken": []byte("token123")},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
@@ -91,9 +91,9 @@ func TestNewManager_UsesConfiguredSecretNameAndRegion(t *testing.T) {
 
 	app := newTestApp()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Bucket:     testBucket,
-		Region:     "eu-central",
-		SecretName: "custom-creds",
+		Bucket: testBucket,
+		Region: "eu-central",
+		Akamai: &forgev1alpha1.AkamaiStorageSpec{AccessKeySecretRef: "custom-creds"},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "custom-creds", Namespace: testNamespace},
@@ -110,5 +110,27 @@ func TestNewManager_UsesConfiguredSecretNameAndRegion(t *testing.T) {
 	}
 	if manager.akamaiClient == nil {
 		t.Fatalf("expected akamai client to be initialized")
+	}
+}
+
+func TestNewManager_UsesDistinctDefaultFromOutputStorageSecret(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApp()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
+
+	// A Secret at the *output* default name ("demo-app-storage") exists but
+	// holds no apiToken (it's the operator's own generated credentials
+	// Secret, not a user-supplied one) — NewManager must not look here.
+	outputSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-storage", Namespace: testNamespace},
+		Data:       map[string][]byte{"access_key": []byte("generated-key")},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(outputSecret).Build()
+
+	if _, err := NewManager(context.Background(), fakeClient, app); err == nil {
+		t.Fatalf("expected error: NewManager should not have found an apiToken in the output storage Secret")
 	}
 }
