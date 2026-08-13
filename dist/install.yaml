@@ -1344,7 +1344,13 @@ spec:
                       Provider == Akamai).
                     properties:
                       accessKeySecretRef:
-                        description: Access key secret reference
+                        description: |-
+                          Name of the Secret (key: apiToken) holding the Akamai/Linode API token
+                          used to authenticate to the Object Storage API. Defaults to
+                          "<application-name>-akamai-token" if unset. This must name a Secret
+                          distinct from spec.storage.secretName, which is the operator's own
+                          generated output credentials Secret (bucket access/secret key) — the
+                          two are not interchangeable.
                         type: string
                       endpoint:
                         description: Optional endpoint override
@@ -1685,6 +1691,7 @@ rules:
   resources:
   - configmaps
   - secrets
+  - serviceaccounts
   - services
   verbs:
   - create
@@ -1873,6 +1880,23 @@ spec:
     app.kubernetes.io/name: forge-operator
     control-plane: controller-manager
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: forge-operator
+  name: forge-operator-webhook-service
+  namespace: forge-operator-system
+spec:
+  ports:
+  - port: 443
+    protocol: TCP
+    targetPort: 9443
+  selector:
+    app.kubernetes.io/name: forge-operator
+    control-plane: controller-manager
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -1901,6 +1925,7 @@ spec:
         - --metrics-bind-address=:8443
         - --leader-elect
         - --health-probe-bind-address=:8081
+        - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
         command:
         - /manager
         image: controller:latest
@@ -1914,6 +1939,9 @@ spec:
         ports:
         - containerPort: 8081
           name: health
+          protocol: TCP
+        - containerPort: 9443
+          name: webhook-server
           protocol: TCP
         readinessProbe:
           httpGet:
@@ -1934,11 +1962,118 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
-        volumeMounts: []
+        volumeMounts:
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: webhook-certs
+          readOnly: true
       securityContext:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
       serviceAccountName: forge-operator-controller-manager
       terminationGracePeriodSeconds: 10
-      volumes: []
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: webhook-server-cert
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: forge-operator
+  name: forge-operator-metrics-certs
+  namespace: forge-operator-system
+spec:
+  dnsNames:
+  - SERVICE_NAME.SERVICE_NAMESPACE.svc
+  - SERVICE_NAME.SERVICE_NAMESPACE.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: forge-operator-selfsigned-issuer
+  secretName: metrics-server-cert
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: forge-operator
+  name: forge-operator-serving-cert
+  namespace: forge-operator-system
+spec:
+  dnsNames:
+  - forge-operator-webhook-service.forge-operator-system.svc
+  - forge-operator-webhook-service.forge-operator-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: forge-operator-selfsigned-issuer
+  secretName: webhook-server-cert
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: forge-operator
+  name: forge-operator-selfsigned-issuer
+  namespace: forge-operator-system
+spec:
+  selfSigned: {}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: forge-operator-system/forge-operator-serving-cert
+  name: forge-operator-mutating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: forge-operator-webhook-service
+      namespace: forge-operator-system
+      path: /mutate-forge-ningendo7-github-io-v1alpha1-application
+  failurePolicy: Fail
+  name: mapplication-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - forge.ningendo7.github.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - applications
+  sideEffects: None
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  annotations:
+    cert-manager.io/inject-ca-from: forge-operator-system/forge-operator-serving-cert
+  name: forge-operator-validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: forge-operator-webhook-service
+      namespace: forge-operator-system
+      path: /validate-forge-ningendo7-github-io-v1alpha1-application
+  failurePolicy: Fail
+  name: vapplication-v1alpha1.kb.io
+  rules:
+  - apiGroups:
+    - forge.ningendo7.github.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - applications
+  sideEffects: None

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	"github.com/linode/linodego"
 	"golang.org/x/oauth2"
 	corev1 "k8s.io/api/core/v1"
@@ -67,21 +68,15 @@ func NewManager(
 		region = defaultRegion
 	}
 
-	// This is deliberately a different Secret (and different default name)
-	// than storageSecretNameFor's "<app>-storage": that one is the operator's
-	// own generated output (bucket access/secret key), owned and overwritten
-	// by the controller. Reusing its name here for the user-supplied input
-	// token would mean the operator's SSA-applied output fields and the
-	// controller-owned lifecycle (SetControllerReference, so the Secret gets
-	// garbage collected with the Application) would apply to the user's
-	// manually-created token Secret too.
-	secretName := ""
-	if storage.Akamai != nil {
-		secretName = storage.Akamai.AccessKeySecretRef
-	}
-	if secretName == "" {
-		secretName = app.Name + "-akamai-token"
-	}
+	// naming.AkamaiTokenSecret is deliberately a different Secret (and
+	// different default name) than naming.StorageSecret: that one is the
+	// operator's own generated output (bucket access/secret key), owned and
+	// overwritten by the controller. Reusing its name here for the
+	// user-supplied input token would mean the operator's SSA-applied output
+	// fields and the controller-owned lifecycle (SetControllerReference, so
+	// the Secret gets garbage collected with the Application) would apply to
+	// the user's manually-created token Secret too.
+	secretName := naming.AkamaiTokenSecret(app)
 
 	var secret corev1.Secret
 	secretKey := types.NamespacedName{

@@ -1,8 +1,13 @@
 # Forge Operator
 
+[![Tests](https://github.com/Ningendo7/forge-operator/actions/workflows/test.yml/badge.svg)](https://github.com/Ningendo7/forge-operator/actions/workflows/test.yml)
+[![E2E Tests](https://github.com/Ningendo7/forge-operator/actions/workflows/test-e2e.yml/badge.svg)](https://github.com/Ningendo7/forge-operator/actions/workflows/test-e2e.yml)
+[![Lint](https://github.com/Ningendo7/forge-operator/actions/workflows/lint.yml/badge.svg)](https://github.com/Ningendo7/forge-operator/actions/workflows/lint.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 Forge Operator is a Kubernetes operator for managing application infrastructure declaratively across cloud providers.
 
-It manages the lifecycle of application workloads, Kubernetes resources, and cloud-backed object storage through a single Application custom resource.
+It manages the lifecycle of application workloads, core Kubernetes resources, and cloud-backed object storage through a single `Application` custom resource.
 
 ## Supported Providers
 
@@ -10,6 +15,34 @@ It manages the lifecycle of application workloads, Kubernetes resources, and clo
 | --- | --- | --- | --- |
 | AWS | EKS | Amazon S3 | IAM Roles for Service Accounts (IRSA) |
 | Akamai/Linode | LKE (Terraform modules) | Akamai Object Storage | S3-compatible access credentials |
+| — | — | None (`Static`/`MinIO`) | No-op — bring your own credentials/Secret |
+
+## Quickstart
+
+The chart enables the Application admission webhooks and cert-manager-issued TLS by default, so **[cert-manager](https://cert-manager.io/docs/installation/) must already be installed in the cluster** before you install this chart — otherwise the install will fail (it creates `Certificate`/`Issuer` custom resources that don't exist without cert-manager's CRDs). If you don't want that, pass `--set certManager.enabled=false --set webhook.enabled=false`; see [Webhooks](#webhooks) for what you lose by doing that.
+
+Install from the published Helm chart (built and pushed by [`release.yml`](.github/workflows/release.yml) on every tagged release):
+
+```sh
+helm install forge-operator oci://ghcr.io/ningendo7/forge-operator/charts/forge-operator \
+  --version <released-version> \
+  --namespace forge-operator-system \
+  --create-namespace
+```
+
+Apply a minimal `Application`:
+
+```sh
+kubectl apply -f config/samples/forge_v1alpha1_application.yaml
+```
+
+Check status:
+
+```sh
+kubectl get applications
+```
+
+See [Configuration](#configuration) for the Helm values that matter most, and [Installation](#installation) for the non-Helm (kustomize) alternative.
 
 ## Architecture
 
@@ -22,19 +55,19 @@ flowchart TD
     B --> D[Cloud Provider APIs]
 ```
 
-The controller reconciles:
+Each reconcile pass drives these child resources toward the CR's desired state, in order:
 
-- ServiceAccounts
-- ConfigMaps
-- Secrets
-- Services
-- Deployments
-- Ingress resources
-- HorizontalPodAutoscalers
-- PodDisruptionBudgets
-- Object storage resources and storage Secrets
+- ServiceAccount
+- ConfigMap
+- Secret (application secret + storage credentials secret)
+- Object storage (AWS S3 / Akamai Object Storage / no-op)
+- Service
+- Deployment
+- Ingress
+- PodDisruptionBudget
+- HorizontalPodAutoscaler
 
-Reconciliation flow is orchestrated in [internal/controller/desiredstate.go](internal/controller/desiredstate.go).
+Reconciliation flow is orchestrated in [internal/controller/desiredstate.go](internal/controller/desiredstate.go). Every child resource is written with Server-Side Apply under the `forge-operator` field manager, and owned via `controllerutil.SetControllerReference` so deleting the `Application` triggers real Kubernetes garbage collection of everything it created.
 
 ## Application API
 
@@ -43,17 +76,38 @@ The CRD schema is defined in [api/v1alpha1/application_types.go](api/v1alpha1/ap
 Key capability areas in spec:
 
 - application image and replica control
-- container port, volume mount paths, and runtime environment
+- container port, security context, probes, volume mount paths, and runtime environment
 - Service and Ingress networking controls
-- autoscaling and disruption budget policy
-- ServiceAccount behavior
-- provider-aware storage settings for AWS and Akamai
+- autoscaling (HPA) and disruption budget (PDB) policy
+- ServiceAccount behavior (use existing or create)
+- provider-aware storage settings for AWS, Akamai, and the no-op `Static`/`MinIO` providers
 
 Status includes:
 
-- condition set for readiness/progress/failure
+- condition set (`Ready`, `Progressing`, `Degraded`) for readiness/progress/failure
 - observed generation
-- storage status payload
+- storage status payload (bucket, region, provider-specific outputs — **credentials are deliberately never included**, see [Security notes](#security-notes))
+
+## Replica Count vs. Autoscaling
+
+`spec.replicas` and `spec.autoscaling` (HPA) can both be set, and the operator resolves the conflict the way a real HPA integration should:
+
+- No `spec.autoscaling` configured → the operator is the sole owner of replica count; it always enforces `spec.replicas` (default `1`).
+- `spec.autoscaling` configured, Deployment doesn't exist yet → `spec.replicas` seeds the Deployment's *initial* replica count.
+- `spec.autoscaling` configured and the Deployment already exists → the operator stops setting `replicas` on the Deployment at all (the field is omitted from its Server-Side Apply patch), so the HPA is the sole owner of scaling from then on. Changing `spec.replicas` afterward has no effect while the HPA is active.
+- Removing `spec.autoscaling` hands ownership back to the operator, which resumes enforcing `spec.replicas`.
+
+## Webhooks
+
+The `Application` CRD has an admission webhook (`internal/webhook/v1alpha1/application_webhook.go`) with both a defaulter and a validator. It's deliberately scoped to Akamai only — AWS's `spec.storage.secretName` is dual-purpose (see [Authentication Flows](#authentication-flows) below), so defaulting or validating it the same way would silently break pure-IRSA AWS Applications.
+
+**Defaulting**: when `spec.storage.provider: Akamai`, resolves and writes the effective `spec.storage.secretName` and `spec.storage.akamai.accessKeySecretRef` onto the object at admission time, so `kubectl get -o yaml` always shows the real Secret names instead of requiring you to know the operator's internal fallback logic.
+
+**Validation**: rejects, at `kubectl apply` time rather than only surfacing later as a `Degraded` status:
+- an Akamai config where `secretName` (the operator's generated output Secret) collides with `accessKeySecretRef` (your input token Secret) — the operator owns and deletes the former, so this would corrupt or destroy your token Secret;
+- an Akamai config whose `accessKeySecretRef` Secret doesn't exist, or exists but is missing the `apiToken` key — a live cluster lookup CEL/kubebuilder validation markers can't do, since they only ever see the object being validated.
+
+Gated by `certManager.enabled`/`webhook.enabled` in the Helm chart (both default `true`) — see [Quickstart](#quickstart) for the cert-manager prerequisite this implies, and [Configuration](#configuration) for how to disable it.
 
 ## Authentication Flows
 
@@ -68,17 +122,22 @@ flowchart TD
     E --> F[Amazon S3]
 ```
 
-No static AWS access keys are required for workloads that use IRSA.
+No static AWS access keys are required for workloads that use IRSA. The controller needs `OIDC_PROVIDER_ARN` and `OIDC_PROVIDER_URL` set in its environment (see [Configuration](#configuration)) to construct the IRSA trust policy.
 
 ### Akamai Object Storage Flow
 
 ```mermaid
 flowchart TD
-    A[Application] --> B[Kubernetes Secret]
-    B --> C[Akamai Object Storage]
+    A[Application] --> B[Kubernetes Secret: apiToken]
+    B --> C[Akamai/Linode Account API]
+    C --> D[Bucket + Access Key]
+    D --> E[Kubernetes Secret: generated credentials]
 ```
 
-Credentials are stored and managed as Kubernetes Secrets.
+Two distinct Secrets are involved, and they must **not** share a name:
+
+- **Input** — a Secret you create yourself, named `<application-name>-akamai-token` by default (override via `spec.storage.akamai.accessKeySecretRef`), holding your Akamai/Linode API token under the `apiToken` key.
+- **Output** — the Secret the operator generates and owns, named `<application-name>-storage` by default (override via `spec.storage.secretName`), holding the bucket's generated access/secret key. This Secret is deleted along with the `Application` (it's controller-owned), so it must never be the same Secret as the input token above.
 
 ## Storage Lifecycle
 
@@ -95,30 +154,100 @@ flowchart TD
 
 Deletion is finalizer-driven:
 
-- Application deletion triggers finalizer logic
-- cloud storage resources are cleaned up
+- Application deletion triggers finalizer logic ([internal/controller/finalizer.go](internal/controller/finalizer.go))
+- cloud storage resources are cleaned up (bucket deletion for AWS/Akamai; no-op for `Static`/`MinIO`)
 - finalizer is removed and deletion completes
 
-Finalizer logic is implemented in [internal/controller/finalizer.go](internal/controller/finalizer.go).
+## Installation
+
+### Prerequisites
+
+- Kubernetes cluster
+- kubectl
+- Go 1.26+
+- Docker
+- Terraform (only if you're also standing up the underlying cloud infrastructure — see [Terraform Infrastructure](#terraform-infrastructure))
+- Make
+- Helm (recommended install path) or Kustomize (alternative, below)
+
+### Deploy via Helm (recommended)
+
+```sh
+helm install forge-operator oci://ghcr.io/ningendo7/forge-operator/charts/forge-operator \
+  --version <released-version> \
+  --namespace forge-operator-system \
+  --create-namespace \
+  --set manager.image.tag=<released-version>
+```
+
+See [Configuration](#configuration) for the values worth overriding.
+
+### Deploy via Kustomize (alternative)
+
+```sh
+make manifests
+make install
+make deploy IMG=<registry>/forge-operator:<tag>
+```
+
+### Verify
+
+```sh
+kubectl get pods -n forge-operator-system
+kubectl apply -f config/samples/forge_v1alpha1_application.yaml
+kubectl get applications
+```
+
+## Configuration
+
+### Helm values
+
+Full reference: [charts/chart/values.yaml](charts/chart/values.yaml). The ones you're most likely to touch:
+
+| Value | Purpose |
+| --- | --- |
+| `manager.image.repository` / `manager.image.tag` | Controller image; the release workflow points this at the tagged GHCR image automatically |
+| `manager.replicas` | Controller pod count (leader election, not `Application` replicas — see below) |
+| `manager.args` | Extra manager flags, e.g. `--leader-elect` (already set by default) |
+| `rbac.namespaced` | `false` (default) = ClusterRole covering all namespaces; `true` = Role scoped to the release namespace only |
+| `crd.keep` | Keep CRDs on `helm uninstall` (default `true`, so deleting the release never silently deletes your `Application` resources) |
+| `metrics.enabled` / `metrics.secure` | Expose the `/metrics` endpoint, optionally behind authn/authz |
+| `webhook.enabled` / `webhook.port` | Register the Application admission webhooks (default `true`) — see [Webhooks](#webhooks) |
+| `certManager.enabled` | Use cert-manager for the webhook server's and metrics endpoint's TLS certificates (default `true`); required for `webhook.enabled` to actually work, since `failurePolicy: Fail` means an untrusted cert blocks every `Application` create/update |
+| `prometheus.enabled` | Install a `ServiceMonitor` (requires prometheus-operator CRDs) |
+
+### Controller environment variables
+
+Set on the manager Deployment (via `manager.args`/env in the chart, or directly if deploying manifests by hand):
+
+| Variable | Purpose |
+| --- | --- |
+| `OIDC_PROVIDER_ARN` | Required for AWS IRSA role trust policies |
+| `OIDC_PROVIDER_URL` | Required for AWS IRSA role trust policies |
+
+### Leader election
+
+Enabled by default in the Helm chart's `manager.args` (`--leader-elect`), so multiple replicas run active/standby safely. Runtime wiring is in [cmd/main.go](cmd/main.go).
 
 ## Repository Structure
 
 Primary code paths:
 
-- [api/v1alpha1/application_types.go](api/v1alpha1/application_types.go)
-- [cmd/main.go](cmd/main.go)
-- [internal/controller/application_controller.go](internal/controller/application_controller.go)
-- [internal/controller/finalizer.go](internal/controller/finalizer.go)
-- [internal/controller/status](internal/controller/status)
-- [internal/controller/s3](internal/controller/s3)
-- [internal/controller/Akamai-Obj-Str](internal/controller/Akamai-Obj-Str)
+- [api/v1alpha1/application_types.go](api/v1alpha1/application_types.go) — CRD schema
+- [cmd/main.go](cmd/main.go) — manager entrypoint
+- [internal/controller/application_controller.go](internal/controller/application_controller.go) — reconcile loop
+- [internal/controller/finalizer.go](internal/controller/finalizer.go) — deletion/cleanup
+- [internal/controller/status](internal/controller/status) — condition management
+- [internal/controller/s3](internal/controller/s3) — AWS S3 + IRSA
+- [internal/controller/Akamai-Obj-Str](internal/controller/Akamai-Obj-Str) — Akamai/Linode Object Storage
 
 Kubernetes manifests:
 
-- [config/crd](config/crd)
+- [config/crd](config/crd) — generated CRD (source of truth; `charts/chart/templates/crd` and `dist/install.yaml` are regenerated from this)
 - [config/rbac](config/rbac)
 - [config/manager](config/manager)
 - [config/samples](config/samples)
+- [charts/chart](charts/chart) — Helm chart (published to GHCR on release)
 
 Terraform layouts:
 
@@ -127,112 +256,56 @@ Terraform layouts:
 
 ## Terraform Infrastructure
 
-AWS infrastructure uses [Terraform/AWS/environments/dev](Terraform/AWS/environments/dev) with modules for VPC, networking, IAM, EKS, and IRSA.
-
-Akamai/Linode infrastructure is organized under [Terraform/Akamai-Linode/modules](Terraform/Akamai-Linode/modules) with modules for LKE, networking, and firewall, plus environment directories.
-
-Current repository state:
-
-- AWS dev environment is active
-- Akamai/Linode dev environment exists
-- prod environment directories exist and are currently incomplete
-
-## Installation
-
-### Prerequisites
-
-- Kubernetes cluster
-- kubectl
-- Go 1.24+
-- Docker
-- Terraform
-- Make
-
-### Deploy Operator
-
-Generate and install artifacts:
+Both cloud trees follow the same `modules/` + `environments/{dev,prod}/` layout, with variable *schema* (no defaults) in each environment's `variables.tf` and all actual values explicit in `dev.tfvars`/`prod.tfvars` — so the two environments' variable declarations stay byte-identical and the only thing that differs is what's in the `.tfvars` file:
 
 ```sh
-make manifests
-make install
+terraform apply -var-file=dev.tfvars   # or prod.tfvars
 ```
 
-Deploy controller image:
+- **AWS** — [Terraform/AWS/modules](Terraform/AWS/modules) (VPC, networking, IAM, EKS, IRSA) with complete `dev` and `prod` environments.
+- **Akamai/Linode** — [Terraform/Akamai-Linode/modules](Terraform/Akamai-Linode/modules) (LKE, networking, firewall) with complete `dev` and `prod` environments. `prod`'s LKE node pool has the firewall attached (`firewall_id`); `dev`'s does not.
 
-```sh
-make deploy IMG=<registry>/forge-operator:<tag>
-```
-
-Apply sample Application:
-
-```sh
-kubectl apply -k config/samples/
-```
-
-Verify:
-
-```sh
-kubectl get pods -n forge-operator-system
-```
-
-### Leader Election
-
-Leader election is supported for high availability and can be enabled with:
-
-- --leader-elect=true
-
-Runtime wiring is in [cmd/main.go](cmd/main.go).
-
-## Example Application
-
-Sample custom resource:
-
-- [config/samples/forge_v1alpha1_application.yaml](config/samples/forge_v1alpha1_application.yaml)
+CI runs `terraform fmt -check` and `terraform validate` (no credentials needed — see [.github/workflows/terraform.yml](.github/workflows/terraform.yml)) on any PR touching `Terraform/**`. `plan`/`apply` are intentionally left as manual, local operations against your own backend.
 
 ## Development
 
-Run tests:
-
 ```sh
-make test
-```
-
-Run controller locally:
-
-```sh
-make run
-```
-
-Regenerate code and manifests:
-
-```sh
-make generate
-make manifests
-```
-
-Build image:
-
-```sh
+make test        # unit + envtest integration tests
+make test-e2e     # real kind cluster, full Application lifecycle (see below)
+make lint         # golangci-lint
+make run          # run the controller locally against your current kubeconfig
+make generate     # regenerate deepcopy code
+make manifests    # regenerate CRDs/RBAC from kubebuilder markers
 make docker-build IMG=<image>
 ```
 
-## Notes
+### End-to-end tests
 
-Forge Operator is under active development. Validate current build/test status and Terraform plan output in your target branch before production rollout.
+[test/e2e/e2e_test.go](test/e2e/e2e_test.go) runs the actual built image against a real kind cluster (via `make test-e2e`, and automatically in CI on every push/PR) and covers, against the **real deployed RBAC** — not a permissive test client:
+
+- creation → a real pod actually reaching `Running`/`Ready`
+- the real Kubernetes disruption controller blocking an eviction once the PDB has no spare budget
+- scaling `spec.replicas` and watching the Deployment actually converge
+- a real storage misconfiguration surfacing as `Degraded` (not a crash-loop), and recovering to `Ready` once fixed
+- the real deployed admission webhook rejecting an invalid Akamai storage config before it ever reaches the reconciler
+- real garbage collection of owned resources on delete
+
+## Security notes
+
+- The operator never persists raw object storage credentials on `Application.status` — status is broadly readable (anyone with `get`/`list` on `applications`) and stored in etcd as plaintext. Generated credentials live only in the operator-owned storage Secret. See the doc comment on `AkamaiStorageStatus` in [api/v1alpha1/application_types.go](api/v1alpha1/application_types.go).
+- The Akamai API token Secret (your input) and the operator's generated credentials Secret (its output) use distinct default names by design — see [Akamai Object Storage Flow](#akamai-object-storage-flow) above.
+- Pod and container `securityContext` default to a restricted profile (`runAsNonRoot`, dropped capabilities, `RuntimeDefault` seccomp) unless overridden in the `Application` spec.
+- `--metrics-secure=true` and HTTP/2 disabled by default in the manager itself (mitigates the HTTP/2 Rapid Reset class of CVEs).
+
+## Current limitations
+
+Worth knowing before you rely on this in production:
+
+- The CRD is `v1alpha1` — the Kubernetes API conventions make no compatibility promises at this version; a future field rename/removal is possible without a formal deprecation cycle.
+- E2E coverage exercises the no-op storage path and real cluster mechanics (RBAC, PDB, GC, HPA handoff); it does not exercise real AWS/Akamai API calls end-to-end (that would require live cloud credentials in CI).
+- The [admission webhook](#webhooks) covers Akamai storage misconfiguration specifically; everything else still relies on CRD-level CEL rules (`+kubebuilder:validation:XValidation`, covering PDB and autoscaling constraints) rather than webhook validation.
+- Installing the chart with its defaults requires cert-manager already present in the cluster (see [Quickstart](#quickstart)); there's no bundled/vendored cert-manager install path.
 
 ## License
 
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+Apache License 2.0 — see [LICENSE](LICENSE).

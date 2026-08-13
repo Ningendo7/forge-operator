@@ -212,6 +212,42 @@ var _ = Describe("Manager", Ordered, func() {
 			}
 			Eventually(verifyMetricsServerStarted, 3*time.Minute, time.Second).Should(Succeed())
 
+			By("waiting for the webhook service endpoints to be ready")
+			verifyWebhookEndpointsReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "endpointslices.discovery.k8s.io", "-n", namespace,
+					"-l", "kubernetes.io/service-name=forge-operator-webhook-service",
+					"-o", "jsonpath={range .items[*]}{range .endpoints[*]}{.addresses[*]}{end}{end}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Webhook endpoints should exist")
+				g.Expect(output).ShouldNot(BeEmpty(), "Webhook endpoints not yet ready")
+			}
+			Eventually(verifyWebhookEndpointsReady, 3*time.Minute, time.Second).Should(Succeed())
+
+			By("verifying the mutating webhook server is ready")
+			verifyMutatingWebhookReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mutatingwebhookconfigurations.admissionregistration.k8s.io",
+					"forge-operator-mutating-webhook-configuration",
+					"-o", "jsonpath={.webhooks[0].clientConfig.caBundle}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "MutatingWebhookConfiguration should exist")
+				g.Expect(output).ShouldNot(BeEmpty(), "Mutating webhook CA bundle not yet injected")
+			}
+			Eventually(verifyMutatingWebhookReady, 3*time.Minute, time.Second).Should(Succeed())
+
+			By("verifying the validating webhook server is ready")
+			verifyValidatingWebhookReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "validatingwebhookconfigurations.admissionregistration.k8s.io",
+					"forge-operator-validating-webhook-configuration",
+					"-o", "jsonpath={.webhooks[0].clientConfig.caBundle}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "ValidatingWebhookConfiguration should exist")
+				g.Expect(output).ShouldNot(BeEmpty(), "Validating webhook CA bundle not yet injected")
+			}
+			Eventually(verifyValidatingWebhookReady, 3*time.Minute, time.Second).Should(Succeed())
+
+			By("waiting additional time for webhook server to stabilize")
+			time.Sleep(5 * time.Second)
+
 			// +kubebuilder:scaffold:e2e-metrics-webhooks-readiness
 
 			By("creating the curl-metrics pod to access the metrics endpoint")
@@ -266,6 +302,44 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
 			}
 			Eventually(verifyMetricsAvailable, 2*time.Minute).Should(Succeed())
+		})
+
+		It("should provisioned cert-manager", func() {
+			By("validating that cert-manager has the certificate Secret")
+			verifyCertManager := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "secrets", "webhook-server-cert", "-n", namespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+			}
+			Eventually(verifyCertManager).Should(Succeed())
+		})
+
+		It("should have CA injection for mutating webhooks", func() {
+			By("checking CA injection for mutating webhooks")
+			verifyCAInjection := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get",
+					"mutatingwebhookconfigurations.admissionregistration.k8s.io",
+					"forge-operator-mutating-webhook-configuration",
+					"-o", "go-template={{ range .webhooks }}{{ .clientConfig.caBundle }}{{ end }}")
+				mwhOutput, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(len(mwhOutput)).To(BeNumerically(">", 10))
+			}
+			Eventually(verifyCAInjection).Should(Succeed())
+		})
+
+		It("should have CA injection for validating webhooks", func() {
+			By("checking CA injection for validating webhooks")
+			verifyCAInjection := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get",
+					"validatingwebhookconfigurations.admissionregistration.k8s.io",
+					"forge-operator-validating-webhook-configuration",
+					"-o", "go-template={{ range .webhooks }}{{ .clientConfig.caBundle }}{{ end }}")
+				vwhOutput, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(len(vwhOutput)).To(BeNumerically(">", 10))
+			}
+			Eventually(verifyCAInjection).Should(Succeed())
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
@@ -448,18 +522,25 @@ spec:
 
 		// This is the scenario envtest explicitly can't cover (see the comment
 		// atop application_integration_test.go: AWS/Akamai storage paths are
-		// out of scope there). It doesn't need real Akamai credentials or
-		// network access, though: reconcileAkamaiStorage fails fast, locally,
-		// on the Kubernetes Get for the referenced credentials Secret, before
-		// it would ever make a real Akamai API call. That's enough to prove,
+		// out of scope there). It doesn't need real AWS credentials or
+		// network access, though: reconcileAWSStorage fails fast, locally, on
+		// the Kubernetes Get for the referenced credentials Secret, before it
+		// would ever make a real AWS API call. That's enough to prove,
 		// against the actually-deployed controller, that a real storage
 		// misconfiguration surfaces as Degraded (not a crash-loop or a silent
 		// stall) and that fixing it lets the Application recover on its own.
+		//
+		// Deliberately AWS, not Akamai: the admission webhook now catches the
+		// equivalent Akamai misconfiguration (missing/colliding credentials
+		// Secret) before it ever reaches the reconciler — see the "rejects an
+		// invalid Akamai storage config at admission time" test below. AWS's
+		// spec.storage.secretName is out of the webhook's scope (see its doc
+		// comment), so it's still a live path to a reconcile-time failure.
 		It("reports Degraded on a real storage misconfiguration, then recovers to Ready once fixed", func() {
 			By("patching in a storage config that references a nonexistent credentials Secret")
 			cmd := exec.Command("kubectl", "patch", "application", appName, "-n", appNamespace,
 				"--type=merge", "-p",
-				`{"spec":{"storage":{"provider":"Akamai","bucket":"e2e-test-bucket","secretName":"e2e-nonexistent-akamai-token"}}}`)
+				`{"spec":{"storage":{"provider":"AWS","bucket":"e2e-test-bucket","secretName":"e2e-nonexistent-aws-creds"}}}`)
 			_, err := utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to patch Application storage")
 
@@ -496,6 +577,44 @@ spec:
 			Eventually(verifyAppReady, 2*time.Minute, 2*time.Second).Should(Succeed())
 		})
 
+		It("rejects an invalid Akamai storage config at admission time via the validating webhook", func() {
+			By("attempting to create an Application whose Akamai secretName collides with its accessKeySecretRef")
+			manifest := fmt.Sprintf(`
+apiVersion: forge.ningendo7.github.io/v1alpha1
+kind: Application
+metadata:
+  name: e2e-webhook-rejected-app
+  namespace: %s
+spec:
+  image: %s
+  storage:
+    provider: Akamai
+    bucket: e2e-test-bucket
+    secretName: shared-secret
+    akamai:
+      accessKeySecretRef: shared-secret
+`, appNamespace, appImage)
+			manifestFile := filepath.Join("/tmp", "e2e-webhook-rejected-app.yaml")
+			Expect(os.WriteFile(manifestFile, []byte(manifest), 0o644)).To(Succeed())
+
+			// Retried for the same reason applyManifest is: cert-manager's CA
+			// injection can lag briefly, which would otherwise show up as a
+			// generic TLS/connection error instead of the webhook's own
+			// rejection message.
+			verifyRejected := func(g Gomega) {
+				cmd := exec.Command("kubectl", "apply", "-f", manifestFile)
+				output, err := cmd.CombinedOutput()
+				g.Expect(err).To(HaveOccurred(), "Expected the admission webhook to reject this Application")
+				g.Expect(string(output)).To(ContainSubstring("must not be the same Secret"))
+			}
+			Eventually(verifyRejected, time.Minute, 2*time.Second).Should(Succeed())
+
+			By("confirming the rejected Application was never actually created")
+			cmd := exec.Command("kubectl", "get", "application", "e2e-webhook-rejected-app", "-n", appNamespace)
+			_, err := cmd.CombinedOutput()
+			Expect(err).To(HaveOccurred(), "the Application should not exist since admission rejected it")
+		})
+
 		It("garbage collects owned resources via the real deployed controller when the Application is deleted", func() {
 			By("deleting the Application")
 			cmd := exec.Command("kubectl", "delete", "application", appName, "-n", appNamespace, "--timeout=60s")
@@ -527,9 +646,17 @@ spec:
 func applyManifest(yamlContent, filename string) {
 	manifestFile := filepath.Join("/tmp", filename)
 	ExpectWithOffset(1, os.WriteFile(manifestFile, []byte(yamlContent), 0o644)).To(Succeed())
-	cmd := exec.Command("kubectl", "apply", "-f", manifestFile)
-	_, err := utils.Run(cmd)
-	ExpectWithOffset(1, err).NotTo(HaveOccurred(), "Failed to apply manifest")
+
+	// Retried because cert-manager's CA injection into the webhook
+	// configurations is asynchronous: right after `make deploy`, the
+	// admission webhooks can be briefly unreachable (TLS handshake failure)
+	// until the injected CA bundle lands, even though the controller pod
+	// itself is already Running.
+	EventuallyWithOffset(1, func() error {
+		cmd := exec.Command("kubectl", "apply", "-f", manifestFile)
+		_, err := utils.Run(cmd)
+		return err
+	}, time.Minute, 2*time.Second).Should(Succeed(), "Failed to apply manifest")
 }
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.

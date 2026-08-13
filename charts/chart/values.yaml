@@ -158,11 +158,25 @@ metrics:
   # Note: Metrics authn/authz needs ClusterRole access.
   secure: true
 
+## Webhook server configuration (Application defaulting + validation).
+## Requires cert-manager (certManager.enabled below) for TLS, since
+## MutatingWebhookConfiguration/ValidatingWebhookConfiguration use
+## failurePolicy: Fail — without a trusted cert, every Application
+## create/update would be rejected.
+##
+webhook:
+  enabled: true
+  # Webhook server port
+  port: 9443
+
 ## Cert-manager integration for TLS certificates.
-## Required for webhook certificates and metrics endpoint certificates.
+## Required for the webhook server above and for the metrics endpoint's
+## certificate. cert-manager must already be installed in the cluster;
+## set this to false only if you're providing certificates another way
+## (or don't need webhooks/secure metrics at all).
 ##
 certManager:
-  enabled: false
+  enabled: true
 
 ## Prometheus ServiceMonitor for metrics scraping.
 ## Requires prometheus-operator to be installed in the cluster.

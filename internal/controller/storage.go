@@ -6,6 +6,7 @@ import (
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
 	corev1 "k8s.io/api/core/v1"
@@ -188,7 +189,7 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	// is far more widely readable than a Secret).
 	if result.SecretKey == "" {
 		existing := &corev1.Secret{}
-		key := types.NamespacedName{Name: storageSecretNameFor(application), Namespace: application.Namespace}
+		key := types.NamespacedName{Name: naming.StorageSecret(application), Namespace: application.Namespace}
 		if err := r.Get(ctx, key, existing); err == nil {
 			result.SecretKey = string(existing.Data["secret_key"])
 		}

@@ -87,6 +87,9 @@ spec:
         {{- range .Values.manager.args }}
         - {{ . }}
         {{- end }}
+        {{- if .Values.certManager.enabled }}
+        - --webhook-cert-path=/tmp/k8s-webhook-server/serving-certs
+        {{- end }}
         command:
         - /manager
         image: "{{ .Values.manager.image.repository }}{{- if not (contains "@" .Values.manager.image.repository) }}:{{ .Values.manager.image.tag | default .Chart.AppVersion }}{{- end }}"
@@ -103,6 +106,9 @@ spec:
         ports:
         - containerPort: 8081
           name: health
+          protocol: TCP
+        - containerPort: {{ .Values.webhook.port }}
+          name: webhook-server
           protocol: TCP
         readinessProbe:
           httpGet:
@@ -125,8 +131,11 @@ spec:
         volumeMounts:
           {{- if .Values.manager.extraVolumeMounts }}
           {{- toYaml .Values.manager.extraVolumeMounts | nindent 10 }}
-          {{- else }}
-          []
+          {{- end }}
+          {{- if .Values.certManager.enabled }}
+          - mountPath: /tmp/k8s-webhook-server/serving-certs
+            name: webhook-certs
+            readOnly: true
           {{- end }}
       securityContext:
         {{- if .Values.manager.podSecurityContext }}
@@ -141,7 +150,10 @@ spec:
       volumes:
         {{- if .Values.manager.extraVolumes }}
         {{- toYaml .Values.manager.extraVolumes | nindent 8 }}
-        {{- else }}
-        []
+        {{- end }}
+        {{- if .Values.certManager.enabled }}
+        - name: webhook-certs
+          secret:
+            secretName: webhook-server-cert
         {{- end }}
 {{- end }}

@@ -1339,7 +1339,13 @@ spec:
                       Provider == Akamai).
                     properties:
                       accessKeySecretRef:
-                        description: Access key secret reference
+                        description: |-
+                          Name of the Secret (key: apiToken) holding the Akamai/Linode API token
+                          used to authenticate to the Object Storage API. Defaults to
+                          "<application-name>-akamai-token" if unset. This must name a Secret
+                          distinct from spec.storage.secretName, which is the operator's own
+                          generated output credentials Secret (bucket access/secret key) — the
+                          two are not interchangeable.
                         type: string
                       endpoint:
                         description: Optional endpoint override

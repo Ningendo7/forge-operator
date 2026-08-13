@@ -38,6 +38,7 @@ import (
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	"github.com/Ningendo7/forge-operator/internal/controller"
 	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
+	webhookv1alpha1 "github.com/Ningendo7/forge-operator/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -80,8 +81,11 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	// Development:false gives structured JSON logs by default, which is what
+	// most cluster log pipelines expect; pass --zap-devel=true for the
+	// human-readable console encoder when running locally.
 	opts := zap.Options{
-		Development: true,
+		Development: false,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -190,6 +194,13 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "application")
 		os.Exit(1)
+	}
+	// nolint:goconst
+	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
+		if err := webhookv1alpha1.SetupApplicationWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create webhook", "webhook", "Application")
+			os.Exit(1)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 

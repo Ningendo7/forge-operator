@@ -56,3 +56,10 @@ override.tf.json
 # Local CLI config may include credentials
 .terraformrc
 terraform.rc
+
+# Scratch output of `kubebuilder edit --plugins=helm/v2-alpha`. Once
+# charts/chart has hand-customizations the plugin doesn't recognize, it
+# safely diverts its regenerated output here instead of overwriting
+# charts/chart directly. Diff this against charts/chart and merge deliberately
+# rather than committing it wholesale.
+dist/chart/

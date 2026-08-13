@@ -9,7 +9,7 @@ layout:
 plugins:
   helm.kubebuilder.io/v2-alpha:
     manifests: dist/install.yaml
-    output: charts
+    output: dist
 projectName: forge-operator
 repo: github.com/Ningendo7/forge-operator
 resources:
@@ -22,4 +22,8 @@ resources:
   kind: Application
   path: github.com/Ningendo7/forge-operator/api/v1alpha1
   version: v1alpha1
+  webhooks:
+    defaulting: true
+    validation: true
+    webhookVersion: v1
 version: "3"

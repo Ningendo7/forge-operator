@@ -8,6 +8,7 @@ import (
 )
 
 const testAppName = "demo-app"
+const testDefaultAkamaiToken = "demo-app-akamai-token"
 
 func newTestApplication() *forgev1alpha1.Application {
 	return &forgev1alpha1.Application{
@@ -37,4 +38,67 @@ func TestNames(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStorageSecret(t *testing.T) {
+	t.Run("defaults when spec.storage is nil", func(t *testing.T) {
+		app := newTestApplication()
+		if got := StorageSecret(app); got != "demo-app-storage" {
+			t.Fatalf("expected demo-app-storage, got %q", got)
+		}
+	})
+
+	t.Run("defaults when secretName is unset", func(t *testing.T) {
+		app := newTestApplication()
+		app.Spec.Storage = &forgev1alpha1.StorageSpec{}
+		if got := StorageSecret(app); got != "demo-app-storage" {
+			t.Fatalf("expected demo-app-storage, got %q", got)
+		}
+	})
+
+	t.Run("honors an explicit secretName", func(t *testing.T) {
+		app := newTestApplication()
+		app.Spec.Storage = &forgev1alpha1.StorageSpec{SecretName: "custom-storage"}
+		if got := StorageSecret(app); got != "custom-storage" {
+			t.Fatalf("expected custom-storage, got %q", got)
+		}
+	})
+}
+
+func TestAkamaiTokenSecret(t *testing.T) {
+	t.Run("defaults when spec.storage is nil", func(t *testing.T) {
+		app := newTestApplication()
+		if got := AkamaiTokenSecret(app); got != testDefaultAkamaiToken {
+			t.Fatalf("expected demo-app-akamai-token, got %q", got)
+		}
+	})
+
+	t.Run("defaults when spec.storage.akamai is nil", func(t *testing.T) {
+		app := newTestApplication()
+		app.Spec.Storage = &forgev1alpha1.StorageSpec{}
+		if got := AkamaiTokenSecret(app); got != testDefaultAkamaiToken {
+			t.Fatalf("expected demo-app-akamai-token, got %q", got)
+		}
+	})
+
+	t.Run("defaults when accessKeySecretRef is unset", func(t *testing.T) {
+		app := newTestApplication()
+		app.Spec.Storage = &forgev1alpha1.StorageSpec{Akamai: &forgev1alpha1.AkamaiStorageSpec{}}
+		if got := AkamaiTokenSecret(app); got != testDefaultAkamaiToken {
+			t.Fatalf("expected demo-app-akamai-token, got %q", got)
+		}
+	})
+
+	t.Run("honors an explicit accessKeySecretRef, distinct from StorageSecret's default", func(t *testing.T) {
+		app := newTestApplication()
+		app.Spec.Storage = &forgev1alpha1.StorageSpec{
+			Akamai: &forgev1alpha1.AkamaiStorageSpec{AccessKeySecretRef: "custom-token"},
+		}
+		if got := AkamaiTokenSecret(app); got != "custom-token" {
+			t.Fatalf("expected custom-token, got %q", got)
+		}
+		if StorageSecret(app) == AkamaiTokenSecret(app) {
+			t.Fatalf("StorageSecret and AkamaiTokenSecret must never default to the same name")
+		}
+	})
 }

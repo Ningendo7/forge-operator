@@ -6,6 +6,7 @@ import (
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -64,14 +65,6 @@ func (r *ApplicationReconciler) desiredSecret(
 	}
 }
 
-// storageSecretNameFor names the operator-managed storage credentials Secret.
-func storageSecretNameFor(application *forgev1alpha1.Application) string {
-	if application.Spec.Storage != nil && application.Spec.Storage.SecretName != "" {
-		return application.Spec.Storage.SecretName
-	}
-	return application.Name + "-storage"
-}
-
 // desiredStorage builds the operator-managed storage credentials Secret.
 // akamaiCreds is passed explicitly by the caller (never read from
 // application.Status) because the raw access/secret key pair must never be
@@ -86,7 +79,7 @@ func (r *ApplicationReconciler) desiredStorage(
 		return nil
 	}
 
-	name := storageSecretNameFor(application)
+	name := naming.StorageSecret(application)
 
 	secretData := map[string]string{
 		"provider": string(application.Spec.Storage.Provider),
