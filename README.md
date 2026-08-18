@@ -21,6 +21,14 @@ It manages the lifecycle of application workloads, core Kubernetes resources, an
 
 The chart enables the Application admission webhooks and cert-manager-issued TLS by default, so **[cert-manager](https://cert-manager.io/docs/installation/) must already be installed in the cluster** before you install this chart — otherwise the install will fail (it creates `Certificate`/`Issuer` custom resources that don't exist without cert-manager's CRDs). If you don't want that, pass `--set certManager.enabled=false --set webhook.enabled=false`; see [Webhooks](#webhooks) for what you lose by doing that.
 
+After `terraform apply` finishes standing up the cluster (see [Terraform Infrastructure](#terraform-infrastructure)) and your kubeconfig points at it, [`scripts/bootstrap-cluster.sh`](scripts/bootstrap-cluster.sh) installs cert-manager and metrics-server for you (idempotent — safe to re-run, skips whatever's already installed):
+
+```sh
+./scripts/bootstrap-cluster.sh
+```
+
+Neither EKS nor LKE ships either by default. cert-manager is required for the chart to install at all (see above). metrics-server isn't required to install the chart, but without it, any `Application`'s `spec.autoscaling` creates a working `HorizontalPodAutoscaler` that can never actually scale — the real Kubernetes HPA controller has no CPU/memory metrics to act on, silently, with no error anywhere. See the script's own header comment for a few other add-ons (Ingress controller, Prometheus Operator CRDs, a NetworkPolicy-enforcing CNI) that are situational enough — which one, or whether at all — that it deliberately doesn't pick one for you.
+
 Install from the published Helm chart (built and pushed by [`release.yml`](.github/workflows/release.yml) on every tagged release):
 
 ```sh
@@ -330,7 +338,7 @@ Worth knowing before you rely on this in production:
 - The CRD is `v1alpha1` — the Kubernetes API conventions make no compatibility promises at this version; a future field rename/removal is possible without a formal deprecation cycle.
 - E2E coverage exercises the no-op storage path and real cluster mechanics (RBAC, PDB, GC, HPA handoff); it does not exercise real AWS/Akamai API calls end-to-end (that would require live cloud credentials in CI).
 - The [admission webhook](#webhooks) covers Akamai storage misconfiguration specifically; everything else still relies on CRD-level CEL rules (`+kubebuilder:validation:XValidation`, covering PDB and autoscaling constraints) rather than webhook validation.
-- Installing the chart with its defaults requires cert-manager already present in the cluster (see [Quickstart](#quickstart)); there's no bundled/vendored cert-manager install path.
+- Installing the chart with its defaults requires cert-manager already present in the cluster — [`scripts/bootstrap-cluster.sh`](scripts/bootstrap-cluster.sh) handles that as a one-time step after `terraform apply`, but it's a separate manual step, not something Terraform or the chart does for you automatically.
 
 ## License
 
