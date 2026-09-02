@@ -17,6 +17,7 @@ const (
 	testRegion            = "us-east-1"
 	testAccessKeyLabel    = "demo-app-key"
 	testExistingAccessKey = "existing-access-key"
+	testDefaultEndpoint   = "us-east-1.linodeobjects.com"
 	testAppUID            = types.UID("11111111-1111-1111-1111-111111111111")
 	testOtherUID          = types.UID("22222222-2222-2222-2222-222222222222")
 )

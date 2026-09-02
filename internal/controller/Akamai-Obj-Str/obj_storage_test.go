@@ -256,10 +256,10 @@ func TestResolveEndpoint_DefaultsToRegionBasedEndpoint(t *testing.T) {
 
 	// No bucket at all, and a bucket with no Hostname, both fall back the
 	// same way.
-	if got := m.resolveEndpoint(nil); got != "us-east-1.linodeobjects.com" {
+	if got := m.resolveEndpoint(nil); got != testDefaultEndpoint {
 		t.Fatalf("expected default region-based endpoint, got %q", got)
 	}
-	if got := m.resolveEndpoint(&linodego.ObjectStorageBucket{}); got != "us-east-1.linodeobjects.com" {
+	if got := m.resolveEndpoint(&linodego.ObjectStorageBucket{}); got != testDefaultEndpoint {
 		t.Fatalf("expected default region-based endpoint, got %q", got)
 	}
 }
@@ -289,7 +289,7 @@ func TestReconcileBucket_HappyPath(t *testing.T) {
 	if result.AccessKey != testExistingAccessKey {
 		t.Errorf("expected access key to be returned, got %q", result.AccessKey)
 	}
-	if result.Endpoint != "us-east-1.linodeobjects.com" {
+	if result.Endpoint != testDefaultEndpoint {
 		t.Errorf("expected default endpoint, got %q", result.Endpoint)
 	}
 }

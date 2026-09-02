@@ -85,7 +85,7 @@ func (m *Manager) claimOrVerifyOwnership(
 		// NOT be treated as claimable -- only "no marker at all" is.
 		return fmt.Errorf("%w: could not verify ownership marker: %v", ErrBucketNotOwned, err)
 	}
-	defer out.Body.Close()
+	defer func() { _ = out.Body.Close() }()
 
 	body, err := io.ReadAll(out.Body)
 	if err != nil {

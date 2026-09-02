@@ -18,6 +18,11 @@ import (
 
 const ownerTagKey = "forge-operator.ningendo7.github.io/owner-uid"
 
+// noSuchTagSetErrorCode is the S3 API error code for a bucket with no tags
+// at all -- the one GetBucketTagging failure claimOrVerifyOwnership treats
+// as safe to claim rather than a hard failure.
+const noSuchTagSetErrorCode = "NoSuchTagSet"
+
 func (m *Manager) ReconcileBucket(
 	ctx context.Context,
 ) (*StorageResult, error) {
@@ -130,7 +135,7 @@ func (m *Manager) claimOrVerifyOwnership(ctx context.Context) error {
 	})
 	if err != nil {
 		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchTagSet" {
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == noSuchTagSetErrorCode {
 			return m.tagAsOwned(ctx)
 		}
 		return fmt.Errorf("%w: could not verify ownership tag: %v", ErrBucketNotOwned, err)

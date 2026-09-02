@@ -107,7 +107,7 @@ func TestEnsureBucketExists_ClaimsOwnershipOnNoSuchTagSetError(t *testing.T) {
 			return &s3sdk.HeadBucketOutput{}, nil
 		},
 		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
-			return nil, &smithy.GenericAPIError{Code: "NoSuchTagSet", Message: "The TagSet does not exist"}
+			return nil, &smithy.GenericAPIError{Code: noSuchTagSetErrorCode, Message: "The TagSet does not exist"}
 		},
 		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
 			claimed = true
@@ -154,7 +154,7 @@ func TestEnsureBucketExists_CreatesBucketOnTypedNotFound(t *testing.T) {
 			return &s3sdk.CreateBucketOutput{}, nil
 		},
 		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
-			return nil, &smithy.GenericAPIError{Code: "NoSuchTagSet"}
+			return nil, &smithy.GenericAPIError{Code: noSuchTagSetErrorCode}
 		},
 		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
 			taggedBucket = aws.ToString(params.Bucket)
@@ -189,7 +189,7 @@ func TestEnsureBucketExists_CreatesBucketOn404ResponseError(t *testing.T) {
 			return &s3sdk.CreateBucketOutput{}, nil
 		},
 		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
-			return nil, &smithy.GenericAPIError{Code: "NoSuchTagSet"}
+			return nil, &smithy.GenericAPIError{Code: noSuchTagSetErrorCode}
 		},
 		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
 			return &s3sdk.PutBucketTaggingOutput{}, nil

@@ -99,7 +99,7 @@ func (r *ApplicationReconciler) finalizeApplication(
 				return r.failStorageCleanup(ctx, application, fmt.Errorf("failed to delete Akamai bucket during cleanup: %w", err))
 			}
 			if accessKeyErr != nil && r.Recorder != nil {
-				r.Recorder.Eventf(application, corev1.EventTypeWarning, "AccessKeyCleanupFailed",
+				r.Recorder.Eventf(application, nil, corev1.EventTypeWarning, "AccessKeyCleanupFailed", "Cleanup",
 					"Bucket was deleted, but its Akamai Object Storage access key could not be cleaned up: %v", accessKeyErr)
 			}
 		}
