@@ -33,7 +33,7 @@ func (m *Manager) CleanupBucket(
 	ctx context.Context,
 ) error {
 
-	// Hanle IRSA cleanup first
+	// Handle IRSA cleanup first
 	if err := m.cleanupAppIRSA(ctx); err != nil {
 		return fmt.Errorf("failed to cleanup IRSA: %w", err)
 	}

@@ -173,8 +173,12 @@ func TestDeleteBucket_NoOpWhenBucketNameEmpty(t *testing.T) {
 	})
 	m.bucket = ""
 
-	if err := m.DeleteBucket(context.Background()); err != nil {
+	accessKeyErr, err := m.DeleteBucket(context.Background())
+	if err != nil {
 		t.Fatalf("expected nil error when bucket name is empty, got %v", err)
+	}
+	if accessKeyErr != nil {
+		t.Fatalf("expected nil accessKeyErr when bucket name is empty, got %v", accessKeyErr)
 	}
 	if deleteCalled {
 		t.Fatalf("expected DeleteObjectStorageBucket not to be called when bucket name is empty")
@@ -194,8 +198,12 @@ func TestDeleteBucket_HappyPath(t *testing.T) {
 		},
 	})
 
-	if err := m.DeleteBucket(context.Background()); err != nil {
+	accessKeyErr, err := m.DeleteBucket(context.Background())
+	if err != nil {
 		t.Fatalf("DeleteBucket returned error: %v", err)
+	}
+	if accessKeyErr != nil {
+		t.Fatalf("expected nil accessKeyErr on happy path, got %v", accessKeyErr)
 	}
 }
 
@@ -211,11 +219,17 @@ func TestDeleteBucket_StillDeletesBucketWhenAccessKeyCleanupFails(t *testing.T) 
 		},
 	})
 
-	if err := m.DeleteBucket(context.Background()); err != nil {
+	accessKeyErr, err := m.DeleteBucket(context.Background())
+	if err != nil {
 		t.Fatalf("expected DeleteBucket to succeed despite access key cleanup failure, got %v", err)
 	}
 	if !bucketDeleteCalled {
 		t.Fatalf("expected bucket deletion to proceed even when access key cleanup fails")
+	}
+	// The failure isn't swallowed entirely -- it comes back separately so the
+	// caller can surface it (e.g. as an Event) without it blocking cleanup.
+	if accessKeyErr == nil {
+		t.Fatalf("expected the access key cleanup failure to be surfaced via accessKeyErr")
 	}
 }
 
@@ -229,7 +243,7 @@ func TestDeleteBucket_PropagatesBucketDeletionError(t *testing.T) {
 		},
 	})
 
-	if err := m.DeleteBucket(context.Background()); err == nil {
+	if _, err := m.DeleteBucket(context.Background()); err == nil {
 		t.Fatalf("expected error from DeleteBucket, got nil")
 	}
 }

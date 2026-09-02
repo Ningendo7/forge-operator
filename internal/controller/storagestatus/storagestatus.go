@@ -15,11 +15,40 @@ const (
 
 	ReasonBucketConfigured          = "BucketConfigured"
 	ReasonBucketConfigurationFailed = "BucketConfigurationFailed"
+	ReasonBucketNotOwned            = "BucketNotOwned"
 	ReasonBucketCleanup             = "BucketCleanup"
 	ReasonBucketCleanupFailed       = "BucketCleanupFailed"
 
 	MaxErrorMessageLength = 250
 )
+
+// SetNotOwned marks storage as blocked because a bucket with the desired
+// name already exists but wasn't created by this operator for this
+// Application. Distinct from SetNotReady so this doesn't look like a
+// transient/retryable failure -- it needs a human to rename the bucket spec
+// or resolve the conflict, not a reconcile retry.
+func SetNotOwned(
+	app *forgev1alpha1.Application,
+	err error,
+) {
+	if app == nil {
+		return
+	}
+	msg := "Bucket already exists and is not owned by forge-operator"
+	if err != nil {
+		msg = truncateMessage(err.Error(), MaxErrorMessageLength)
+	}
+	apiMeta.SetStatusCondition(
+		&app.Status.Conditions,
+		metav1.Condition{
+			Type:               StorageReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonBucketNotOwned,
+			Message:            msg,
+			ObservedGeneration: app.Generation,
+		},
+	)
+}
 
 func truncateMessage(
 	message string,

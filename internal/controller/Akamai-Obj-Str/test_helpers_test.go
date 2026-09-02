@@ -2,10 +2,13 @@ package akamaiobjstr
 
 import (
 	"context"
+	"testing"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/linode/linodego"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 const (
@@ -14,12 +17,41 @@ const (
 	testRegion            = "us-east-1"
 	testAccessKeyLabel    = "demo-app-key"
 	testExistingAccessKey = "existing-access-key"
+	testAppUID            = types.UID("11111111-1111-1111-1111-111111111111")
+	testOtherUID          = types.UID("22222222-2222-2222-2222-222222222222")
 )
 
 func newTestApp() *forgev1alpha1.Application {
 	return &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: testNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-app", Namespace: testNamespace, UID: testAppUID},
 	}
+}
+
+// mockS3ObjectClient is the fake s3ObjectAPI standing in for a real
+// S3-compatible client in ownership tests.
+type mockS3ObjectClient struct {
+	getObjectFunc func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error)
+	putObjectFunc func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error)
+}
+
+func (m *mockS3ObjectClient) GetObject(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+	return m.getObjectFunc(ctx, params, optFns...)
+}
+
+func (m *mockS3ObjectClient) PutObject(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+	return m.putObjectFunc(ctx, params, optFns...)
+}
+
+// withS3ObjectClient swaps newS3ObjectClient for the duration of a test so
+// claimOrVerifyOwnership talks to a fake client instead of attempting a
+// real network call.
+func withS3ObjectClient(t *testing.T, client s3ObjectAPI) {
+	t.Helper()
+	original := newS3ObjectClient
+	newS3ObjectClient = func(region, clusterEndpoint, accessKey, secretKey string) s3ObjectAPI {
+		return client
+	}
+	t.Cleanup(func() { newS3ObjectClient = original })
 }
 
 func newTestManager(akamaiClient AKAMAIAPI) *Manager {

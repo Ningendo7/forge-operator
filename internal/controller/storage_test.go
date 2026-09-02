@@ -8,6 +8,7 @@ import (
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
+	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -564,6 +565,40 @@ func TestReconcileAWSStorage_SetsNotReadyWhenReconcileBucketFails(t *testing.T) 
 	}
 }
 
+func TestReconcileAWSStorage_SetsNotOwnedReasonWhenBucketNotOwned(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Provider: forgev1alpha1.ProviderAWSS3, Bucket: testBucket}
+
+	withS3StorageManager(t, &mockS3StorageManager{
+		reconcileBucketFunc: func(ctx context.Context) (*s3storage.StorageResult, error) {
+			return nil, s3storage.ErrBucketNotOwned
+		},
+	})
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileAWSStorage(context.Background(), app); err == nil {
+		t.Fatalf("expected error from reconcileAWSStorage, got nil")
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+	cond := findAppCondition(got, "StorageReady")
+	if cond == nil || cond.Status != testConditionFalse {
+		t.Fatalf("expected StorageReady=False, got %#v", cond)
+	}
+	if cond.Reason != storagestatus.ReasonBucketNotOwned {
+		t.Fatalf("expected reason %q, got %q", storagestatus.ReasonBucketNotOwned, cond.Reason)
+	}
+}
+
 func TestReconcileAWSStorage_PropagatesIRSAAnnotationError(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)
@@ -746,5 +781,39 @@ func TestReconcileAkamaiStorage_SetsNotReadyWhenReconcileBucketFails(t *testing.
 	cond := findAppCondition(got, "StorageReady")
 	if cond == nil || cond.Status != testConditionFalse {
 		t.Fatalf("expected StorageReady=False, got %#v", cond)
+	}
+}
+
+func TestReconcileAkamaiStorage_SetsNotOwnedReasonWhenBucketNotOwned(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Provider: forgev1alpha1.ProviderAkamaiObjectStorage, Bucket: testBucket}
+
+	withAkamaiStorageManager(t, &mockAkamaiStorageManager{
+		reconcileBucketFunc: func(ctx context.Context) (*akamaiobjstr.StorageResult, error) {
+			return nil, akamaiobjstr.ErrBucketNotOwned
+		},
+	})
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if _, err := r.reconcileAkamaiStorage(context.Background(), app); err == nil {
+		t.Fatalf("expected error from reconcileAkamaiStorage, got nil")
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+	cond := findAppCondition(got, "StorageReady")
+	if cond == nil || cond.Status != testConditionFalse {
+		t.Fatalf("expected StorageReady=False, got %#v", cond)
+	}
+	if cond.Reason != storagestatus.ReasonBucketNotOwned {
+		t.Fatalf("expected reason %q, got %q", storagestatus.ReasonBucketNotOwned, cond.Reason)
 	}
 }

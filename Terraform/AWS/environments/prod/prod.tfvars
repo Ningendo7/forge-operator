@@ -20,6 +20,12 @@ az_network_config = {
 }
 enable_single_nat_gateway = false # Multi-AZ: prod shouldn't trade resilience for cost here.
 
+# API server endpoint access: private (in-VPC) only. Reach it via a bastion
+# or VPN, not a public endpoint -- unlike dev, there's no "just testing"
+# excuse here.
+enable_cluster_public_access = false
+cluster_public_access_cidrs  = []
+
 # EKS Node Group Configuration
 desired_node_capacity = 3
 node_min_capacity     = 2

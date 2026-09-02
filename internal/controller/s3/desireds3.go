@@ -12,8 +12,11 @@ import (
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithy "github.com/aws/smithy-go"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+const ownerTagKey = "forge-operator.ningendo7.github.io/owner-uid"
 
 func (m *Manager) ReconcileBucket(
 	ctx context.Context,
@@ -41,6 +44,12 @@ func (m *Manager) ReconcileBucket(
 	}, nil
 
 }
+
+// ErrBucketNotOwned means a bucket with the desired name exists but wasn't
+// created by this operator for this Application -- surfaced as a Degraded
+// condition rather than silently adopted (and later possibly deleted)
+var ErrBucketNotOwned = errors.New("bucket already exists and is not owned by forge-operator")
+
 func (m *Manager) ensureBucketExists(
 	ctx context.Context,
 ) error {
@@ -50,15 +59,16 @@ func (m *Manager) ensureBucketExists(
 	})
 
 	if err == nil {
-		log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s already exists", m.bucket))
-		return nil
+		return m.claimOrVerifyOwnership(ctx)
 	}
 
-	// Check for typed 404 NotFound struct firs
 	var notFoundErr *s3types.NotFound
 	if errors.As(err, &notFoundErr) {
 		log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s does not exist, creating...", m.bucket))
-		return m.CreateBucket(ctx)
+		if err := m.CreateBucket(ctx); err != nil {
+			return err
+		}
+		return m.claimOrVerifyOwnership(ctx)
 	}
 
 	var responseErr *awshttp.ResponseError
@@ -67,7 +77,10 @@ func (m *Manager) ensureBucketExists(
 		switch responseErr.HTTPStatusCode() {
 		case 404:
 			log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s does not exist, creating...", m.bucket))
-			return m.CreateBucket(ctx)
+			if err := m.CreateBucket(ctx); err != nil {
+				return err
+			}
+			return m.claimOrVerifyOwnership(ctx)
 		case 403:
 			return fmt.Errorf("access denied to bucket %s: %w", m.bucket, err)
 		case 301:
@@ -76,8 +89,66 @@ func (m *Manager) ensureBucketExists(
 			return fmt.Errorf("unexpected error checking bucket %s: %w", m.bucket, err)
 		}
 	}
-	return err
 
+	return err
+}
+
+func (m *Manager) tagAsOwned(ctx context.Context) error {
+	_, err := m.s3client.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
+		Bucket: aws.String(m.bucket),
+		Tagging: &s3types.Tagging{
+			TagSet: []s3types.Tag{
+				{Key: aws.String(ownerTagKey), Value: aws.String(string(m.app.UID))},
+			},
+		},
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to tag bucket %s as owned: %w", m.bucket, err)
+	}
+
+	return nil
+}
+
+// claimOrVerifyOwnership handles a bucket HeadBucket found to already exist
+// (whether it was already there, or we just created it a moment ago in this
+// same call): no ownership tag at all -> claim it by writing our tag; a tag
+// present but naming a different Application -> ErrBucketNotOwned; a tag
+// matching this Application -> already ours, proceed.
+//
+// Deliberately NOT split into a separate "just created, skip the check"
+// path: if tagAsOwned failed transiently right after a real CreateBucket in
+// an earlier reconcile, the bucket now exists with no tag on it, and only
+// this unified path can recover -- a "did I just create it in this exact
+// call" flag would permanently read that bucket as foreign forever after a
+// single blip. The residual risk this accepts -- something else claiming
+// this exact operator-scoped bucket name in the narrow window before we
+// tag it -- is far rarer and lower-consequence than that self-lockout.
+func (m *Manager) claimOrVerifyOwnership(ctx context.Context) error {
+	out, err := m.s3client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{
+		Bucket: aws.String(m.bucket),
+	})
+	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchTagSet" {
+			return m.tagAsOwned(ctx)
+		}
+		return fmt.Errorf("%w: could not verify ownership tag: %v", ErrBucketNotOwned, err)
+	}
+
+	for _, tag := range out.TagSet {
+		if aws.ToString(tag.Key) == ownerTagKey {
+			if aws.ToString(tag.Value) == string(m.app.UID) {
+				log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s already exists and is owned by this Application", m.bucket))
+				return nil
+			}
+			return ErrBucketNotOwned
+		}
+	}
+
+	// Tag set exists (so no NoSuchTagSet error) but carries no ownership tag
+	// -- same "safe to claim" reasoning as the NoSuchTagSet case above.
+	return m.tagAsOwned(ctx)
 }
 
 func (m *Manager) CreateBucket(

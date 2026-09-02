@@ -45,9 +45,17 @@ variable "private_subnet_ids" {
 
 }
 
+variable "enable_cluster_public_access" {
+
+  description = "Whether the EKS API server endpoint is reachable from outside the VPC. Private access (in-VPC) is always on regardless of this. Defaults to false: kubectl from outside the VPC (a bastion, a laptop not on a VPN, etc.) needs this enabled and cluster_public_access_cidrs scoped to wherever it's connecting from, or it'll hang trying to reach a private-only endpoint it has no route to."
+  type        = bool
+  default     = false
+
+}
+
 variable "cluster_public_access_cidrs" {
 
-  description = "The CIDR blocks that are allowed to access the EKS cluster publicly. Only used if endpoint_public_access is true. Set to empty list for private access only."
+  description = "The CIDR blocks that are allowed to access the EKS cluster publicly. Only takes effect when enable_cluster_public_access is true. Keep this scoped (e.g. your own IP as a /32), not 0.0.0.0/0 -- this is the EKS control plane's own API, not just an app endpoint."
   type        = list(string)
   default     = []
 

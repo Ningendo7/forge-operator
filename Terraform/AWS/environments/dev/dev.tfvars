@@ -18,6 +18,16 @@ az_network_config = {
 }
 enable_single_nat_gateway = false # Multi-AZ by default
 
+# API server endpoint access
+# Open to any IP rather than scoped to one, a deliberate dev-only trade-off
+# so kubectl doesn't break every time the connecting IP changes. Real access
+# still requires valid AWS IAM credentials mapped to cluster access (EKS
+# access entries / aws-auth) -- this only controls network reachability, not
+# who can actually do anything once connected. prod stays fully private
+# (see prod.tfvars) since "just testing" isn't a good enough reason there.
+enable_cluster_public_access = true
+cluster_public_access_cidrs  = ["0.0.0.0/0"]
+
 # EKS Node Group Configuration
 desired_node_capacity = 2
 node_min_capacity     = 1

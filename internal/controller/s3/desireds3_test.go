@@ -10,15 +10,30 @@ import (
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithy "github.com/aws/smithy-go"
 )
 
 // --- ensureBucketExists ---
 
-func TestEnsureBucketExists_DoesNothingWhenBucketFound(t *testing.T) {
+// matchingTagging returns a GetBucketTaggingOutput carrying the ownership
+// tag for testAppUID, i.e. what verifyOwnership sees for a bucket this
+// operator created for this Application.
+func matchingTagging() *s3sdk.GetBucketTaggingOutput {
+	return &s3sdk.GetBucketTaggingOutput{
+		TagSet: []s3types.Tag{
+			{Key: aws.String(ownerTagKey), Value: aws.String(string(testAppUID))},
+		},
+	}
+}
+
+func TestEnsureBucketExists_OwnedBucketFound(t *testing.T) {
 	createCalled := false
 	m := newTestManager(&mockS3Client{
 		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
 			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return matchingTagging(), nil
 		},
 		createBucketFunc: func(ctx context.Context, params *s3sdk.CreateBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.CreateBucketOutput, error) {
 			createCalled = true
@@ -34,8 +49,102 @@ func TestEnsureBucketExists_DoesNothingWhenBucketFound(t *testing.T) {
 	}
 }
 
+func TestEnsureBucketExists_ReturnsNotOwnedWhenFoundBucketTagMismatched(t *testing.T) {
+	m := newTestManager(&mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return &s3sdk.GetBucketTaggingOutput{
+				TagSet: []s3types.Tag{
+					{Key: aws.String(ownerTagKey), Value: aws.String(string(testOtherUID))},
+				},
+			}, nil
+		},
+	}, nil)
+
+	err := m.ensureBucketExists(context.Background())
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned, got %v", err)
+	}
+}
+
+func TestEnsureBucketExists_ClaimsOwnershipWhenFoundBucketHasEmptyTagSet(t *testing.T) {
+	var taggedOwner string
+	m := newTestManager(&mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return &s3sdk.GetBucketTaggingOutput{}, nil
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			for _, tag := range params.Tagging.TagSet {
+				if aws.ToString(tag.Key) == ownerTagKey {
+					taggedOwner = aws.ToString(tag.Value)
+				}
+			}
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}, nil)
+
+	// A bucket that exists but carries no ownership tag at all is claimed,
+	// not rejected -- this is what recovers a bucket this operator created
+	// in an earlier reconcile whose tag write failed transiently, since
+	// that bucket looks identical to a genuinely foreign untagged one.
+	if err := m.ensureBucketExists(context.Background()); err != nil {
+		t.Fatalf("ensureBucketExists returned error: %v", err)
+	}
+	if taggedOwner != string(testAppUID) {
+		t.Fatalf("expected bucket to be claimed with owner UID, got %q", taggedOwner)
+	}
+}
+
+func TestEnsureBucketExists_ClaimsOwnershipOnNoSuchTagSetError(t *testing.T) {
+	claimed := false
+	m := newTestManager(&mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return nil, &smithy.GenericAPIError{Code: "NoSuchTagSet", Message: "The TagSet does not exist"}
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			claimed = true
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}, nil)
+
+	if err := m.ensureBucketExists(context.Background()); err != nil {
+		t.Fatalf("ensureBucketExists returned error: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("expected NoSuchTagSet to be treated as claimable, not rejected")
+	}
+}
+
+func TestEnsureBucketExists_ReturnsNotOwnedWhenGetTaggingErrors(t *testing.T) {
+	m := newTestManager(&mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			// A genuine, non-NoSuchTagSet failure (permission denied, network
+			// error, ...) must NOT be treated as claimable -- only the
+			// specific "no tags at all" case is safe to claim.
+			return nil, errors.New("access denied")
+		},
+	}, nil)
+
+	err := m.ensureBucketExists(context.Background())
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned, got %v", err)
+	}
+}
+
 func TestEnsureBucketExists_CreatesBucketOnTypedNotFound(t *testing.T) {
 	createCalled := false
+	var taggedBucket, taggedOwner string
 	m := newTestManager(&mockS3Client{
 		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
 			return nil, &s3types.NotFound{}
@@ -44,6 +153,18 @@ func TestEnsureBucketExists_CreatesBucketOnTypedNotFound(t *testing.T) {
 			createCalled = true
 			return &s3sdk.CreateBucketOutput{}, nil
 		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return nil, &smithy.GenericAPIError{Code: "NoSuchTagSet"}
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			taggedBucket = aws.ToString(params.Bucket)
+			for _, tag := range params.Tagging.TagSet {
+				if aws.ToString(tag.Key) == ownerTagKey {
+					taggedOwner = aws.ToString(tag.Value)
+				}
+			}
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
 	}, nil)
 
 	if err := m.ensureBucketExists(context.Background()); err != nil {
@@ -51,6 +172,9 @@ func TestEnsureBucketExists_CreatesBucketOnTypedNotFound(t *testing.T) {
 	}
 	if !createCalled {
 		t.Fatalf("expected CreateBucket to be called when bucket is not found")
+	}
+	if taggedBucket != testBucket || taggedOwner != string(testAppUID) {
+		t.Fatalf("expected newly created bucket to be tagged with owner UID, got bucket=%q owner=%q", taggedBucket, taggedOwner)
 	}
 }
 
@@ -64,6 +188,12 @@ func TestEnsureBucketExists_CreatesBucketOn404ResponseError(t *testing.T) {
 			createCalled = true
 			return &s3sdk.CreateBucketOutput{}, nil
 		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return nil, &smithy.GenericAPIError{Code: "NoSuchTagSet"}
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
 	}, nil)
 
 	if err := m.ensureBucketExists(context.Background()); err != nil {
@@ -71,6 +201,18 @@ func TestEnsureBucketExists_CreatesBucketOn404ResponseError(t *testing.T) {
 	}
 	if !createCalled {
 		t.Fatalf("expected CreateBucket to be called on 404 response error")
+	}
+}
+
+func TestTagAsOwned_PropagatesError(t *testing.T) {
+	m := newTestManager(&mockS3Client{
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			return nil, errors.New("tagging denied")
+		},
+	}, nil)
+
+	if err := m.tagAsOwned(context.Background()); err == nil {
+		t.Fatalf("expected error from tagAsOwned, got nil")
 	}
 }
 
@@ -344,6 +486,9 @@ func TestReconcileBucket_HappyPathReturnsRoleARN(t *testing.T) {
 		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
 			return &s3sdk.HeadBucketOutput{}, nil
 		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return matchingTagging(), nil
+		},
 		putBucketVersioningFunc: func(ctx context.Context, params *s3sdk.PutBucketVersioningInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketVersioningOutput, error) {
 			return &s3sdk.PutBucketVersioningOutput{}, nil
 		},
@@ -392,5 +537,34 @@ func TestReconcileBucket_ShortCircuitsOnBucketError(t *testing.T) {
 	}
 	if iamCalled {
 		t.Fatalf("expected IRSA reconciliation to be skipped after bucket error")
+	}
+}
+
+func TestReconcileBucket_ShortCircuitsOnNotOwnedBucket(t *testing.T) {
+	iamCalled := false
+	m := newTestManager(&mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return &s3sdk.GetBucketTaggingOutput{
+				TagSet: []s3types.Tag{
+					{Key: aws.String(ownerTagKey), Value: aws.String(string(testOtherUID))},
+				},
+			}, nil
+		},
+	}, &mockIAMClient{
+		getRoleFunc: func(ctx context.Context, params *iam.GetRoleInput, optFns ...func(*iam.Options)) (*iam.GetRoleOutput, error) {
+			iamCalled = true
+			return &iam.GetRoleOutput{}, nil
+		},
+	})
+
+	_, err := m.ReconcileBucket(context.Background())
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned from ReconcileBucket, got %v", err)
+	}
+	if iamCalled {
+		t.Fatalf("expected IRSA reconciliation to be skipped when bucket isn't owned by this Application")
 	}
 }

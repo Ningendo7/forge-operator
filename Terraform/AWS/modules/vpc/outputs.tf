@@ -20,3 +20,8 @@ output "vpc_cidr_block" {
   description = "The CIDR block of the VPC"
   value       = aws_vpc.forgecluster_vpc.cidr_block
 }
+
+output "private_route_table_ids" {
+  description = "The IDs of the private route tables (one per AZ)"
+  value       = values(aws_route_table.private-rt)[*].id
+}

@@ -1,0 +1,15 @@
+# Minimal Application with no storage -- exercises just the core Kubernetes
+# resources (Deployment/Service/etc.) the operator generates from spec alone.
+apiVersion: forge.ningendo7.github.io/v1alpha1
+kind: Application
+metadata:
+  name: linode-basic-test
+spec:
+  image: nginxinc/nginx-unprivileged:stable
+  replicas: 2
+  container:
+    port: 8080
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080

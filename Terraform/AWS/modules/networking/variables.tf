@@ -19,6 +19,13 @@ variable "private_subnet_ids" {
 
 }
 
+variable "private_route_table_ids" {
+
+  description = "The IDs of the private route tables created by the VPC module. Associates the S3 Gateway endpoint with them so S3 traffic routes directly instead of through the NAT gateway."
+  type        = list(string)
+
+}
+
 variable "tags" {
 
   description = "A map of tags to apply to all resources"
