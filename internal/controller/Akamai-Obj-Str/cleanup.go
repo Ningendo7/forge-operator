@@ -8,26 +8,34 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// DeleteBucket deletes the bucket and its access key. Bucket deletion is
+// deliberately never blocked by an access-key cleanup failure -- the bucket
+// is the billed resource, the access key is not, so guaranteeing the costly
+// one gets deleted takes priority over a transient failure on the free one.
+// accessKeyErr surfaces that failure to the caller (for an Event, status, or
+// similar) without making it fatal: it's returned separately from err,
+// which is only ever the bucket deletion's own error.
 func (m *Manager) DeleteBucket(
 	ctx context.Context,
-) error {
+) (accessKeyErr error, err error) {
 
 	if m.bucket == "" {
-		return nil
+		return nil, nil
 	}
 
 	logger := logf.FromContext(ctx)
 
-	if err := m.deleteApplicationAccessKey(ctx); err != nil {
-		logger.Error(err, "Failed to clean up access key during finalization", "bucket", m.bucket)
+	if keyErr := m.deleteApplicationAccessKey(ctx); keyErr != nil {
+		logger.Error(keyErr, "Failed to clean up access key during finalization", "bucket", m.bucket)
+		accessKeyErr = keyErr
 	}
 
 	if err := m.deleteStorageBucket(ctx); err != nil {
-		return err
+		return accessKeyErr, err
 	}
 
 	logger.Info("Successfully finalized Akamai Object Storage resources", "bucket", m.bucket)
-	return nil
+	return accessKeyErr, nil
 }
 
 func (m *Manager) deleteApplicationAccessKey(

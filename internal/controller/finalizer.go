@@ -8,6 +8,7 @@ import (
 	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -93,8 +94,13 @@ func (r *ApplicationReconciler) finalizeApplication(
 			if err != nil {
 				return r.failStorageCleanup(ctx, application, fmt.Errorf("failed to create Akamai storage manager for cleanup: %w", err))
 			}
-			if err := storageManager.DeleteBucket(ctx); err != nil {
+			accessKeyErr, err := storageManager.DeleteBucket(ctx)
+			if err != nil {
 				return r.failStorageCleanup(ctx, application, fmt.Errorf("failed to delete Akamai bucket during cleanup: %w", err))
+			}
+			if accessKeyErr != nil && r.Recorder != nil {
+				r.Recorder.Eventf(application, nil, corev1.EventTypeWarning, "AccessKeyCleanupFailed", "Cleanup",
+					"Bucket was deleted, but its Akamai Object Storage access key could not be cleaned up: %v", accessKeyErr)
 			}
 		}
 	}

@@ -189,6 +189,7 @@ func main() {
 	if err := (&controller.ApplicationReconciler{
 		Client:              mgr.GetClient(),
 		Scheme:              mgr.GetScheme(),
+		Recorder:            mgr.GetEventRecorder("forge-operator"),
 		OIDCProviderARN:     oidcProviderARN,
 		OIDCProviderURL:     oidcProviderURL,
 		DefaultAkamaiRegion: defaultAkamaiRegion,

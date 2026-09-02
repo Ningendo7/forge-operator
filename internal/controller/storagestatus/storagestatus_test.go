@@ -105,6 +105,48 @@ func TestSetNotReady_TruncatesLongErrorMessage(t *testing.T) {
 	}
 }
 
+func TestSetNotOwned_SetsConditionFalseWithDistinctReason(t *testing.T) {
+	app := newTestApp()
+
+	SetNotOwned(app, errors.New("bucket already exists and is not owned by forge-operator"))
+
+	cond := findCondition(app)
+	if cond == nil {
+		t.Fatalf("expected StorageReady condition to be set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("expected condition status False, got %q", cond.Status)
+	}
+	if cond.Reason != ReasonBucketNotOwned {
+		t.Errorf("expected reason %q, got %q", ReasonBucketNotOwned, cond.Reason)
+	}
+	if cond.Reason == ReasonBucketConfigurationFailed {
+		t.Errorf("expected a distinct reason from %q so this doesn't read as a transient failure", ReasonBucketConfigurationFailed)
+	}
+	if !strings.Contains(cond.Message, "not owned") {
+		t.Errorf("expected message to explain ownership, got %q", cond.Message)
+	}
+}
+
+func TestSetNotOwned_NilErrorUsesDefaultMessage(t *testing.T) {
+	app := newTestApp()
+
+	SetNotOwned(app, nil)
+
+	cond := findCondition(app)
+	if cond == nil {
+		t.Fatalf("expected StorageReady condition to be set")
+	}
+	if cond.Message != "Bucket already exists and is not owned by forge-operator" {
+		t.Errorf("expected default message, got %q", cond.Message)
+	}
+}
+
+func TestSetNotOwned_NilAppIsNoOp(t *testing.T) {
+	// Must not panic.
+	SetNotOwned(nil, errors.New("boom"))
+}
+
 func TestSetCleanupInProgress_SetsConditionFalse(t *testing.T) {
 	app := newTestApp()
 

@@ -39,7 +39,7 @@ spec:
   pdb:
     minAvailable: 1
   storage:
-    provider: aws-s3
+    provider: AWS
     bucket: my-example-bucket
     region: us-east-1
     endpoint: https://s3.us-east-1.amazonaws.com

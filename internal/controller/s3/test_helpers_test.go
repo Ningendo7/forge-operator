@@ -11,6 +11,7 @@ import (
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 const (
@@ -21,11 +22,13 @@ const (
 	testEUWestRegion = "eu-west-1"
 	testSecretName   = "aws-creds"
 	testIRSARoleARN  = "arn:aws:iam::123456789012:role/app-irsa-demo-app"
+	testAppUID       = types.UID("11111111-1111-1111-1111-111111111111")
+	testOtherUID     = types.UID("22222222-2222-2222-2222-222222222222")
 )
 
 func newTestApp() *forgev1alpha1.Application {
 	return &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace, UID: testAppUID},
 	}
 }
 
@@ -48,7 +51,7 @@ func newTestManager(s3Client S3API, iamClient IAMAPI) *Manager {
 		s3client:  s3Client,
 		iamclient: iamClient,
 		app: &forgev1alpha1.Application{
-			ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
+			ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace, UID: testAppUID},
 		},
 		storage:            &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testRegion},
 		bucket:             testBucket,
@@ -69,6 +72,8 @@ type mockS3Client struct {
 	listMultipartUploadsFunc     func(ctx context.Context, params *s3sdk.ListMultipartUploadsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.ListMultipartUploadsOutput, error)
 	abortMultipartUploadFunc     func(ctx context.Context, params *s3sdk.AbortMultipartUploadInput, optFns ...func(*s3sdk.Options)) (*s3sdk.AbortMultipartUploadOutput, error)
 	deleteObjectsFunc            func(ctx context.Context, params *s3sdk.DeleteObjectsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteObjectsOutput, error)
+	getBucketTaggingFunc         func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error)
+	putBucketTaggingFunc         func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error)
 }
 
 func (m *mockS3Client) HeadBucket(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
@@ -105,6 +110,14 @@ func (m *mockS3Client) AbortMultipartUpload(ctx context.Context, params *s3sdk.A
 
 func (m *mockS3Client) DeleteObjects(ctx context.Context, params *s3sdk.DeleteObjectsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteObjectsOutput, error) {
 	return m.deleteObjectsFunc(ctx, params, optFns...)
+}
+
+func (m *mockS3Client) GetBucketTagging(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+	return m.getBucketTaggingFunc(ctx, params, optFns...)
+}
+
+func (m *mockS3Client) PutBucketTagging(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+	return m.putBucketTaggingFunc(ctx, params, optFns...)
 }
 
 type mockIAMClient struct {

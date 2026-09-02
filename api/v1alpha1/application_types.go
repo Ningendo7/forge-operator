@@ -324,7 +324,10 @@ type StorageSpec struct {
 	// Bucket name.
 	Bucket string `json:"bucket"`
 
-	// Cloud region.
+	// Cloud region. For AWS, a standard AWS region (e.g. "us-east-1"). For
+	// Akamai, a modern Linode region slug (e.g. "us-iad", "us-mia") -- the
+	// same naming used by LKE, not the older "-1"-suffixed cluster form
+	// (e.g. "us-iad-1"), which is deprecated on Linode's side.
 	// +optional
 	Region string `json:"region,omitempty"`
 

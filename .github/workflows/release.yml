@@ -104,9 +104,16 @@ jobs:
 
       - name: Package Helm chart
         run: |
+          # --version must be strict SemVer (Helm's own constraint on
+          # Chart.yaml's version field), hence the stripped chart_version.
+          # --app-version has no such constraint -- it's free-form, and the
+          # manager Deployment template defaults its image tag to it when
+          # manager.image.tag isn't explicitly set. It needs to match the
+          # real image tag (image_tag, with the "v"), or that default
+          # resolves to a tag that was never actually pushed.
           helm package charts/chart \
             --version "${{ steps.version.outputs.chart_version }}" \
-            --app-version "${{ steps.version.outputs.chart_version }}" \
+            --app-version "${{ steps.version.outputs.image_tag }}" \
             --destination dist/
 
       - name: Push Helm chart to GHCR

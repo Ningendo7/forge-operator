@@ -2,17 +2,19 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
 	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // logStorageStatusUpdateError logs a best-effort status write failure without
@@ -125,7 +127,11 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 	// Reconcile Bucket and IRSA
 	result, err := storageManager.ReconcileBucket(ctx)
 	if err != nil {
-		storagestatus.SetNotReady(application, err)
+		if errors.Is(err, s3storage.ErrBucketNotOwned) {
+			storagestatus.SetNotOwned(application, err)
+		} else {
+			storagestatus.SetNotReady(application, err)
+		}
 		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
 		return fmt.Errorf("failed to reconcile S3 bucket: %w", err)
 	}
@@ -180,7 +186,11 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	// Reconcile Bucket and Access Key
 	result, err := storageManager.ReconcileBucket(ctx)
 	if err != nil {
-		storagestatus.SetNotReady(application, err)
+		if errors.Is(err, akamaiobjstr.ErrBucketNotOwned) {
+			storagestatus.SetNotOwned(application, err)
+		} else {
+			storagestatus.SetNotReady(application, err)
+		}
 		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
 		return nil, fmt.Errorf("failed to reconcile Akamai bucket: %w", err)
 	}

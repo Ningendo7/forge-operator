@@ -3,10 +3,14 @@ package akamaiobjstr
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/linode/linodego"
 )
 
@@ -79,7 +83,7 @@ func TestEnsureBucketExists_CreatesBucketWhenNotFound(t *testing.T) {
 		},
 		createObjectStorageBucketFunc: func(ctx context.Context, opts linodego.ObjectStorageBucketCreateOptions) (*linodego.ObjectStorageBucket, error) {
 			createCalled = true
-			if opts.Label != testBucket || opts.Cluster != testRegion { //nolint:staticcheck // asserts the Cluster field the manager currently sets
+			if opts.Label != testBucket || opts.Region != testRegion {
 				t.Errorf("unexpected create options: %#v", opts)
 			}
 			return &linodego.ObjectStorageBucket{Label: opts.Label}, nil
@@ -228,8 +232,20 @@ func TestResolveEndpoint_UsesConfiguredEndpoint(t *testing.T) {
 	m := newTestManager(nil)
 	m.storage.Endpoint = "custom.endpoint.example.com"
 
-	if got := m.resolveEndpoint(); got != "custom.endpoint.example.com" {
+	bucket := &linodego.ObjectStorageBucket{Hostname: "bucket.us-east-1.linodeobjects.com"}
+	if got := m.resolveEndpoint(bucket); got != "custom.endpoint.example.com" {
 		t.Fatalf("expected configured endpoint, got %q", got)
+	}
+}
+
+func TestResolveEndpoint_PrefersBucketHostname(t *testing.T) {
+	m := newTestManager(nil)
+	m.storage.Endpoint = ""
+	m.region = testRegion
+
+	bucket := &linodego.ObjectStorageBucket{Hostname: "bucket-label.us-east-1.linodeobjects.com"}
+	if got := m.resolveEndpoint(bucket); got != "bucket-label.us-east-1.linodeobjects.com" {
+		t.Fatalf("expected bucket hostname, got %q", got)
 	}
 }
 
@@ -238,7 +254,12 @@ func TestResolveEndpoint_DefaultsToRegionBasedEndpoint(t *testing.T) {
 	m.storage.Endpoint = ""
 	m.region = testRegion
 
-	if got := m.resolveEndpoint(); got != "us-east-1.linodeobjects.com" {
+	// No bucket at all, and a bucket with no Hostname, both fall back the
+	// same way.
+	if got := m.resolveEndpoint(nil); got != testDefaultEndpoint {
+		t.Fatalf("expected default region-based endpoint, got %q", got)
+	}
+	if got := m.resolveEndpoint(&linodego.ObjectStorageBucket{}); got != testDefaultEndpoint {
 		t.Fatalf("expected default region-based endpoint, got %q", got)
 	}
 }
@@ -246,6 +267,12 @@ func TestResolveEndpoint_DefaultsToRegionBasedEndpoint(t *testing.T) {
 // --- ReconcileBucket ---
 
 func TestReconcileBucket_HappyPath(t *testing.T) {
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(string(testAppUID)))}, nil
+		},
+	})
+
 	m := newTestManager(&mockAkamaiClient{
 		getObjectStorageBucketFunc: func(ctx context.Context, clusterID, bucket string) (*linodego.ObjectStorageBucket, error) {
 			return &linodego.ObjectStorageBucket{Label: bucket}, nil
@@ -262,8 +289,103 @@ func TestReconcileBucket_HappyPath(t *testing.T) {
 	if result.AccessKey != testExistingAccessKey {
 		t.Errorf("expected access key to be returned, got %q", result.AccessKey)
 	}
-	if result.Endpoint != "us-east-1.linodeobjects.com" {
+	if result.Endpoint != testDefaultEndpoint {
 		t.Errorf("expected default endpoint, got %q", result.Endpoint)
+	}
+}
+
+// --- claimOrVerifyOwnership / claimOwnership ---
+
+func TestClaimOrVerifyOwnership_ClaimsWhenMarkerMissing(t *testing.T) {
+	claimed := false
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return nil, &s3types.NoSuchKey{}
+		},
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			claimed = true
+			body, _ := io.ReadAll(params.Body)
+			if string(body) != string(testAppUID) {
+				t.Errorf("expected marker body to be the app UID, got %q", body)
+			}
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+
+	m := newTestManager(nil)
+
+	if err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk"); err != nil {
+		t.Fatalf("claimOrVerifyOwnership returned error: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("expected a missing marker to be claimed")
+	}
+}
+
+func TestClaimOrVerifyOwnership_ProceedsWhenMarkerMatches(t *testing.T) {
+	putCalled := false
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(string(testAppUID)))}, nil
+		},
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			putCalled = true
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+
+	m := newTestManager(nil)
+
+	if err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk"); err != nil {
+		t.Fatalf("claimOrVerifyOwnership returned error: %v", err)
+	}
+	if putCalled {
+		t.Fatalf("expected no write when the marker already matches")
+	}
+}
+
+func TestClaimOrVerifyOwnership_ReturnsNotOwnedWhenMarkerMismatched(t *testing.T) {
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(string(testOtherUID)))}, nil
+		},
+	})
+
+	m := newTestManager(nil)
+
+	err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk")
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned, got %v", err)
+	}
+}
+
+func TestClaimOrVerifyOwnership_ReturnsNotOwnedOnGenericGetError(t *testing.T) {
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			// A genuine failure (permission denied, network error, ...) must
+			// NOT be treated as claimable -- only a typed NoSuchKey is.
+			return nil, errors.New("access denied")
+		},
+	})
+
+	m := newTestManager(nil)
+
+	err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk")
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned, got %v", err)
+	}
+}
+
+func TestClaimOwnership_PropagatesPutError(t *testing.T) {
+	m := newTestManager(nil)
+
+	err := m.claimOwnership(context.Background(), &mockS3ObjectClient{
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			return nil, errors.New("write denied")
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected error from claimOwnership, got nil")
 	}
 }
 
@@ -295,5 +417,27 @@ func TestReconcileBucket_ShortCircuitsOnBucketError(t *testing.T) {
 	}
 	if keyListCalled {
 		t.Fatalf("expected access key reconciliation to be skipped after bucket error")
+	}
+}
+
+func TestReconcileBucket_ShortCircuitsOnNotOwnedBucket(t *testing.T) {
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(string(testOtherUID)))}, nil
+		},
+	})
+
+	m := newTestManager(&mockAkamaiClient{
+		getObjectStorageBucketFunc: func(ctx context.Context, clusterID, bucket string) (*linodego.ObjectStorageBucket, error) {
+			return &linodego.ObjectStorageBucket{Label: bucket}, nil
+		},
+		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
+			return []linodego.ObjectStorageKey{{Label: testAccessKeyLabel, AccessKey: testExistingAccessKey}}, nil
+		},
+	})
+
+	_, err := m.ReconcileBucket(context.Background())
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned from ReconcileBucket, got %v", err)
 	}
 }

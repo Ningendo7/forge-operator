@@ -47,6 +47,17 @@ variable "enable_single_nat_gateway" {
   type        = bool
 }
 
+# EKS API Server Endpoint Access
+variable "enable_cluster_public_access" {
+  description = "Whether the EKS API server endpoint is reachable from outside the VPC. Private (in-VPC) access is always on regardless. See modules/eks/variables.tf for the full rationale."
+  type        = bool
+}
+
+variable "cluster_public_access_cidrs" {
+  description = "CIDR blocks allowed to reach the EKS API server publicly. Only takes effect when enable_cluster_public_access is true. Keep this scoped (e.g. your own IP as a /32) -- this is the control plane's own API, not just an app endpoint."
+  type        = list(string)
+}
+
 # EKS Node Group Configuration
 variable "desired_node_capacity" {
   description = "Desired number of nodes"

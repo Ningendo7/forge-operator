@@ -26,10 +26,14 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
@@ -38,10 +42,14 @@ import (
 // readinessRequeueInterval is how soon Reconcile re-checks readiness when not yet ready.
 const readinessRequeueInterval = 10 * time.Second
 
+// storageResyncInterval is how often a settled, storage-backed Application re-verifies its cloud bucket still exists.
+const storageResyncInterval = 10 * time.Minute
+
 // ApplicationReconciler reconciles a Application object
 type ApplicationReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
+	Recorder        events.EventRecorder
 	OIDCProviderARN string
 	OIDCProviderURL string
 
@@ -57,6 +65,7 @@ type ApplicationReconciler struct {
 }
 
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=forge.ningendo7.github.io,resources=applications,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=forge.ningendo7.github.io,resources=applications/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=forge.ningendo7.github.io,resources=applications/finalizers,verbs=update
@@ -125,13 +134,34 @@ func (r *ApplicationReconciler) Reconcile(
 		return ctrl.Result{}, err
 	}
 
+	if application.Spec.Storage != nil {
+		return ctrl.Result{RequeueAfter: storageResyncInterval}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
+
+// applicationChangePredicate re-reconciles on a real spec change (generation
+// bump) or when the object is marked for deletion, but ignores pure
+// status/metadata-only updates. Without this, every status write Reconcile
+// makes to the Application (SetReconciling/SetReady/SetFailed) would itself
+// be an update the primary watch below sees and re-triggers on, causing the
+// controller to reconcile itself in an unbounded loop even once fully
+// settled -- deletionTimestamp is included explicitly because it doesn't
+// bump generation either, and finalizer cleanup depends on that event.
+var applicationChangePredicate = predicate.Or(
+	predicate.GenerationChangedPredicate{},
+	predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return e.ObjectNew.GetDeletionTimestamp() != nil
+		},
+	},
+)
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ApplicationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&forgev1alpha1.Application{}).
+		For(&forgev1alpha1.Application{}, builder.WithPredicates(applicationChangePredicate)).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).

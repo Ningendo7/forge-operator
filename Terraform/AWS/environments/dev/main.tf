@@ -21,9 +21,10 @@ module "vpc" {
 module "networking" {
   source = "../../modules/networking"
 
-  env                = var.environment
-  vpc_id             = module.vpc.vpc_id
-  private_subnet_ids = module.vpc.private_subnet_ids
+  env                     = var.environment
+  vpc_id                  = module.vpc.vpc_id
+  private_subnet_ids      = module.vpc.private_subnet_ids
+  private_route_table_ids = module.vpc.private_route_table_ids
 
   tags = local.common_tags
 }
@@ -57,6 +58,10 @@ module "eks" {
   # From Networking module
   cluster_security_group_id = module.networking.node_security_group_id
 
+  # API server endpoint access
+  enable_cluster_public_access = var.enable_cluster_public_access
+  cluster_public_access_cidrs  = var.cluster_public_access_cidrs
+
   # Node group sizing
   desired_node_capacity = var.desired_node_capacity
   node_min_capacity     = var.node_min_capacity
@@ -78,8 +83,15 @@ module "irsa" {
   oidc_providers = {
     (module.eks.oidc_provider_url) = {
       provider_arn = module.eks.oidc_provider_arn
+      # Must match the ServiceAccount the forge-operator Helm chart actually
+      # creates -- its default naming is "<release>-controller-manager" in
+      # whatever namespace it's installed into (see charts/chart's
+      # forge-operator.serviceAccountName helper), not a fixed name Terraform
+      # can freely choose. "forge-operator"/"forge-operator-system" here
+      # matches the release name and namespace used in the README's own
+      # Quickstart install command.
       namespace_service_accounts = {
-        "operators" = ["app-controller-sa"]
+        "forge-operator-system" = ["forge-operator-controller-manager"]
       }
     }
   }
