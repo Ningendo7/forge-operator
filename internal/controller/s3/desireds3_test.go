@@ -94,7 +94,7 @@ func TestEnsureBucketExists_AdoptsMismatchedTagWhenAnnotationSet(t *testing.T) {
 			return &s3sdk.PutBucketTaggingOutput{}, nil
 		},
 	}, nil)
-	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: "true"}
+	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
 
 	// A tag naming a *different* Application must still be adoptable via
 	// the explicit annotation -- this is the deliberate human-in-the-loop
@@ -160,7 +160,7 @@ func TestEnsureBucketExists_ClaimsEmptyTagSetWhenAdoptAnnotationSet(t *testing.T
 		},
 	}, nil)
 	// No Status.Storage seeded -- only the explicit human opt-in this time.
-	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: "true"}
+	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
 
 	if err := m.ensureBucketExists(context.Background()); err != nil {
 		t.Fatalf("ensureBucketExists returned error: %v", err)

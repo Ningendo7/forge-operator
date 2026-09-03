@@ -216,7 +216,7 @@ func (m *Manager) claimOrVerifyOwnership(ctx context.Context) error {
 // in to taking over a bucket owned by a different Application, via
 // naming.AdoptBucketAnnotation.
 func (m *Manager) adoptBucketRequested() bool {
-	return m.app.Annotations[naming.AdoptBucketAnnotation] == "true"
+	return m.app.Annotations[naming.AdoptBucketAnnotation] == naming.AdoptBucketAnnotationValue
 }
 
 func (m *Manager) CreateBucket(

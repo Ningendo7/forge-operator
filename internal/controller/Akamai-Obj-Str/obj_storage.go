@@ -107,7 +107,7 @@ func (m *Manager) claimOwnership(
 // in to taking over a bucket owned by a different Application, via
 // naming.AdoptBucketAnnotation.
 func (m *Manager) adoptBucketRequested() bool {
-	return m.app.Annotations[naming.AdoptBucketAnnotation] == "true"
+	return m.app.Annotations[naming.AdoptBucketAnnotation] == naming.AdoptBucketAnnotationValue
 }
 
 // recordBucketCreated durably records, in Application.Status, that this

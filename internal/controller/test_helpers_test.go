@@ -102,7 +102,7 @@ type fakeEventRecorder struct {
 	events []fakeEvent
 }
 
-func (f *fakeEventRecorder) Eventf(regarding, related runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
+func (f *fakeEventRecorder) Eventf(regarding, related runtime.Object, eventtype, reason, action, note string, args ...any) {
 	f.events = append(f.events, fakeEvent{
 		eventtype: eventtype,
 		reason:    reason,

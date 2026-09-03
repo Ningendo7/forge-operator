@@ -523,25 +523,41 @@ spec:
 		// This is the scenario envtest explicitly can't cover (see the comment
 		// atop application_integration_test.go: AWS/Akamai storage paths are
 		// out of scope there). It doesn't need real AWS credentials or
-		// network access, though: reconcileAWSStorage fails fast, locally, on
-		// the Kubernetes Get for the referenced credentials Secret, before it
-		// would ever make a real AWS API call. That's enough to prove,
-		// against the actually-deployed controller, that a real storage
-		// misconfiguration surfaces as Degraded (not a crash-loop or a silent
-		// stall) and that fixing it lets the Application recover on its own.
+		// network access, though: the credentials Secret exists and has the
+		// required keys, so it clears admission, but spec.storage.endpoint
+		// points at a host that can never resolve, so reconcileAWSStorage's
+		// first real AWS API call fails fast and locally with a DNS error --
+		// it never actually reaches AWS. That's enough to prove, against the
+		// actually-deployed controller, that a real storage misconfiguration
+		// surfaces as Degraded (not a crash-loop or a silent stall) and that
+		// fixing it lets the Application recover on its own.
 		//
-		// Deliberately AWS, not Akamai: the admission webhook now catches the
-		// equivalent Akamai misconfiguration (missing/colliding credentials
-		// Secret) before it ever reaches the reconciler — see the "rejects an
-		// invalid Akamai storage config at admission time" test below. AWS's
-		// spec.storage.secretName is out of the webhook's scope (see its doc
-		// comment), so it's still a live path to a reconcile-time failure.
+		// Deliberately AWS, not Akamai: the admission webhook now checks both
+		// providers' credentials Secret exists with the required keys (see
+		// the "rejects an invalid Akamai storage config at admission time"
+		// test below), so a merely-missing Secret no longer reaches the
+		// reconciler for either provider. Endpoint/region validity, though,
+		// is deliberately left unchecked at admission for both providers
+		// (see docs/development-and-operations.md) -- this test exercises
+		// that remaining gap via AWS, which is exercised elsewhere in this
+		// file too, so a failure here is easier to place.
 		It("reports Degraded on a real storage misconfiguration, then recovers to Ready once fixed", func() {
-			By("patching in a storage config that references a nonexistent credentials Secret")
-			cmd := exec.Command("kubectl", "patch", "application", appName, "-n", appNamespace,
-				"--type=merge", "-p",
-				`{"spec":{"storage":{"provider":"AWS","bucket":"e2e-test-bucket","secretName":"e2e-nonexistent-aws-creds"}}}`)
+			const credsSecretName = "e2e-fake-aws-creds"
+
+			By("creating a credentials Secret that satisfies admission but isn't a real AWS key pair")
+			cmd := exec.Command("kubectl", "create", "secret", "generic", credsSecretName,
+				"-n", appNamespace,
+				"--from-literal=AWS_ACCESS_KEY_ID=AKIAFAKEFAKEFAKEFAKE",
+				"--from-literal=AWS_SECRET_ACCESS_KEY=fakefakefakefakefakefakefakefakefakefake")
 			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create fake AWS credentials Secret")
+
+			By("patching in a storage config pointed at an endpoint that can never be reached")
+			cmd = exec.Command("kubectl", "patch", "application", appName, "-n", appNamespace,
+				"--type=merge", "-p",
+				fmt.Sprintf(`{"spec":{"storage":{"provider":"AWS","bucket":"e2e-test-bucket",`+
+					`"secretName":%q,"endpoint":"https://e2e-unreachable.invalid"}}}`, credsSecretName))
+			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to patch Application storage")
 
 			By("waiting for the Application to report Degraded")
@@ -565,6 +581,10 @@ spec:
 				"--type=merge", "-p", `{"spec":{"storage":null}}`)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to remove Application storage")
+
+			By("cleaning up the fake credentials Secret")
+			cmd = exec.Command("kubectl", "delete", "secret", credsSecretName, "-n", appNamespace, "--ignore-not-found")
+			_, _ = utils.Run(cmd)
 
 			By("confirming the Application recovers to Ready on its own")
 			verifyAppReady := func(g Gomega) {

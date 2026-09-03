@@ -20,6 +20,11 @@ import (
 // packages so the exact annotation key can never drift between them.
 const AdoptBucketAnnotation = "forge-operator.ningendo7.github.io/adopt-bucket"
 
+// AdoptBucketAnnotationValue is the value AdoptBucketAnnotation must be set
+// to for it to take effect (kept alongside the key so both packages read it
+// from one shared source, matching AdoptBucketAnnotation's own reasoning).
+const AdoptBucketAnnotationValue = "true"
+
 // Service returns the name of the Application's Service.
 func Service(application *forgev1alpha1.Application) string {
 	return application.Name
@@ -93,10 +98,7 @@ func CloudResourceName(parts []string, maxLen int) string {
 	sum := sha256.Sum256([]byte(full))
 	suffix := "-" + hex.EncodeToString(sum[:])[:8]
 
-	keep := maxLen - len(suffix)
-	if keep < 0 {
-		keep = 0
-	}
+	keep := max(maxLen-len(suffix), 0)
 	if keep > len(full) {
 		keep = len(full)
 	}

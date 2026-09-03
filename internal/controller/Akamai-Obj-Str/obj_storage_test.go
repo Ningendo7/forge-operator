@@ -339,7 +339,7 @@ func TestClaimOrVerifyOwnership_ClaimsMissingMarkerWhenAdoptAnnotationSet(t *tes
 
 	m := newTestManager(nil)
 	// No Status.Storage seeded -- only the explicit human opt-in this time.
-	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: "true"}
+	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
 
 	if err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk"); err != nil {
 		t.Fatalf("claimOrVerifyOwnership returned error: %v", err)
@@ -463,7 +463,7 @@ func TestClaimOrVerifyOwnership_AdoptsMismatchedMarkerWhenAnnotationSet(t *testi
 	})
 
 	m := newTestManager(nil)
-	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: "true"}
+	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
 
 	// A marker naming a *different* Application must still be adoptable
 	// via the explicit annotation -- this is the deliberate human-in-the-
