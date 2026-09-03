@@ -9,7 +9,4 @@ const (
 
 	// deploymentKind is the Kind used when referencing a Deployment (e.g. ownerRef, scaleTargetRef).
 	deploymentKind = "Deployment"
-
-	// providerStatic is a storage provider value handled as a no-op (credentials supplied externally).
-	providerStatic = "Static"
 )

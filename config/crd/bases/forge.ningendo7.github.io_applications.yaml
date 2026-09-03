@@ -1316,6 +1316,7 @@ spec:
                     type: string
                 type: object
               serviceAccount:
+                description: ServiceAccountSpec defines ServiceAccount behavior.
                 properties:
                   create:
                     description: |-
@@ -1328,6 +1329,11 @@ spec:
                       if empty and create is true, a new ServiceAccount will be created.
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: 'create: false requires name to be set -- there''s no existing
+                    ServiceAccount to point at otherwise'
+                  rule: '!(has(self.create) && !self.create && self.name.size() ==
+                    0)'
               storage:
                 description: Object storage configuration.
                 properties:
@@ -1353,14 +1359,116 @@ spec:
                       == AWS).
                     properties:
                       lifecycleRules:
-                        description: Optional lifecycle rules or other AWS-specific
-                          settings
+                        description: |-
+                          LifecycleRules configures S3 Object Lifecycle rules for the bucket.
+
+                          When this field is left entirely unset, a single default rule is
+                          applied, matching this operator's previous hardcoded behavior: abort
+                          incomplete multipart uploads after 7 days, expire noncurrent object
+                          versions after 30 days, and transition current objects to
+                          STANDARD_IA after 30 days.
+
+                          Set this to an explicit empty list (`lifecycleRules: []`) to remove
+                          lifecycle policy from the bucket entirely, or provide one or more
+                          rules of your own to fully replace the default.
                         items:
-                          type: string
+                          description: |-
+                            LifecycleRule configures a single S3 Object Lifecycle rule. At least one
+                            of ExpirationDays, NoncurrentVersionExpirationDays,
+                            AbortIncompleteMultipartUploadDays, or Transitions should be set, or the
+                            rule has no effect.
+                          properties:
+                            abortIncompleteMultipartUploadDays:
+                              description: |-
+                                AbortIncompleteMultipartUploadDays aborts incomplete multipart
+                                uploads this many days after they were initiated.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            enabled:
+                              description: |-
+                                Enabled controls whether this rule is currently applied. Defaults to
+                                true.
+                              type: boolean
+                            expirationDays:
+                              description: |-
+                                ExpirationDays permanently deletes objects this many days after
+                                creation.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            id:
+                              description: |-
+                                ID uniquely identifies this rule within the bucket's lifecycle
+                                configuration. Defaults to "rule-<index>" (its position in the list)
+                                if unset.
+                              type: string
+                            noncurrentVersionExpirationDays:
+                              description: |-
+                                NoncurrentVersionExpirationDays deletes noncurrent (overwritten or
+                                deleted) object versions this many days after they became
+                                noncurrent. Only meaningful when versioningEnabled is true.
+                              format: int32
+                              minimum: 1
+                              type: integer
+                            prefix:
+                              description: |-
+                                Prefix limits this rule to object keys starting with this prefix.
+                                Applies to every object in the bucket when unset.
+                              type: string
+                            transitions:
+                              description: |-
+                                Transitions moves objects to a different storage class after a
+                                number of days.
+                              items:
+                                description: |-
+                                  LifecycleTransition moves objects to a different S3 storage class after a
+                                  number of days from object creation.
+                                properties:
+                                  days:
+                                    description: Days after object creation to transition.
+                                    format: int32
+                                    minimum: 1
+                                    type: integer
+                                  storageClass:
+                                    description: StorageClass is the target S3 storage
+                                      class.
+                                    enum:
+                                    - STANDARD_IA
+                                    - ONEZONE_IA
+                                    - INTELLIGENT_TIERING
+                                    - GLACIER
+                                    - DEEP_ARCHIVE
+                                    - GLACIER_IR
+                                    type: string
+                                required:
+                                - days
+                                - storageClass
+                                type: object
+                              type: array
+                          type: object
                         type: array
+                      versioningEnabled:
+                        description: |-
+                          VersioningEnabled controls whether S3 bucket versioning is enabled.
+                          Defaults to true when unset, matching this operator's previous
+                          hardcoded behavior. Explicitly setting this to false suspends
+                          versioning -- S3 has no way to fully un-version a bucket once
+                          versioning has ever been enabled on it, only enable/suspend.
+                        type: boolean
                     type: object
                   bucket:
                     description: Bucket name.
+                    type: string
+                  deletionPolicy:
+                    default: Delete
+                    description: |-
+                      DeletionPolicy controls what happens to the bucket when this
+                      Application is deleted. Defaults to "Delete" when unset, matching
+                      this operator's previous, only-ever behavior.
+                    enum:
+                    - Delete
+                    - Retain
                     type: string
                   endpoint:
                     description: Endpoint for the object storage service.
@@ -1385,6 +1493,11 @@ spec:
                 - bucket
                 - provider
                 type: object
+                x-kubernetes-validations:
+                - message: spec.storage.akamai must not be set when provider is AWS
+                  rule: '!(self.provider == ''AWS'' && has(self.akamai))'
+                - message: spec.storage.aws must not be set when provider is Akamai
+                  rule: '!(self.provider == ''Akamai'' && has(self.aws))'
             required:
             - image
             type: object
@@ -1479,6 +1592,20 @@ spec:
                   bucket:
                     description: Bucket is the name of the provisioned bucket.
                     type: string
+                  created:
+                    description: |-
+                      Created records whether this operator itself successfully created
+                      this bucket (as opposed to finding one that already existed). Used
+                      to decide whether an untagged/unmarked bucket found on a later
+                      reconcile is safe to claim ownership of: only if this operator has a
+                      durable record of having created it itself, not merely because no
+                      tag/marker happens to be present -- which could just as easily mean
+                      a long-lived, genuinely foreign bucket that happens to share this
+                      name. Set the moment bucket creation succeeds, before ownership
+                      tagging/marking is even attempted, so it survives a transient
+                      failure in that later step -- exactly the case this field exists to
+                      recover from.
+                    type: boolean
                   provider:
                     description: Provider indicates the active storage provider being
                       used.

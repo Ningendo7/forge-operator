@@ -42,7 +42,7 @@ func (m *Manager) deleteApplicationAccessKey(
 	ctx context.Context,
 ) error {
 
-	keyLabel := fmt.Sprintf("%s-key", m.app.Name)
+	keyLabel := m.accessKeyLabel()
 
 	keyID, err := m.findAccessKeyIDByLabel(ctx, keyLabel)
 	if err != nil {

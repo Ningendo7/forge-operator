@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -170,7 +171,7 @@ func TestFinalizeApplication_NoOpWhenStorageIsNil(t *testing.T) {
 func TestFinalizeApplication_NoOpForUnrecognizedProvider(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Provider: providerStatic,
+		Provider: "SomeFutureProvider",
 		Bucket:   testBucket,
 	}
 	r := &ApplicationReconciler{}
@@ -248,5 +249,101 @@ func TestFinalizeApplication_SetsStorageReadyCleanupFailedOnError(t *testing.T) 
 	}
 	if storageReady.Reason != "BucketCleanupFailed" {
 		t.Fatalf("expected reason BucketCleanupFailed, got %q", storageReady.Reason)
+	}
+}
+
+// --- retainStorage / deletionPolicy: Retain ---
+
+func TestFinalizeApplication_RetainSkipsCloudCleanupForAWS(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider:       forgev1alpha1.ProviderAWSS3,
+		Bucket:         testBucket,
+		DeletionPolicy: forgev1alpha1.DeletionPolicyRetain,
+		// A real AWS manager would fail to construct (no credentials Secret
+		// configured) -- if retention actually skips the provider switch as
+		// intended, that failure is never reached, so this deliberately
+		// invalid config alone proves the cloud path wasn't taken.
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	rec := &fakeEventRecorder{}
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme, Recorder: rec}
+
+	if err := r.finalizeApplication(context.Background(), app); err != nil {
+		t.Fatalf("expected nil error when retaining storage, got %v", err)
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+	var storageReady *metav1.Condition
+	for i := range got.Status.Conditions {
+		if got.Status.Conditions[i].Type == "StorageReady" {
+			storageReady = &got.Status.Conditions[i]
+		}
+	}
+	if storageReady == nil {
+		t.Fatalf("expected StorageReady condition to be set")
+	}
+	if storageReady.Reason != storagestatus.ReasonBucketRetained {
+		t.Fatalf("expected reason %q, got %q", storagestatus.ReasonBucketRetained, storageReady.Reason)
+	}
+
+	if len(rec.events) != 1 {
+		t.Fatalf("expected exactly one Event to be recorded, got %d", len(rec.events))
+	}
+	if rec.events[0].reason != "StorageRetained" {
+		t.Fatalf("expected reason StorageRetained, got %q", rec.events[0].reason)
+	}
+	if rec.events[0].eventtype != "Normal" {
+		t.Fatalf("expected a Normal event (this is intentional, not a failure), got %q", rec.events[0].eventtype)
+	}
+}
+
+func TestFinalizeApplication_RetainSkipsCloudCleanupForAkamai(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider:       forgev1alpha1.ProviderAkamaiObjectStorage,
+		Bucket:         testBucket,
+		DeletionPolicy: forgev1alpha1.DeletionPolicyRetain,
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	// An Akamai manager would also fail to construct here (no token Secret)
+	// -- same reasoning as the AWS case above.
+	if err := r.finalizeApplication(context.Background(), app); err != nil {
+		t.Fatalf("expected nil error when retaining storage, got %v", err)
+	}
+}
+
+func TestFinalizeApplication_DeleteIsStillDefaultBehavior(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider:   forgev1alpha1.ProviderAWSS3,
+		Bucket:     testBucket,
+		SecretName: testMissingCredsSecret,
+		// DeletionPolicy deliberately left unset.
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	// An unset DeletionPolicy must still take the normal cleanup path (and
+	// therefore hit the same real-manager-construction error as the
+	// existing AWS test above) -- retention must never be the accidental
+	// default.
+	err := r.finalizeApplication(context.Background(), app)
+	if err == nil {
+		t.Fatalf("expected the normal cleanup path (and its error) when deletionPolicy is unset, got nil error")
 	}
 }

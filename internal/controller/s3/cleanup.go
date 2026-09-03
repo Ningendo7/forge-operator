@@ -169,12 +169,15 @@ func (m *Manager) cleanupAppIRSA(
 	ctx context.Context,
 ) error {
 
-	roleName := fmt.Sprintf("app-irsa-%s", m.app.Name)
+	roleName := m.irsaRoleName()
 
-	// Delete the inline policy attached to the role
+	// Delete the inline policy attached to the role. Must be the exact same
+	// name used to attach it in desireds3.go's ReconcileAppIRSA -- see the
+	// comment on s3BucketAccessPolicyName for what goes wrong if these ever
+	// drift apart again.
 	_, err := m.iamclient.DeleteRolePolicy(ctx, &iam.DeleteRolePolicyInput{
 		RoleName:   aws.String(roleName),
-		PolicyName: aws.String(fmt.Sprintf("app-irsa-policy-%s", m.app.Name)),
+		PolicyName: aws.String(s3BucketAccessPolicyName),
 	})
 	if err != nil {
 		var noSuchEntity *iamtypes.NoSuchEntityException

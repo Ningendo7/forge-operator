@@ -62,6 +62,10 @@ func (r *ApplicationReconciler) finalizeApplication(
 ) error {
 
 	if application.Spec.Storage != nil {
+		if application.Spec.Storage.DeletionPolicy == forgev1alpha1.DeletionPolicyRetain {
+			return r.retainStorage(ctx, application)
+		}
+
 		switch application.Spec.Storage.Provider {
 		case forgev1alpha1.ProviderAWSS3:
 			storagestatus.SetCleanupInProgress(application)
@@ -104,6 +108,28 @@ func (r *ApplicationReconciler) finalizeApplication(
 			}
 		}
 	}
+	return nil
+}
+
+// retainStorage skips cloud deletion entirely when spec.storage.deletionPolicy
+// is Retain: the bucket (and its ownership tag/marker) is left exactly as-is,
+// only the Kubernetes Application object and its finalizer are removed.
+// Emits an Event so this is visible and auditable, not silent.
+func (r *ApplicationReconciler) retainStorage(
+	ctx context.Context,
+	application *forgev1alpha1.Application,
+) error {
+	bucket := application.Spec.Storage.Bucket
+
+	storagestatus.SetRetained(application, bucket)
+	logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+
+	if r.Recorder != nil {
+		r.Recorder.Eventf(application, nil, corev1.EventTypeNormal, "StorageRetained", "Cleanup",
+			"deletionPolicy is Retain: bucket %q was NOT deleted and remains in your cloud account", bucket)
+	}
+
+	logf.FromContext(ctx).Info("Storage retained per deletionPolicy, skipping cloud cleanup", "bucket", bucket)
 	return nil
 }
 

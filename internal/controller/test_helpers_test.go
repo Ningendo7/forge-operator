@@ -8,6 +8,7 @@ import (
 	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -83,4 +84,29 @@ type mockAkamaiStorageManager struct {
 
 func (m *mockAkamaiStorageManager) ReconcileBucket(ctx context.Context) (*akamaiobjstr.StorageResult, error) {
 	return m.reconcileBucketFunc(ctx)
+}
+
+// fakeEvent is one call recorded by fakeEventRecorder.
+type fakeEvent struct {
+	eventtype string
+	reason    string
+	action    string
+	note      string
+}
+
+// fakeEventRecorder is a minimal events.EventRecorder test double -- there
+// wasn't one before this, so nothing previously verified an Event actually
+// gets recorded (as opposed to just checking the code path that would emit
+// one doesn't error).
+type fakeEventRecorder struct {
+	events []fakeEvent
+}
+
+func (f *fakeEventRecorder) Eventf(regarding, related runtime.Object, eventtype, reason, action, note string, args ...interface{}) {
+	f.events = append(f.events, fakeEvent{
+		eventtype: eventtype,
+		reason:    reason,
+		action:    action,
+		note:      fmt.Sprintf(note, args...),
+	})
 }

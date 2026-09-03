@@ -108,7 +108,18 @@ var _ = Describe("Application Webhook", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("admits an AWS Application regardless of secretName, since collision rules don't apply there", func() {
+		It("admits an AWS Application with no secretName -- pure IRSA needs no Secret to check", func() {
+			obj.Name = "aws-irsa-app"
+			obj.Namespace = namespace
+			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
+				Provider: forgev1alpha1.ProviderAWSS3,
+				Bucket:   testBucket,
+			}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("rejects an AWS Application whose secretName Secret doesn't exist", func() {
 			obj.Name = "aws-app"
 			obj.Namespace = namespace
 			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
@@ -117,7 +128,110 @@ var _ = Describe("Application Webhook", func() {
 				SecretName: "whatever",
 			}
 			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("not found"))
+		})
+
+		It("rejects an AWS Application whose secretName Secret is missing required keys", func() {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "aws-creds-no-keys", Namespace: namespace},
+				Data:       map[string][]byte{"other-key": []byte("value")},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+
+			obj.Name = "aws-bad-creds-app"
+			obj.Namespace = namespace
+			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
+				Provider:   forgev1alpha1.ProviderAWSS3,
+				Bucket:     testBucket,
+				SecretName: "aws-creds-no-keys",
+			}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("AWS_ACCESS_KEY_ID"))
+			Expect(err.Error()).To(ContainSubstring("AWS_SECRET_ACCESS_KEY"))
+		})
+
+		It("admits a valid AWS Application with a distinct, existing credentials Secret", func() {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "valid-aws-creds", Namespace: namespace},
+				Data: map[string][]byte{
+					"AWS_ACCESS_KEY_ID":     []byte("AKIAEXAMPLE"),
+					"AWS_SECRET_ACCESS_KEY": []byte("secretexample"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+
+			obj.Name = "valid-aws-app"
+			obj.Namespace = namespace
+			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
+				Provider:   forgev1alpha1.ProviderAWSS3,
+				Bucket:     testBucket,
+				SecretName: "valid-aws-creds",
+			}
+			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).NotTo(HaveOccurred())
+
+			By("validating updates the same way")
+			_, err = validator.ValidateUpdate(ctx, oldObj, obj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("rejects changing spec.storage.provider on an existing Application", func() {
+			oldObj.Spec.Storage = &forgev1alpha1.StorageSpec{
+				Provider: forgev1alpha1.ProviderAWSS3,
+				Bucket:   testBucket,
+			}
+			newObj := oldObj.DeepCopy()
+			newObj.Spec.Storage.Provider = forgev1alpha1.ProviderAkamaiObjectStorage
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, newObj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("immutable"))
+		})
+
+		It("admits an update that leaves spec.storage.provider unchanged", func() {
+			oldObj.Name = "stable-provider-app"
+			oldObj.Namespace = namespace
+			oldObj.Spec.Storage = &forgev1alpha1.StorageSpec{
+				Provider: forgev1alpha1.ProviderAWSS3,
+				Bucket:   testBucket,
+			}
+			newObj := oldObj.DeepCopy()
+			newObj.Spec.Storage.Bucket = "some-other-bucket"
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, newObj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("rejects spec.storage.akamai set when provider is AWS, enforced by the CRD's CEL rule at the API server", func() {
+			obj.Name = "incompatible-aws-app"
+			obj.Namespace = namespace
+			obj.Spec.Image = "nginx:latest"
+			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
+				Provider: forgev1alpha1.ProviderAWSS3,
+				Bucket:   testBucket,
+				Akamai:   &forgev1alpha1.AkamaiStorageSpec{AccessKeySecretRef: "whatever"},
+			}
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("akamai must not be set when provider is AWS"))
+		})
+
+		It("rejects spec.storage.aws set when provider is Akamai, enforced by the CRD's CEL rule at the API server", func() {
+			obj.Name = "incompatible-akamai-app"
+			obj.Namespace = namespace
+			obj.Spec.Image = "nginx:latest"
+			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
+				Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
+				Bucket:   testBucket,
+				AWS:      &forgev1alpha1.AWSStorageSpec{},
+			}
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("aws must not be set when provider is Akamai"))
 		})
 
 		It("rejects an Akamai Application where secretName collides with accessKeySecretRef", func() {

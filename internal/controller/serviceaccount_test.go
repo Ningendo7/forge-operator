@@ -22,9 +22,15 @@ func TestShouldCreateServiceAccount(t *testing.T) {
 		expected bool
 	}{
 		{name: "nil spec defaults to true", spec: nil, expected: true},
-		{name: "nil Create field defaults to true", spec: &forgev1alpha1.ServiceAccountSpec{}, expected: true},
+		{name: "nil Create field, no Name, defaults to true", spec: &forgev1alpha1.ServiceAccountSpec{}, expected: true},
+		{
+			name: "nil Create field but Name set defaults to false -- an existing ServiceAccount to use, not one we own",
+			spec: &forgev1alpha1.ServiceAccountSpec{Name: testCustomSAName}, expected: false,
+		},
 		{name: "Create true", spec: &forgev1alpha1.ServiceAccountSpec{Create: &trueVal}, expected: true},
+		{name: "Create true even with Name also set", spec: &forgev1alpha1.ServiceAccountSpec{Create: &trueVal, Name: testCustomSAName}, expected: true},
 		{name: "Create false", spec: &forgev1alpha1.ServiceAccountSpec{Create: &falseVal}, expected: false},
+		{name: "Create false even with Name also set", spec: &forgev1alpha1.ServiceAccountSpec{Create: &falseVal, Name: testCustomSAName}, expected: false},
 	}
 
 	for _, tt := range tests {
@@ -55,6 +61,50 @@ func TestServiceAccountNameFor(t *testing.T) {
 			app.Spec.ServiceAccount = tt.spec
 
 			if got := serviceAccountNameFor(app); got != tt.expected {
+				t.Fatalf("expected %q, got %q", tt.expected, got)
+			}
+		})
+	}
+}
+
+func TestPodServiceAccountName(t *testing.T) {
+	trueVal := true
+	falseVal := false
+
+	tests := []struct {
+		name     string
+		spec     *forgev1alpha1.ServiceAccountSpec
+		expected string
+	}{
+		{name: "unset spec: generated default name, operator creates it", spec: nil, expected: testSAName},
+		{
+			name:     "Name only, Create unset: pod still gets the name even though the operator doesn't own it",
+			spec:     &forgev1alpha1.ServiceAccountSpec{Name: testCustomSAName},
+			expected: testCustomSAName,
+		},
+		{
+			name:     "Create false, Name unset: nothing to reference",
+			spec:     &forgev1alpha1.ServiceAccountSpec{Create: &falseVal},
+			expected: "",
+		},
+		{
+			name:     "Create false, Name set: still wired into the pod spec, just not owned",
+			spec:     &forgev1alpha1.ServiceAccountSpec{Create: &falseVal, Name: testCustomSAName},
+			expected: testCustomSAName,
+		},
+		{
+			name:     "Create true, Name unset: generated default name",
+			spec:     &forgev1alpha1.ServiceAccountSpec{Create: &trueVal},
+			expected: testSAName,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := newTestApplication()
+			app.Spec.ServiceAccount = tt.spec
+
+			if got := podServiceAccountName(app); got != tt.expected {
 				t.Fatalf("expected %q, got %q", tt.expected, got)
 			}
 		})
@@ -195,6 +245,31 @@ func TestAnnotateServiceAccountWithIRSA_SetsAnnotation(t *testing.T) {
 
 	if sa.Annotations["eks.amazonaws.com/role-arn"] != roleArn {
 		t.Fatalf("expected IRSA annotation %q, got %q", roleArn, sa.Annotations["eks.amazonaws.com/role-arn"])
+	}
+}
+
+func TestAnnotateServiceAccountWithIRSA_SkipsWhenCreateIsFalse(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	falseVal := false
+	app := newTestApplication()
+	app.Spec.ServiceAccount = &forgev1alpha1.ServiceAccountSpec{Create: &falseVal, Name: testCustomSAName}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	// A user-managed ServiceAccount must not be force-owned or mutated just
+	// because IRSA needs an annotation somewhere -- the Role ARN is already
+	// surfaced on Application.Status for the user to wire in themselves.
+	if err := r.annotateServiceAccountWithIRSA(context.Background(), app, testRoleARN); err != nil {
+		t.Fatalf("annotateServiceAccountWithIRSA returned error: %v", err)
+	}
+
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testCustomSAName, Namespace: testNamespace}, &corev1.ServiceAccount{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected no ServiceAccount to be created/touched when Create is false, got err=%v", err)
 	}
 }
 

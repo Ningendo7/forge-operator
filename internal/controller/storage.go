@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -16,6 +17,15 @@ import (
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
 )
+
+// storageReconcileTimeout bounds each storage provisioning attempt (bucket,
+// versioning, lifecycle, IAM role/policy, access key -- several sequential
+// cloud API calls). Without this, a hung or unusually slow call blocks this
+// reconcile indefinitely -- and with MaxConcurrentReconciles at its
+// controller-runtime default of 1 (see SetupWithManager), that blocks every
+// other Application in the cluster from reconciling too, not just this one.
+// Bounded here means a stuck call becomes a normal, retryable error instead.
+const storageReconcileTimeout = 90 * time.Second
 
 // logStorageStatusUpdateError logs a best-effort status write failure without
 // masking the underlying storage error that triggered it.
@@ -85,7 +95,6 @@ func (r *ApplicationReconciler) reconcileStorage(
 			return fmt.Errorf("failed to reconcile Akamai storage: %w", err)
 		}
 		akamaiCreds = creds
-	case "MinIO", "minio", providerStatic:
 
 	default:
 		err := fmt.Errorf("unsupported storage provider: %s", application.Spec.Storage.Provider)
@@ -107,10 +116,13 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 	application *forgev1alpha1.Application,
 ) error {
 
+	cloudCtx, cancel := context.WithTimeout(ctx, storageReconcileTimeout)
+	defer cancel()
+
 	// Initialize S3 Storage Manager with OIDC info for IRSA role creation
 
 	storageManager, err := newS3StorageManager(
-		ctx,
+		cloudCtx,
 		r.Client,
 		application,
 		serviceAccountNameFor(application),
@@ -125,7 +137,7 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 	}
 
 	// Reconcile Bucket and IRSA
-	result, err := storageManager.ReconcileBucket(ctx)
+	result, err := storageManager.ReconcileBucket(cloudCtx)
 	if err != nil {
 		if errors.Is(err, s3storage.ErrBucketNotOwned) {
 			storagestatus.SetNotOwned(application, err)
@@ -146,6 +158,7 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 		Provider: forgev1alpha1.ProviderAWSS3,
 		Bucket:   application.Spec.Storage.Bucket,
 		Region:   application.Spec.Storage.Region,
+		Created:  true,
 		AWS: &forgev1alpha1.AWSStorageStatus{
 			RoleARN: result.RoleARN,
 		},
@@ -170,9 +183,12 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	application *forgev1alpha1.Application,
 ) (*akamaiobjstr.StorageResult, error) {
 
+	cloudCtx, cancel := context.WithTimeout(ctx, storageReconcileTimeout)
+	defer cancel()
+
 	// Initialize Akamai Storage Manager
 	storageManager, err := newAkamaiStorageManager(
-		ctx,
+		cloudCtx,
 		r.Client,
 		application,
 		r.DefaultAkamaiRegion,
@@ -184,7 +200,7 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	}
 
 	// Reconcile Bucket and Access Key
-	result, err := storageManager.ReconcileBucket(ctx)
+	result, err := storageManager.ReconcileBucket(cloudCtx)
 	if err != nil {
 		if errors.Is(err, akamaiobjstr.ErrBucketNotOwned) {
 			storagestatus.SetNotOwned(application, err)
@@ -211,6 +227,7 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 		Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
 		Bucket:   application.Spec.Storage.Bucket,
 		Region:   application.Spec.Storage.Region,
+		Created:  true,
 		Akamai:   &forgev1alpha1.AkamaiStorageStatus{Endpoint: result.Endpoint},
 	}
 

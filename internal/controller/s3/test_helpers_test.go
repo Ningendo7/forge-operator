@@ -11,7 +11,9 @@ import (
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const (
@@ -46,13 +48,27 @@ func newHTTPStatusError(statusCode int, message string) error {
 	}
 }
 
+// newTestManager builds a Manager with a real fake k8s client (seeded with
+// the Application) backing m.k8sClient, needed since recordBucketCreated
+// durably writes to Application.Status via that client -- not just the
+// mocked S3API/IAMAPI. Tests that need to observe or pre-seed
+// Application.Status (e.g. to simulate previouslyCreatedByUs) can fetch or
+// write through the returned Manager's app field or a fresh Get against the
+// same fake client.
 func newTestManager(s3Client S3API, iamClient IAMAPI) *Manager {
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace, UID: testAppUID},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+
 	return &Manager{
-		s3client:  s3Client,
-		iamclient: iamClient,
-		app: &forgev1alpha1.Application{
-			ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace, UID: testAppUID},
-		},
+		k8sClient:          fakeClient,
+		s3client:           s3Client,
+		iamclient:          iamClient,
+		app:                app,
 		storage:            &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testRegion},
 		bucket:             testBucket,
 		region:             testRegion,
@@ -67,6 +83,7 @@ type mockS3Client struct {
 	createBucketFunc             func(ctx context.Context, params *s3sdk.CreateBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.CreateBucketOutput, error)
 	putBucketVersioningFunc      func(ctx context.Context, params *s3sdk.PutBucketVersioningInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketVersioningOutput, error)
 	putBucketLifecycleConfigFunc func(ctx context.Context, params *s3sdk.PutBucketLifecycleConfigurationInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketLifecycleConfigurationOutput, error)
+	deleteBucketLifecycleFunc    func(ctx context.Context, params *s3sdk.DeleteBucketLifecycleInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteBucketLifecycleOutput, error)
 	deleteBucketFunc             func(ctx context.Context, params *s3sdk.DeleteBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteBucketOutput, error)
 	listObjectVersionsFunc       func(ctx context.Context, params *s3sdk.ListObjectVersionsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.ListObjectVersionsOutput, error)
 	listMultipartUploadsFunc     func(ctx context.Context, params *s3sdk.ListMultipartUploadsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.ListMultipartUploadsOutput, error)
@@ -90,6 +107,10 @@ func (m *mockS3Client) PutBucketVersioning(ctx context.Context, params *s3sdk.Pu
 
 func (m *mockS3Client) PutBucketLifecycleConfiguration(ctx context.Context, params *s3sdk.PutBucketLifecycleConfigurationInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketLifecycleConfigurationOutput, error) {
 	return m.putBucketLifecycleConfigFunc(ctx, params, optFns...)
+}
+
+func (m *mockS3Client) DeleteBucketLifecycle(ctx context.Context, params *s3sdk.DeleteBucketLifecycleInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteBucketLifecycleOutput, error) {
+	return m.deleteBucketLifecycleFunc(ctx, params, optFns...)
 }
 
 func (m *mockS3Client) DeleteBucket(ctx context.Context, params *s3sdk.DeleteBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteBucketOutput, error) {

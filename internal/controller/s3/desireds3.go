@@ -14,6 +14,9 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithy "github.com/aws/smithy-go"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 )
 
 const ownerTagKey = "forge-operator.ningendo7.github.io/owner-uid"
@@ -22,6 +25,27 @@ const ownerTagKey = "forge-operator.ningendo7.github.io/owner-uid"
 // at all -- the one GetBucketTagging failure claimOrVerifyOwnership treats
 // as safe to claim rather than a hard failure.
 const noSuchTagSetErrorCode = "NoSuchTagSet"
+
+// awsIAMRoleNameMaxLen is AWS's own hard limit on IAM role name length.
+const awsIAMRoleNameMaxLen = 64
+
+// s3BucketAccessPolicyName is the inline policy name used both when
+// attaching this policy (here) and when detaching it during cleanup
+// (cleanup.go) -- these must stay identical, or cleanup's DeleteRolePolicy
+// targets a policy that was never created, and the still-attached real
+// policy then makes DeleteRole fail permanently (roles can't be deleted
+// with inline policies still attached), stranding the finalizer forever.
+const s3BucketAccessPolicyName = "S3BucketAccessPolicy"
+
+// irsaRoleName builds this Application's per-app IRSA role name. Must be
+// used identically in both desireds3.go and cleanup.go: the Application's
+// namespace has to be folded in because IAM role names are unique per AWS
+// account, not per Kubernetes namespace, so two same-named Applications in
+// different namespaces would otherwise collide on one shared role and
+// repeatedly overwrite each other's trust policy and bucket-access policy.
+func (m *Manager) irsaRoleName() string {
+	return naming.CloudResourceName([]string{"app-irsa", m.app.Namespace, m.app.Name}, awsIAMRoleNameMaxLen)
+}
 
 func (m *Manager) ReconcileBucket(
 	ctx context.Context,
@@ -50,6 +74,30 @@ func (m *Manager) ReconcileBucket(
 
 }
 
+// recordBucketCreated durably records, in Application.Status, that this
+// operator itself just created this bucket -- written immediately after
+// CreateBucket succeeds, before ownership tagging is even attempted, so a
+// transient failure in that later step doesn't erase the record.
+func (m *Manager) recordBucketCreated(ctx context.Context) error {
+	m.app.Status.Storage = &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   m.bucket,
+		Created:  true,
+	}
+	if err := m.k8sClient.Status().Update(ctx, m.app); err != nil {
+		return fmt.Errorf("failed to record bucket creation for %s: %w", m.bucket, err)
+	}
+	return nil
+}
+
+// previouslyCreatedByUs reports whether Application.Status durably records
+// this operator having created this exact bucket in an earlier reconcile.
+func (m *Manager) previouslyCreatedByUs() bool {
+	return m.app.Status.Storage != nil &&
+		m.app.Status.Storage.Bucket == m.bucket &&
+		m.app.Status.Storage.Created
+}
+
 // ErrBucketNotOwned means a bucket with the desired name exists but wasn't
 // created by this operator for this Application -- surfaced as a Degraded
 // condition rather than silently adopted (and later possibly deleted)
@@ -73,6 +121,9 @@ func (m *Manager) ensureBucketExists(
 		if err := m.CreateBucket(ctx); err != nil {
 			return err
 		}
+		if err := m.recordBucketCreated(ctx); err != nil {
+			return err
+		}
 		return m.claimOrVerifyOwnership(ctx)
 	}
 
@@ -83,6 +134,9 @@ func (m *Manager) ensureBucketExists(
 		case 404:
 			log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s does not exist, creating...", m.bucket))
 			if err := m.CreateBucket(ctx); err != nil {
+				return err
+			}
+			if err := m.recordBucketCreated(ctx); err != nil {
 				return err
 			}
 			return m.claimOrVerifyOwnership(ctx)
@@ -117,18 +171,11 @@ func (m *Manager) tagAsOwned(ctx context.Context) error {
 
 // claimOrVerifyOwnership handles a bucket HeadBucket found to already exist
 // (whether it was already there, or we just created it a moment ago in this
-// same call): no ownership tag at all -> claim it by writing our tag; a tag
-// present but naming a different Application -> ErrBucketNotOwned; a tag
-// matching this Application -> already ours, proceed.
-//
-// Deliberately NOT split into a separate "just created, skip the check"
-// path: if tagAsOwned failed transiently right after a real CreateBucket in
-// an earlier reconcile, the bucket now exists with no tag on it, and only
-// this unified path can recover -- a "did I just create it in this exact
-// call" flag would permanently read that bucket as foreign forever after a
-// single blip. The residual risk this accepts -- something else claiming
-// this exact operator-scoped bucket name in the narrow window before we
-// tag it -- is far rarer and lower-consequence than that self-lockout.
+// same call): no ownership tag at all -> claim it only if we durably
+// recorded creating this bucket ourselves, or the adopt annotation is set;
+// a tag present but naming a different Application -> claim only if the
+// adopt annotation is set, otherwise ErrBucketNotOwned; a tag matching this
+// Application -> already ours, proceed.
 func (m *Manager) claimOrVerifyOwnership(ctx context.Context) error {
 	out, err := m.s3client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{
 		Bucket: aws.String(m.bucket),
@@ -136,7 +183,10 @@ func (m *Manager) claimOrVerifyOwnership(ctx context.Context) error {
 	if err != nil {
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == noSuchTagSetErrorCode {
-			return m.tagAsOwned(ctx)
+			if m.previouslyCreatedByUs() || m.adoptBucketRequested() {
+				return m.tagAsOwned(ctx)
+			}
+			return ErrBucketNotOwned
 		}
 		return fmt.Errorf("%w: could not verify ownership tag: %v", ErrBucketNotOwned, err)
 	}
@@ -147,13 +197,26 @@ func (m *Manager) claimOrVerifyOwnership(ctx context.Context) error {
 				log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s already exists and is owned by this Application", m.bucket))
 				return nil
 			}
+			if m.adoptBucketRequested() {
+				log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s owned by a different Application, adopting per %s annotation", m.bucket, naming.AdoptBucketAnnotation))
+				return m.tagAsOwned(ctx)
+			}
 			return ErrBucketNotOwned
 		}
 	}
 
-	// Tag set exists (so no NoSuchTagSet error) but carries no ownership tag
-	// -- same "safe to claim" reasoning as the NoSuchTagSet case above.
-	return m.tagAsOwned(ctx)
+	// Tag set exists (so no NoSuchTagSet error) but carries no ownership tag.
+	if m.previouslyCreatedByUs() || m.adoptBucketRequested() {
+		return m.tagAsOwned(ctx)
+	}
+	return ErrBucketNotOwned
+}
+
+// adoptBucketRequested reports whether the Application has explicitly opted
+// in to taking over a bucket owned by a different Application, via
+// naming.AdoptBucketAnnotation.
+func (m *Manager) adoptBucketRequested() bool {
+	return m.app.Annotations[naming.AdoptBucketAnnotation] == "true"
 }
 
 func (m *Manager) CreateBucket(
@@ -180,73 +243,161 @@ func (m *Manager) CreateBucket(
 
 }
 
+// defaultLifecycleRuleID is the ID stamped on the single implicit rule
+// applied when spec.storage.aws.lifecycleRules is left entirely unset.
+const defaultLifecycleRuleID = "StandardLifecycleRule"
+
+func (m *Manager) versioningEnabled() bool {
+	if m.storage.AWS != nil && m.storage.AWS.VersioningEnabled != nil {
+		return *m.storage.AWS.VersioningEnabled
+	}
+	return true // default to enabled if not specified
+}
+
 func (m *Manager) ensureVersioning(
 	ctx context.Context,
 ) error {
 
+	status := s3types.BucketVersioningStatusSuspended
+	if m.versioningEnabled() {
+		status = s3types.BucketVersioningStatusEnabled
+	}
+
 	_, err := m.s3client.PutBucketVersioning(ctx, &s3sdk.PutBucketVersioningInput{
 		Bucket: aws.String(m.bucket),
 		VersioningConfiguration: &s3types.VersioningConfiguration{
-			Status: s3types.BucketVersioningStatusEnabled,
+			Status: status,
 		},
 	})
 
 	if err != nil {
-		return fmt.Errorf("failed to enable versioning for bucket %s: %w", m.bucket, err)
+		return fmt.Errorf("failed to set versioning (%s) for bucket %s: %w", status, m.bucket, err)
 	}
 
-	log.FromContext(ctx).Info(fmt.Sprintf("Versioning enabled for bucket %s", m.bucket))
+	log.FromContext(ctx).Info(fmt.Sprintf("Versioning set to %s for bucket %s", status, m.bucket))
 	return nil
+}
 
+// defaultLifecycleRules - lifecycle policy: abort incomplete multipart uploads at 7d, expire old
+// versions at 30d, transition to Standard-IA at 30d. Applied only when
+// spec.storage.aws.lifecycleRules is left entirely unset (nil) -- an
+// explicitly empty list opts out of this default rather than falling back
+// to it.
+func (m *Manager) defaultLifecycleRules() []forgev1alpha1.LifecycleRule {
+	abortDays := int32(7)
+	noncurrentExpDays := int32(30)
+	transitionDays := int32(30)
+
+	return []forgev1alpha1.LifecycleRule{
+		{
+			ID:                                 defaultLifecycleRuleID,
+			AbortIncompleteMultipartUploadDays: &abortDays,
+			NoncurrentVersionExpirationDays:    &noncurrentExpDays,
+			Transitions: []forgev1alpha1.LifecycleTransition{
+				{
+					Days:         transitionDays,
+					StorageClass: string(s3types.TransitionStorageClassStandardIa),
+				},
+			},
+		},
+	}
+}
+
+// desiredLifecycleRules resolves the rules to apply this reconcile: the
+// user's own spec.storage.aws.lifecycleRules if the field was set at all
+// (even to an empty list, meaning "no lifecycle policy"), otherwise the
+// operator's built-in default.
+func (m *Manager) desiredLifecycleRules() []forgev1alpha1.LifecycleRule {
+	if m.storage.AWS != nil && m.storage.AWS.LifecycleRules != nil {
+		return m.storage.AWS.LifecycleRules
+	}
+	return m.defaultLifecycleRules()
 }
 
 func (m *Manager) ensureLifecyclePolicy(
 	ctx context.Context,
 ) error {
 
-	// Abort stale multipart uploads at 7d, expire old versions and transition to Standard-IA at 30d.
-	input := &s3sdk.PutBucketLifecycleConfigurationInput{
-		Bucket: aws.String(m.bucket),
-		LifecycleConfiguration: &s3types.BucketLifecycleConfiguration{
-			Rules: []s3types.LifecycleRule{
-				{
-					ID:     aws.String("StandardLifecycleRule"),
-					Status: s3types.ExpirationStatusEnabled,
-					Filter: &s3types.LifecycleRuleFilter{
-						Prefix: aws.String(""),
-					},
-					AbortIncompleteMultipartUpload: &s3types.AbortIncompleteMultipartUpload{
-						DaysAfterInitiation: aws.Int32(7),
-					},
-					NoncurrentVersionExpiration: &s3types.NoncurrentVersionExpiration{
-						NoncurrentDays: aws.Int32(30),
-					},
-					Transitions: []s3types.Transition{
-						{
-							Days:         aws.Int32(30),
-							StorageClass: s3types.TransitionStorageClassStandardIa,
-						},
-					},
-				},
-			},
-		},
+	rules := m.desiredLifecycleRules()
+
+	if len(rules) == 0 {
+		// Explicitly opted out: remove any lifecycle policy this operator
+		// may have set previously, rather than leaving a stale one active.
+		_, err := m.s3client.DeleteBucketLifecycle(ctx, &s3sdk.DeleteBucketLifecycleInput{
+			Bucket: aws.String(m.bucket),
+		})
+		if err != nil && !isNotFoundError(err) {
+			return fmt.Errorf("failed to remove lifecycle policy for bucket %s: %w", m.bucket, err)
+		}
+		log.FromContext(ctx).Info(fmt.Sprintf("No lifecycle rules configured for bucket %s, policy removed", m.bucket))
+		return nil
 	}
 
-	_, err := m.s3client.PutBucketLifecycleConfiguration(ctx, input)
+	s3Rules := make([]s3types.LifecycleRule, 0, len(rules))
+	for i, rule := range rules {
+		id := rule.ID
+		if id == "" {
+			id = fmt.Sprintf("rule-%d", i)
+		}
+
+		status := s3types.ExpirationStatusEnabled
+		if rule.Enabled != nil && !*rule.Enabled {
+			status = s3types.ExpirationStatusDisabled
+		}
+
+		s3Rule := s3types.LifecycleRule{
+			ID:     aws.String(id),
+			Status: status,
+			Filter: &s3types.LifecycleRuleFilter{
+				Prefix: aws.String(rule.Prefix),
+			},
+		}
+
+		if rule.ExpirationDays != nil {
+			s3Rule.Expiration = &s3types.LifecycleExpiration{
+				Days: aws.Int32(*rule.ExpirationDays),
+			}
+		}
+		if rule.NoncurrentVersionExpirationDays != nil {
+			s3Rule.NoncurrentVersionExpiration = &s3types.NoncurrentVersionExpiration{
+				NoncurrentDays: aws.Int32(*rule.NoncurrentVersionExpirationDays),
+			}
+		}
+		if rule.AbortIncompleteMultipartUploadDays != nil {
+			s3Rule.AbortIncompleteMultipartUpload = &s3types.AbortIncompleteMultipartUpload{
+				DaysAfterInitiation: aws.Int32(*rule.AbortIncompleteMultipartUploadDays),
+			}
+		}
+
+		for _, t := range rule.Transitions {
+			s3Rule.Transitions = append(s3Rule.Transitions, s3types.Transition{
+				Days:         aws.Int32(t.Days),
+				StorageClass: s3types.TransitionStorageClass(t.StorageClass),
+			})
+		}
+
+		s3Rules = append(s3Rules, s3Rule)
+	}
+
+	_, err := m.s3client.PutBucketLifecycleConfiguration(ctx, &s3sdk.PutBucketLifecycleConfigurationInput{
+		Bucket: aws.String(m.bucket),
+		LifecycleConfiguration: &s3types.BucketLifecycleConfiguration{
+			Rules: s3Rules,
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("failed to set lifecycle policy for bucket %s: %w", m.bucket, err)
 	}
 
-	log.FromContext(ctx).Info(fmt.Sprintf("Lifecycle policy set for bucket %s", m.bucket))
+	log.FromContext(ctx).Info(fmt.Sprintf("Lifecycle policy set for bucket %s (%d rule(s))", m.bucket, len(s3Rules)))
 	return nil
-
 }
 
 func (m *Manager) ReconcileAppIRSA(
 	ctx context.Context,
 ) (string, error) {
 
-	roleName := fmt.Sprintf("app-irsa-%s", m.app.Name)
+	roleName := m.irsaRoleName()
 
 	// Clean up oidcUrl so it works safely in IAM Condition keys
 	oidcHost := strings.TrimPrefix(m.OIDCProviderURL, "https://")
@@ -324,7 +475,7 @@ func (m *Manager) ReconcileAppIRSA(
 
 	_, err = m.iamclient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
 		RoleName:       aws.String(roleName),
-		PolicyName:     aws.String("S3BucketAccessPolicy"),
+		PolicyName:     aws.String(s3BucketAccessPolicyName),
 		PolicyDocument: aws.String(s3Policy),
 	})
 	if err != nil {

@@ -102,3 +102,52 @@ func TestAkamaiTokenSecret(t *testing.T) {
 		}
 	})
 }
+
+func TestCloudResourceName_ShortNameUnchanged(t *testing.T) {
+	got := CloudResourceName([]string{"app-irsa", "default", "demo-app"}, 64)
+	if got != "app-irsa-default-demo-app" {
+		t.Fatalf("expected unchanged short name, got %q", got)
+	}
+}
+
+func TestCloudResourceName_DifferentNamespacesDontCollide(t *testing.T) {
+	a := CloudResourceName([]string{"app-irsa", "team-a", "demo-app"}, 64)
+	b := CloudResourceName([]string{"app-irsa", "team-b", "demo-app"}, 64)
+	if a == b {
+		t.Fatalf("expected different namespaces to produce different names, both got %q", a)
+	}
+}
+
+func TestCloudResourceName_TruncatesAndHashesWhenTooLong(t *testing.T) {
+	longNamespace := "a-namespace-name-that-is-unreasonably-long-for-a-real-cluster"
+	longName := "an-equally-long-application-name-nobody-would-actually-use"
+
+	got := CloudResourceName([]string{"app-irsa", longNamespace, longName}, 64)
+
+	if len(got) > 64 {
+		t.Fatalf("expected result within maxLen 64, got %d chars: %q", len(got), got)
+	}
+	if got == "app-irsa-"+longNamespace+"-"+longName {
+		t.Fatalf("expected truncation to actually occur for an oversized input")
+	}
+}
+
+func TestCloudResourceName_TruncationStaysUniquePerInput(t *testing.T) {
+	longNamespace := "a-namespace-name-that-is-unreasonably-long-for-a-real-cluster"
+
+	a := CloudResourceName([]string{"app-irsa", longNamespace, "app-one-with-a-very-long-name-too"}, 64)
+	b := CloudResourceName([]string{"app-irsa", longNamespace, "app-two-with-a-very-long-name-too"}, 64)
+
+	if a == b {
+		t.Fatalf("expected two different oversized inputs to still produce different truncated names, both got %q", a)
+	}
+}
+
+func TestCloudResourceName_HandlesMaxLenSmallerThanHashSuffix(t *testing.T) {
+	// Must not panic even for a maxLen too small to fit any real content --
+	// exercises the keep<0 clamp.
+	got := CloudResourceName([]string{"app-irsa", "default", "demo-app"}, 3)
+	if len(got) == 0 {
+		t.Fatalf("expected a non-empty result even for a very small maxLen")
+	}
+}

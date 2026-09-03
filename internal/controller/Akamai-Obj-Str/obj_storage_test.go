@@ -9,9 +9,11 @@ import (
 	"testing"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/linode/linodego"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func notFoundErr() error {
@@ -296,7 +298,7 @@ func TestReconcileBucket_HappyPath(t *testing.T) {
 
 // --- claimOrVerifyOwnership / claimOwnership ---
 
-func TestClaimOrVerifyOwnership_ClaimsWhenMarkerMissing(t *testing.T) {
+func TestClaimOrVerifyOwnership_ClaimsMissingMarkerWhenPreviouslyCreatedByUs(t *testing.T) {
 	claimed := false
 	withS3ObjectClient(t, &mockS3ObjectClient{
 		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
@@ -313,12 +315,97 @@ func TestClaimOrVerifyOwnership_ClaimsWhenMarkerMissing(t *testing.T) {
 	})
 
 	m := newTestManager(nil)
+	m.app.Status.Storage = &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true}
 
 	if err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk"); err != nil {
 		t.Fatalf("claimOrVerifyOwnership returned error: %v", err)
 	}
 	if !claimed {
-		t.Fatalf("expected a missing marker to be claimed")
+		t.Fatalf("expected a missing marker to be claimed when previously created by us")
+	}
+}
+
+func TestClaimOrVerifyOwnership_ClaimsMissingMarkerWhenAdoptAnnotationSet(t *testing.T) {
+	claimed := false
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return nil, &s3types.NoSuchKey{}
+		},
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			claimed = true
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+
+	m := newTestManager(nil)
+	// No Status.Storage seeded -- only the explicit human opt-in this time.
+	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: "true"}
+
+	if err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk"); err != nil {
+		t.Fatalf("claimOrVerifyOwnership returned error: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("expected a missing marker to be claimed when adopt annotation is set")
+	}
+}
+
+func TestClaimOrVerifyOwnership_RejectsMissingMarkerWithNeitherSignal(t *testing.T) {
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return nil, &s3types.NoSuchKey{}
+		},
+	})
+
+	m := newTestManager(nil)
+
+	// No recorded creation, no adopt annotation: a marker-less bucket must
+	// be treated as genuinely foreign by default, not claimed.
+	err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk")
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned, got %v", err)
+	}
+}
+
+// --- recordBucketCreated / previouslyCreatedByUs ---
+
+func TestRecordBucketCreated_PersistsCreatedFlagToStatus(t *testing.T) {
+	m := newTestManager(nil)
+
+	if err := m.recordBucketCreated(context.Background()); err != nil {
+		t.Fatalf("recordBucketCreated returned error: %v", err)
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := m.k8sClient.Get(context.Background(), client.ObjectKey{Name: "demo-app", Namespace: testNamespace}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+	if got.Status.Storage == nil || !got.Status.Storage.Created {
+		t.Fatalf("expected Status.Storage.Created to be persisted true, got %#v", got.Status.Storage)
+	}
+	if got.Status.Storage.Bucket != testBucket {
+		t.Fatalf("expected Status.Storage.Bucket to be %q, got %q", testBucket, got.Status.Storage.Bucket)
+	}
+}
+
+func TestPreviouslyCreatedByUs(t *testing.T) {
+	tests := []struct {
+		name    string
+		storage *forgev1alpha1.StorageStatus
+		want    bool
+	}{
+		{name: "nil status", storage: nil, want: false},
+		{name: "matching bucket, created true", storage: &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true}, want: true},
+		{name: "matching bucket, created false", storage: &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: false}, want: false},
+		{name: "different bucket, created true", storage: &forgev1alpha1.StorageStatus{Bucket: "some-other-bucket", Created: true}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestManager(nil)
+			m.app.Status.Storage = tt.storage
+			if got := m.previouslyCreatedByUs(); got != tt.want {
+				t.Errorf("previouslyCreatedByUs() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -356,6 +443,37 @@ func TestClaimOrVerifyOwnership_ReturnsNotOwnedWhenMarkerMismatched(t *testing.T
 	err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk")
 	if !errors.Is(err, ErrBucketNotOwned) {
 		t.Fatalf("expected ErrBucketNotOwned, got %v", err)
+	}
+}
+
+func TestClaimOrVerifyOwnership_AdoptsMismatchedMarkerWhenAnnotationSet(t *testing.T) {
+	claimed := false
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(string(testOtherUID)))}, nil
+		},
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			claimed = true
+			body, _ := io.ReadAll(params.Body)
+			if string(body) != string(testAppUID) {
+				t.Errorf("expected the marker to be rewritten to this Application's own UID, got %q", body)
+			}
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+
+	m := newTestManager(nil)
+	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: "true"}
+
+	// A marker naming a *different* Application must still be adoptable
+	// via the explicit annotation -- this is the deliberate human-in-the-
+	// loop override, distinct from (and not gated by) previouslyCreatedByUs,
+	// which by definition can never be true for a bucket someone else made.
+	if err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk"); err != nil {
+		t.Fatalf("claimOrVerifyOwnership returned error: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("expected a mismatched marker to be overwritten when the adopt annotation is set")
 	}
 }
 

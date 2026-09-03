@@ -90,18 +90,68 @@ Before an `Application` reconciles against an existing bucket — whether it's f
 
 On every reconcile, the rule is the same for both providers: **no tag/marker at all → claim it; present and naming a different Application → reject (`Degraded`, reason `BucketNotOwned`); present and matching → proceed.** That "claim on missing marker" rule is deliberate, not an oversight: an earlier design only claimed a bucket if it was created *in that exact reconcile call*, which had a self-lockout bug — if the tag/marker write failed transiently right after a real, successful bucket creation, every later reconcile would find the bucket already existing with no marker on it, and permanently treat it as foreign with no way to recover. The unified rule accepts a much rarer, lower-consequence risk instead (something else claiming the exact same operator-scoped bucket name in the narrow window before the tag/marker write lands).
 
-If you ever delete and recreate an `Application` that's meant to reuse a bucket it previously owned, note that Kubernetes assigns a new UID on recreation — the bucket will read as not-owned even though it's logically "the same" Application from your perspective. This is the safe default (never silently reclaim); there's currently no override for the legitimate recovery case, so you'd need to intervene manually (e.g. re-tag the bucket, or point the new `Application` at a fresh bucket name).
+If you ever delete and recreate an `Application` that's meant to reuse a bucket it previously owned, note that Kubernetes assigns a new UID on recreation — the bucket will read as not-owned even though it's logically "the same" Application from your perspective. This is the safe default (never silently reclaim). To deliberately take over a bucket owned by a different Application's UID — the common case being a bucket left behind by [`deletionPolicy: Retain`](#deletion-policy) — set this annotation on the new `Application`:
+
+```yaml
+metadata:
+  annotations:
+    forge-operator.ningendo7.github.io/adopt-bucket: "true"
+```
+
+With that set, a mismatched tag/marker is overwritten with the current Application's own UID instead of being rejected. It's a deliberate, explicit, human-in-the-loop opt-in — there's no automatic reclaiming.
+
+## AWS bucket versioning and lifecycle policy
+
+Both are configurable under `spec.storage.aws`:
+
+```yaml
+spec:
+  storage:
+    provider: AWS
+    bucket: my-bucket
+    aws:
+      versioningEnabled: false   # defaults to true when unset
+      lifecycleRules:
+        - id: expire-old-objects
+          prefix: logs/
+          expirationDays: 90
+        - id: archive-after-30-days
+          transitions:
+            - days: 30
+              storageClass: STANDARD_IA
+```
+
+`versioningEnabled` defaults to `true` when unset (the operator's original hardcoded behavior). Explicitly setting it `false` suspends versioning — S3 has no way to fully un-version a bucket once versioning has ever been enabled, only enable/suspend.
+
+`lifecycleRules` has three states, and the distinction matters:
+- **Left out entirely** → a single default rule applies (abort incomplete multipart uploads after 7 days, expire noncurrent versions after 30 days, transition to `STANDARD_IA` after 30 days) — the same behavior as before this field existed, so upgrading doesn't change anything for existing Applications.
+- **Set to an explicit empty list** (`lifecycleRules: []`) → removes lifecycle policy from the bucket entirely.
+- **Set to one or more rules** → fully replaces the default with exactly what you specified.
+
+Each rule supports `id`, `enabled` (default `true`), `prefix`, `expirationDays`, `noncurrentVersionExpirationDays`, `abortIncompleteMultipartUploadDays`, and `transitions` (each with `days` and `storageClass`, one of `STANDARD_IA`, `ONEZONE_IA`, `INTELLIGENT_TIERING`, `GLACIER`, `DEEP_ARCHIVE`, `GLACIER_IR`).
 
 ## Drift detection
 
 Kubernetes has no native way to observe a cloud resource changing outside its control — if a bucket is deleted directly in the AWS/Linode console, nothing tells the operator. A settled, `Ready`, storage-backed `Application` is re-reconciled every 10 minutes (`storageResyncInterval`) specifically to catch this: the same idempotent bucket-creation logic that runs on first reconcile runs again, so a deleted bucket gets recreated (and re-claimed) automatically within that window. There's no faster built-in signal than that — if you need to force an immediate recheck, any spec change (or a manual `kubectl annotate`/`kubectl patch` touching spec) triggers a reconcile immediately rather than waiting out the interval.
 
+## Deletion policy
+
+`spec.storage.deletionPolicy` controls what happens to the bucket when the `Application` is deleted — `Delete` (default) or `Retain`, mirroring the same concept as a Kubernetes PersistentVolume's `reclaimPolicy`:
+
+```yaml
+spec:
+  storage:
+    deletionPolicy: Retain
+```
+
+`Retain` skips cloud deletion entirely: the bucket and its ownership tag/marker are left exactly as-is. The Kubernetes `Application` object and its finalizer are still removed normally — only the cloud resource is kept. This is surfaced as a `Normal` `StorageRetained` Event (`kubectl get events`) and a `StorageReady` condition with reason `BucketRetained`, so it's visible and auditable rather than silent. See [Ownership verification](#ownership-verification) above for how to later reclaim a retained bucket with a new `Application`.
+
 ## Deletion
 
 Deletion is finalizer-driven:
 
-- Application deletion triggers finalizer logic ([internal/controller/finalizer.go](../internal/controller/finalizer.go))
-- cloud storage resources are cleaned up (bucket deletion for AWS/Akamai; no-op for `Static`/`MinIO`)
+- Application deletion triggers finalizer logic ([internal/controller/finalizer.go](../internal/controller/finalizer.go)), unless `deletionPolicy: Retain` short-circuits it (see above)
+- cloud storage resources are cleaned up (bucket deletion for AWS/Akamai)
 - finalizer is removed and deletion completes
 
 **This only runs if the operator is actually alive to see the deletion event.** If you tear down the underlying Kubernetes cluster itself (e.g. `terraform destroy` on the EKS/LKE cluster) while an `Application` with storage still exists, the finalizer never gets a chance to run — the whole control plane disappears at once, taking the pending deletion with it, and any cloud storage bucket is left orphaned (still billed, on providers that charge for it) with nothing left to track it. **Always delete `Application` resources — and confirm their storage finalizer has actually completed (`kubectl get application <name> -o jsonpath='{.metadata.finalizers}'` returns empty) — before tearing down the cluster underneath them.**

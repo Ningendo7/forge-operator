@@ -15,7 +15,8 @@ It manages the lifecycle of application workloads, core Kubernetes resources, an
 | --- | --- | --- | --- |
 | AWS | EKS | Amazon S3 | IAM Roles for Service Accounts (IRSA) |
 | Akamai/Linode | LKE (Terraform modules) | Akamai Object Storage | S3-compatible access credentials |
-| — | — | None (`Static`/`MinIO`) | No-op — bring your own credentials/Secret |
+
+`spec.storage` is optional — omit it entirely for an `Application` with no object storage need at all.
 
 ## Quickstart
 

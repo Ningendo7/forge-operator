@@ -18,9 +18,20 @@ const (
 	ReasonBucketNotOwned            = "BucketNotOwned"
 	ReasonBucketCleanup             = "BucketCleanup"
 	ReasonBucketCleanupFailed       = "BucketCleanupFailed"
+	ReasonBucketRetained            = "BucketRetained"
 
 	MaxErrorMessageLength = 250
 )
+
+func truncateMessage(
+	message string,
+	maxLength int,
+) string {
+	if len(message) > maxLength {
+		return message[:maxLength-3] + "..."
+	}
+	return message
+}
 
 // SetNotOwned marks storage as blocked because a bucket with the desired
 // name already exists but wasn't created by this operator for this
@@ -50,14 +61,26 @@ func SetNotOwned(
 	)
 }
 
-func truncateMessage(
-	message string,
-	maxLength int,
-) string {
-	if len(message) > maxLength {
-		return message[:maxLength-3] + "..."
+// SetRetained marks storage as intentionally left in place per
+// spec.storage.deletionPolicy: Retain -- the Application is being deleted,
+// but its bucket is not.
+func SetRetained(
+	app *forgev1alpha1.Application,
+	bucket string,
+) {
+	if app == nil {
+		return
 	}
-	return message
+	apiMeta.SetStatusCondition(
+		&app.Status.Conditions,
+		metav1.Condition{
+			Type:               StorageReady,
+			Status:             metav1.ConditionFalse,
+			Reason:             ReasonBucketRetained,
+			Message:            fmt.Sprintf("Bucket %q retained per deletionPolicy: Retain (not deleted)", bucket),
+			ObservedGeneration: app.Generation,
+		},
+	)
 }
 
 // SetReady marks storage as provisioned and records the given status payload.
