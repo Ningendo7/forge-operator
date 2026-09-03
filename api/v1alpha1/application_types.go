@@ -29,6 +29,25 @@ import (
 //	+kubebuilder:validation:Enum=AWS;Akamai
 type StorageProvider string
 
+// DeletionPolicy controls what happens to the provisioned cloud storage
+// bucket when this Application is deleted.
+// +kubebuilder:validation:Enum=Delete;Retain
+type DeletionPolicy string
+
+const (
+	// DeletionPolicyDelete deletes the bucket (and its contents) along with
+	// the Application. Default when unset, matching this operator's
+	// previous, only-ever behavior.
+	DeletionPolicyDelete DeletionPolicy = "Delete"
+
+	// DeletionPolicyRetain leaves the bucket in place when the Application
+	// is deleted -- the Kubernetes Application object is still removed (its
+	// finalizer still clears), only the cloud resource itself is kept. The
+	// bucket's ownership tag/marker is left as-is, so it isn't silently
+	// available for a different Application to adopt.
+	DeletionPolicyRetain DeletionPolicy = "Retain"
+)
+
 const (
 	ProviderAWSS3               StorageProvider = "AWS"
 	ProviderAkamaiObjectStorage StorageProvider = "Akamai"
@@ -129,6 +148,20 @@ type StorageStatus struct {
 	// Bucket is the name of the provisioned bucket.
 	// +optional
 	Bucket string `json:"bucket,omitempty"`
+
+	// Created records whether this operator itself successfully created
+	// this bucket (as opposed to finding one that already existed). Used
+	// to decide whether an untagged/unmarked bucket found on a later
+	// reconcile is safe to claim ownership of: only if this operator has a
+	// durable record of having created it itself, not merely because no
+	// tag/marker happens to be present -- which could just as easily mean
+	// a long-lived, genuinely foreign bucket that happens to share this
+	// name. Set the moment bucket creation succeeds, before ownership
+	// tagging/marking is even attempted, so it survives a transient
+	// failure in that later step -- exactly the case this field exists to
+	// recover from.
+	// +optional
+	Created bool `json:"created,omitempty"`
 
 	// Region is the cloud region where the bucket was provisioned.
 	// +optional
@@ -306,6 +339,8 @@ type AutoscalingSpec struct {
 	CPUUtilization *int32 `json:"cpuUtilization,omitempty"`
 }
 
+// ServiceAccountSpec defines ServiceAccount behavior.
+// +kubebuilder:validation:XValidation:rule="!(has(self.create) && !self.create && self.name.size() == 0)",message="create: false requires name to be set -- there's no existing ServiceAccount to point at otherwise"
 type ServiceAccountSpec struct {
 	// Name of an existing ServiceAccount to use.
 	// if empty and create is true, a new ServiceAccount will be created.
@@ -317,12 +352,21 @@ type ServiceAccountSpec struct {
 }
 
 // StorageSpec defines object storage settings.
+// +kubebuilder:validation:XValidation:rule="!(self.provider == 'AWS' && has(self.akamai))",message="spec.storage.akamai must not be set when provider is AWS"
+// +kubebuilder:validation:XValidation:rule="!(self.provider == 'Akamai' && has(self.aws))",message="spec.storage.aws must not be set when provider is Akamai"
 type StorageSpec struct {
 	// Storage provider: AWS S3 or Akamai Object Storage.
 	Provider StorageProvider `json:"provider"`
 
 	// Bucket name.
 	Bucket string `json:"bucket"`
+
+	// DeletionPolicy controls what happens to the bucket when this
+	// Application is deleted. Defaults to "Delete" when unset, matching
+	// this operator's previous, only-ever behavior.
+	// +optional
+	// +kubebuilder:default=Delete
+	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
 
 	// Cloud region. For AWS, a standard AWS region (e.g. "us-east-1"). For
 	// Akamai, a modern Linode region slug (e.g. "us-iad", "us-mia") -- the
@@ -349,9 +393,85 @@ type StorageSpec struct {
 // AWSStorageSpec defines AWS-specific storage configuration.
 type AWSStorageSpec struct {
 
-	// Optional lifecycle rules or other AWS-specific settings
+	// VersioningEnabled controls whether S3 bucket versioning is enabled.
+	// Defaults to true when unset, matching this operator's previous
+	// hardcoded behavior. Explicitly setting this to false suspends
+	// versioning -- S3 has no way to fully un-version a bucket once
+	// versioning has ever been enabled on it, only enable/suspend.
 	// +optional
-	LifecycleRules []string `json:"lifecycleRules,omitempty"`
+	VersioningEnabled *bool `json:"versioningEnabled,omitempty"`
+
+	// LifecycleRules configures S3 Object Lifecycle rules for the bucket.
+	//
+	// When this field is left entirely unset, a single default rule is
+	// applied, matching this operator's previous hardcoded behavior: abort
+	// incomplete multipart uploads after 7 days, expire noncurrent object
+	// versions after 30 days, and transition current objects to
+	// STANDARD_IA after 30 days.
+	//
+	// Set this to an explicit empty list (`lifecycleRules: []`) to remove
+	// lifecycle policy from the bucket entirely, or provide one or more
+	// rules of your own to fully replace the default.
+	// +optional
+	LifecycleRules []LifecycleRule `json:"lifecycleRules,omitempty"`
+}
+
+// LifecycleRule configures a single S3 Object Lifecycle rule. At least one
+// of ExpirationDays, NoncurrentVersionExpirationDays,
+// AbortIncompleteMultipartUploadDays, or Transitions should be set, or the
+// rule has no effect.
+type LifecycleRule struct {
+	// ID uniquely identifies this rule within the bucket's lifecycle
+	// configuration. Defaults to "rule-<index>" (its position in the list)
+	// if unset.
+	// +optional
+	ID string `json:"id,omitempty"`
+
+	// Enabled controls whether this rule is currently applied. Defaults to
+	// true.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// Prefix limits this rule to object keys starting with this prefix.
+	// Applies to every object in the bucket when unset.
+	// +optional
+	Prefix string `json:"prefix,omitempty"`
+
+	// ExpirationDays permanently deletes objects this many days after
+	// creation.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	ExpirationDays *int32 `json:"expirationDays,omitempty"`
+
+	// NoncurrentVersionExpirationDays deletes noncurrent (overwritten or
+	// deleted) object versions this many days after they became
+	// noncurrent. Only meaningful when versioningEnabled is true.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	NoncurrentVersionExpirationDays *int32 `json:"noncurrentVersionExpirationDays,omitempty"`
+
+	// AbortIncompleteMultipartUploadDays aborts incomplete multipart
+	// uploads this many days after they were initiated.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	AbortIncompleteMultipartUploadDays *int32 `json:"abortIncompleteMultipartUploadDays,omitempty"`
+
+	// Transitions moves objects to a different storage class after a
+	// number of days.
+	// +optional
+	Transitions []LifecycleTransition `json:"transitions,omitempty"`
+}
+
+// LifecycleTransition moves objects to a different S3 storage class after a
+// number of days from object creation.
+type LifecycleTransition struct {
+	// Days after object creation to transition.
+	// +kubebuilder:validation:Minimum=1
+	Days int32 `json:"days"`
+
+	// StorageClass is the target S3 storage class.
+	// +kubebuilder:validation:Enum=STANDARD_IA;ONEZONE_IA;INTELLIGENT_TIERING;GLACIER;DEEP_ARCHIVE;GLACIER_IR
+	StorageClass string `json:"storageClass"`
 }
 
 // AkamaiStorageSpec defines Akamai-specific storage configuration.

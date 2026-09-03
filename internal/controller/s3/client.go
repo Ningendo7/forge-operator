@@ -23,6 +23,7 @@ type S3API interface {
 	HeadBucket(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error)
 	PutBucketVersioning(ctx context.Context, params *s3sdk.PutBucketVersioningInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketVersioningOutput, error)
 	PutBucketLifecycleConfiguration(ctx context.Context, params *s3sdk.PutBucketLifecycleConfigurationInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketLifecycleConfigurationOutput, error)
+	DeleteBucketLifecycle(ctx context.Context, params *s3sdk.DeleteBucketLifecycleInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteBucketLifecycleOutput, error)
 	DeleteBucket(ctx context.Context, params *s3sdk.DeleteBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteBucketOutput, error)
 	ListObjectVersions(ctx context.Context, params *s3sdk.ListObjectVersionsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.ListObjectVersionsOutput, error)
 	ListMultipartUploads(ctx context.Context, params *s3sdk.ListMultipartUploadsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.ListMultipartUploadsOutput, error)

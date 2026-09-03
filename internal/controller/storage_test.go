@@ -252,33 +252,6 @@ func TestReconcileStorage_NilStorageReconcilesSecretOnly(t *testing.T) {
 	}
 }
 
-func TestReconcileStorage_NoOpProvidersReconcileSecretOnly(t *testing.T) {
-	for _, provider := range []string{"MinIO", "minio", providerStatic} {
-		t.Run(provider, func(t *testing.T) {
-			scheme := runtime.NewScheme()
-			_ = forgev1alpha1.AddToScheme(scheme)
-			_ = corev1.AddToScheme(scheme)
-
-			app := newTestApplication()
-			app.Spec.Storage = &forgev1alpha1.StorageSpec{
-				Provider: forgev1alpha1.StorageProvider(provider),
-				Bucket:   testBucket,
-			}
-			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-			r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
-
-			if err := r.reconcileStorage(context.Background(), app); err != nil {
-				t.Fatalf("reconcileStorage returned error: %v", err)
-			}
-
-			secret := &corev1.Secret{}
-			if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testStorageSecretName, Namespace: testNamespace}, secret); err != nil {
-				t.Fatalf("expected storage secret to be reconciled for no-op provider: %v", err)
-			}
-		})
-	}
-}
-
 func TestReconcileStorage_ReturnsErrorAndSetsStatusForUnsupportedProvider(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)

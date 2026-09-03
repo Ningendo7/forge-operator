@@ -36,7 +36,7 @@ Key capability areas in spec:
 - Service and Ingress networking controls
 - autoscaling (HPA) and disruption budget (PDB) policy
 - ServiceAccount behavior (use existing or create)
-- provider-aware storage settings for AWS, Akamai, and the no-op `Static`/`MinIO` providers
+- provider-aware storage settings for AWS and Akamai (optional — omit `spec.storage` entirely for no object storage)
 
 Status includes:
 
@@ -53,15 +53,35 @@ Status includes:
 - `spec.autoscaling` configured and the Deployment already exists → the operator stops setting `replicas` on the Deployment at all (the field is omitted from its Server-Side Apply patch), so the HPA is the sole owner of scaling from then on. Changing `spec.replicas` afterward has no effect while the HPA is active.
 - Removing `spec.autoscaling` hands ownership back to the operator, which resumes enforcing `spec.replicas`.
 
+## ServiceAccount behavior
+
+`spec.serviceAccount` has two fields, `name` and `create`, and the interaction between them is worth being explicit about:
+
+| `create` | `name` | Result |
+| --- | --- | --- |
+| unset | unset | Operator creates and owns `<app>-sa` |
+| unset | set | **Bring your own**: the pod uses the named ServiceAccount, but the operator neither creates nor owns it (no `SetControllerReference`, no Server-Side Apply against it) — safe to point at a ServiceAccount you manage yourself |
+| `true` | either | Operator creates/owns it (the named one, or the generated default if `name` is unset) |
+| `false` | set | Bring your own, same as the unset/set case above |
+| `false` | unset | Rejected at `kubectl apply` time (CRD CEL rule) — nothing to reference and nothing to create |
+
+The key distinction: **owning a ServiceAccount** (creating it, force-applying it, garbage-collecting it when the `Application` is deleted) and **the pod referencing one by name** are different questions. Setting `name` alone is enough to use an existing ServiceAccount without the operator ever touching it — you don't also need `create: false` for that, though setting it explicitly doesn't change anything.
+
+This also applies to the AWS IRSA annotation (`eks.amazonaws.com/role-arn`): it's only ever written onto a ServiceAccount the operator owns. If you bring your own ServiceAccount for an AWS-backed `Application`, wire that annotation onto it yourself — the Role ARN is available at `status.storage.aws.roleARN` for exactly this.
+
 ## Webhooks
 
-The `Application` CRD has an admission webhook (`internal/webhook/v1alpha1/application_webhook.go`) with both a defaulter and a validator. It's deliberately scoped to Akamai only — AWS's `spec.storage.secretName` is dual-purpose (see [Authentication Flows](authentication-and-storage.md#authentication-flows) below), so defaulting or validating it the same way would silently break pure-IRSA AWS Applications.
+The `Application` CRD has an admission webhook (`internal/webhook/v1alpha1/application_webhook.go`) with both a defaulter and a validator, plus a handful of CRD-level CEL rules for checks that don't need live cluster state.
 
-**Defaulting**: when `spec.storage.provider: Akamai`, resolves and writes the effective `spec.storage.secretName` and `spec.storage.akamai.accessKeySecretRef` onto the object at admission time, so `kubectl get -o yaml` always shows the real Secret names instead of requiring you to know the operator's internal fallback logic.
+**Defaulting** is scoped to Akamai only — when `spec.storage.provider: Akamai`, resolves and writes the effective `spec.storage.secretName` and `spec.storage.akamai.accessKeySecretRef` onto the object at admission time, so `kubectl get -o yaml` always shows the real Secret names instead of requiring you to know the operator's internal fallback logic. AWS's `spec.storage.secretName` is deliberately left alone here: it's dual-purpose (see [Authentication Flows](authentication-and-storage.md#authentication-flows) below), and defaulting it the same way would silently force every pure-IRSA AWS Application onto the static-credentials path.
 
-**Validation**: rejects, at `kubectl apply` time rather than only surfacing later as a `Degraded` status:
+**Validation** covers both providers, rejecting at `kubectl apply` time rather than only surfacing later as a `Degraded` status:
 - an Akamai config where `secretName` (the operator's generated output Secret) collides with `accessKeySecretRef` (your input token Secret) — the operator owns and deletes the former, so this would corrupt or destroy your token Secret;
-- an Akamai config whose `accessKeySecretRef` Secret doesn't exist, or exists but is missing the `apiToken` key — a live cluster lookup CEL/kubebuilder validation markers can't do, since they only ever see the object being validated.
+- an Akamai config whose `accessKeySecretRef` Secret doesn't exist, or exists but is missing the `apiToken` key;
+- an AWS config whose `secretName` Secret (when set — it's optional, IRSA needs none) doesn't exist, or is missing `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`;
+- changing `spec.storage.provider` on an existing `Application` — treated as immutable, since nothing cleans up the old provider's bucket/credentials on a spec change alone (delete and recreate the `Application` instead, which correctly triggers finalizer cleanup for the old provider first).
+
+These live cluster/live-object lookups are exactly what CEL/kubebuilder validation markers structurally can't do (CEL only ever sees the object being validated). One check that *doesn't* need that, and so is a CRD-level CEL rule instead of webhook code (meaning it's still enforced even with `webhook.enabled=false`): `spec.storage.akamai`/`spec.storage.aws` must not be set when the other provider is selected.
 
 Gated by `certManager.enabled`/`webhook.enabled` in the Helm chart (both default `true`) — see [Quickstart](../README.md#quickstart) for the cert-manager prerequisite this implies, and [Configuration](installation-and-configuration.md#configuration) for how to disable it.
 

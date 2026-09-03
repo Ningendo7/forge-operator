@@ -228,8 +228,8 @@ func (r *ApplicationReconciler) desiredPodSpec(
 		},
 		Volumes: volumes,
 	}
-	if shouldCreateServiceAccount(application) {
-		podSpec.ServiceAccountName = serviceAccountNameFor(application)
+	if name := podServiceAccountName(application); name != "" {
+		podSpec.ServiceAccountName = name
 	}
 	return podSpec
 }

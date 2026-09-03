@@ -3,6 +3,11 @@ package akamaiobjstr
 import (
 	"context"
 	"fmt"
+	"strings"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	"github.com/Ningendo7/forge-operator/internal/controller/naming"
@@ -46,6 +51,42 @@ type StorageResult struct {
 type AccessKeyResult struct {
 	AccessKey string
 	SecretKey string
+}
+
+// s3ObjectAPI is the minimal S3-compatible surface claimOrVerifyOwnership
+// and claimOwnership depend on, so tests can substitute a fake client
+// instead of standing up a real Linode Object Storage endpoint.
+type s3ObjectAPI interface {
+	GetObject(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error)
+	PutObject(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error)
+}
+
+// newS3ObjectClient is a var-bound constructor so tests can substitute a
+// fake S3-compatible client; production code always builds a real one.
+// Path-style addressing is used against the bucket's own resolved cluster
+// endpoint (the bucket name already stripped back off its hostname) rather
+// than guessing a generic "<region>.linodeobjects.com" endpoint -- Linode
+// can return a bucket hostname on a different numbered sub-cluster than the
+// account's nominal region cluster (observed live: cluster "us-iad-1"
+// registered, but the bucket's actual hostname was on "us-iad-10").
+var newS3ObjectClient = func(region, clusterEndpoint, accessKey, secretKey string) s3ObjectAPI {
+	cfg := aws.Config{
+		Region:      region,
+		Credentials: credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
+	}
+
+	return s3sdk.NewFromConfig(cfg, func(o *s3sdk.Options) {
+		o.BaseEndpoint = aws.String("https://" + clusterEndpoint)
+		o.UsePathStyle = true
+	})
+}
+
+// s3ClientFor builds an S3-compatible client for this bucket's actual
+// Linode Object Storage cluster, using the caller-supplied access/secret
+// key.
+func (m *Manager) s3ClientFor(bucketHostname, accessKey, secretKey string) s3ObjectAPI {
+	clusterEndpoint := strings.TrimPrefix(bucketHostname, m.bucket+".")
+	return newS3ObjectClient(m.region, clusterEndpoint, accessKey, secretKey)
 }
 
 // NewManager creates a new Manager instance for managing Akamai interactions.

@@ -8,14 +8,16 @@ import (
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/linode/linodego"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const (
 	testNamespace         = "default"
 	testBucket            = "demo-bucket"
 	testRegion            = "us-east-1"
-	testAccessKeyLabel    = "demo-app-key"
+	testAccessKeyLabel    = "default-demo-app-key"
 	testExistingAccessKey = "existing-access-key"
 	testDefaultEndpoint   = "us-east-1.linodeobjects.com"
 	testAppUID            = types.UID("11111111-1111-1111-1111-111111111111")
@@ -55,10 +57,21 @@ func withS3ObjectClient(t *testing.T, client s3ObjectAPI) {
 	t.Cleanup(func() { newS3ObjectClient = original })
 }
 
+// newTestManager builds a Manager with a real fake k8s client (seeded with
+// the Application) backing m.k8sClient, needed since recordBucketCreated
+// durably writes to Application.Status via that client -- not just the
+// mocked AKAMAIAPI/s3ObjectAPI.
 func newTestManager(akamaiClient AKAMAIAPI) *Manager {
+	app := newTestApp()
+
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+
 	return &Manager{
+		k8sClient:    fakeClient,
 		akamaiClient: akamaiClient,
-		app:          newTestApp(),
+		app:          app,
 		storage:      &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testRegion},
 		bucket:       testBucket,
 		region:       testRegion,

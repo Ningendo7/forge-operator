@@ -125,6 +125,8 @@ func (s *StatusManager) UpdateStatus(
 
 	logger := logf.FromContext(ctx)
 
+	application.Status.ObservedGeneration = application.Generation
+
 	if err := s.client.Status().Update(ctx, application); err != nil {
 		logger.Error(err, "Failed to update Application status", "name", application.Name)
 		return err

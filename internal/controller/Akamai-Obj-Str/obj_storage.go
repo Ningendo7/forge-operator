@@ -8,54 +8,39 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3sdktypes "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/linode/linodego"
+
+	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 )
 
 const ownerMarkerKey = ".forge-operator-owner"
+
+// akamaiKeyLabelMaxLen: Linode's Object Storage key label limit isn't
+// documented in linodego's own types, so this uses AWS's IAM role name
+// limit (64) as a conservative stand-in -- adjust if Linode's actual limit
+// turns out to differ.
+const akamaiKeyLabelMaxLen = 64
+
+// accessKeyLabel builds this Application's per-app Object Storage access
+// key label. Must be used identically everywhere it's referenced (creation
+// in ensureAccessKey here, lookup/deletion in cleanup.go): the Application's
+// namespace has to be folded in because key labels are unique per Linode
+// account, not per Kubernetes namespace, so two same-named Applications in
+// different namespaces would otherwise collide on one shared key -- and
+// since ensureAccessKey reuses whichever key it finds by label, the second
+// Application to reconcile would be handed the first one's real access key,
+// scoped to the first Application's bucket.
+func (m *Manager) accessKeyLabel() string {
+	return naming.CloudResourceName([]string{m.app.Namespace, m.app.Name, "key"}, akamaiKeyLabelMaxLen)
+}
 
 // ErrBucketNotOwned means a bucket with the desired name exists but wasn't
 // created by this operator for this Application -- surfaced as a Degraded
 // condition rather than silently adopted (and later possibly deleted).
 var ErrBucketNotOwned = errors.New("bucket already exists and is not owned by forge-operator")
-
-// s3ObjectAPI is the minimal S3-compatible surface claimOrVerifyOwnership
-// and claimOwnership depend on, so tests can substitute a fake client
-// instead of standing up a real Linode Object Storage endpoint.
-type s3ObjectAPI interface {
-	GetObject(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error)
-	PutObject(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error)
-}
-
-// newS3ObjectClient is a var-bound constructor so tests can substitute a
-// fake S3-compatible client; production code always builds a real one.
-// Path-style addressing is used against the bucket's own resolved cluster
-// endpoint (the bucket name already stripped back off its hostname) rather
-// than guessing a generic "<region>.linodeobjects.com" endpoint -- Linode
-// can return a bucket hostname on a different numbered sub-cluster than the
-// account's nominal region cluster (observed live: cluster "us-iad-1"
-// registered, but the bucket's actual hostname was on "us-iad-10").
-var newS3ObjectClient = func(region, clusterEndpoint, accessKey, secretKey string) s3ObjectAPI {
-	cfg := aws.Config{
-		Region:      region,
-		Credentials: credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
-	}
-
-	return s3sdk.NewFromConfig(cfg, func(o *s3sdk.Options) {
-		o.BaseEndpoint = aws.String("https://" + clusterEndpoint)
-		o.UsePathStyle = true
-	})
-}
-
-// s3ClientFor builds an S3-compatible client for this bucket's actual
-// Linode Object Storage cluster, using the caller-supplied access/secret
-// key.
-func (m *Manager) s3ClientFor(bucketHostname, accessKey, secretKey string) s3ObjectAPI {
-	clusterEndpoint := strings.TrimPrefix(bucketHostname, m.bucket+".")
-	return newS3ObjectClient(m.region, clusterEndpoint, accessKey, secretKey)
-}
 
 // claimOrVerifyOwnership checks the marker object inside a bucket that
 // ensureBucketExists found or created: no marker at all -> claim it by
@@ -79,7 +64,10 @@ func (m *Manager) claimOrVerifyOwnership(
 	if err != nil {
 		var noSuchKey *s3sdktypes.NoSuchKey
 		if errors.As(err, &noSuchKey) {
-			return m.claimOwnership(ctx, s3Client)
+			if m.previouslyCreatedByUs() || m.adoptBucketRequested() {
+				return m.claimOwnership(ctx, s3Client)
+			}
+			return ErrBucketNotOwned
 		}
 		// A genuine failure (permission denied, network error, ...) must
 		// NOT be treated as claimable -- only "no marker at all" is.
@@ -92,6 +80,9 @@ func (m *Manager) claimOrVerifyOwnership(
 		return fmt.Errorf("failed to read ownership marker: %w", err)
 	}
 	if string(body) != string(m.app.UID) {
+		if m.adoptBucketRequested() {
+			return m.claimOwnership(ctx, s3Client)
+		}
 		return ErrBucketNotOwned
 	}
 	return nil
@@ -110,6 +101,38 @@ func (m *Manager) claimOwnership(
 		return fmt.Errorf("failed to write ownership marker: %w", err)
 	}
 	return nil
+}
+
+// adoptBucketRequested reports whether the Application has explicitly opted
+// in to taking over a bucket owned by a different Application, via
+// naming.AdoptBucketAnnotation.
+func (m *Manager) adoptBucketRequested() bool {
+	return m.app.Annotations[naming.AdoptBucketAnnotation] == naming.AdoptBucketAnnotationValue
+}
+
+// recordBucketCreated durably records, in Application.Status, that this
+// operator itself just created this bucket -- written immediately after
+// CreateObjectStorageBucket succeeds, before ownership marking is even
+// attempted, so a transient failure in that later step doesn't erase the
+// record.
+func (m *Manager) recordBucketCreated(ctx context.Context) error {
+	m.app.Status.Storage = &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
+		Bucket:   m.bucket,
+		Created:  true,
+	}
+	if err := m.k8sClient.Status().Update(ctx, m.app); err != nil {
+		return fmt.Errorf("failed to record bucket creation for %s: %w", m.bucket, err)
+	}
+	return nil
+}
+
+// previouslyCreatedByUs reports whether Application.Status durably records
+// this operator having created this exact bucket in an earlier reconcile.
+func (m *Manager) previouslyCreatedByUs() bool {
+	return m.app.Status.Storage != nil &&
+		m.app.Status.Storage.Bucket == m.bucket &&
+		m.app.Status.Storage.Created
 }
 
 // ReconcileBucket orchestrates bucket + key setup.
@@ -183,6 +206,10 @@ func (m *Manager) ensureBucketExists(
 		return nil, fmt.Errorf("failed to create bucket: %w", err)
 	}
 
+	if err := m.recordBucketCreated(ctx); err != nil {
+		return nil, err
+	}
+
 	return newBucket, nil
 }
 
@@ -190,7 +217,7 @@ func (m *Manager) ensureAccessKey(
 	ctx context.Context,
 ) (*AccessKeyResult, error) {
 
-	keyLabel := fmt.Sprintf("%s-key", m.app.Name)
+	keyLabel := m.accessKeyLabel()
 
 	keys, err := m.akamaiClient.ListObjectStorageKeys(ctx, nil)
 	if err != nil {

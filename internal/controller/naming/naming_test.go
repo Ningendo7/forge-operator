@@ -9,10 +9,12 @@ import (
 
 const testAppName = "demo-app"
 const testDefaultAkamaiToken = "demo-app-akamai-token"
+const testNamespace = "default"
+const testRolePrefix = "app-irsa"
 
 func newTestApplication() *forgev1alpha1.Application {
 	return &forgev1alpha1.Application{
-		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
 	}
 }
 
@@ -101,4 +103,53 @@ func TestAkamaiTokenSecret(t *testing.T) {
 			t.Fatalf("StorageSecret and AkamaiTokenSecret must never default to the same name")
 		}
 	})
+}
+
+func TestCloudResourceName_ShortNameUnchanged(t *testing.T) {
+	got := CloudResourceName([]string{testRolePrefix, testNamespace, testAppName}, 64)
+	if got != "app-irsa-default-demo-app" {
+		t.Fatalf("expected unchanged short name, got %q", got)
+	}
+}
+
+func TestCloudResourceName_DifferentNamespacesDontCollide(t *testing.T) {
+	a := CloudResourceName([]string{testRolePrefix, "team-a", testAppName}, 64)
+	b := CloudResourceName([]string{testRolePrefix, "team-b", testAppName}, 64)
+	if a == b {
+		t.Fatalf("expected different namespaces to produce different names, both got %q", a)
+	}
+}
+
+func TestCloudResourceName_TruncatesAndHashesWhenTooLong(t *testing.T) {
+	longNamespace := "a-namespace-name-that-is-unreasonably-long-for-a-real-cluster"
+	longName := "an-equally-long-application-name-nobody-would-actually-use"
+
+	got := CloudResourceName([]string{testRolePrefix, longNamespace, longName}, 64)
+
+	if len(got) > 64 {
+		t.Fatalf("expected result within maxLen 64, got %d chars: %q", len(got), got)
+	}
+	if got == "app-irsa-"+longNamespace+"-"+longName {
+		t.Fatalf("expected truncation to actually occur for an oversized input")
+	}
+}
+
+func TestCloudResourceName_TruncationStaysUniquePerInput(t *testing.T) {
+	longNamespace := "a-namespace-name-that-is-unreasonably-long-for-a-real-cluster"
+
+	a := CloudResourceName([]string{testRolePrefix, longNamespace, "app-one-with-a-very-long-name-too"}, 64)
+	b := CloudResourceName([]string{testRolePrefix, longNamespace, "app-two-with-a-very-long-name-too"}, 64)
+
+	if a == b {
+		t.Fatalf("expected two different oversized inputs to still produce different truncated names, both got %q", a)
+	}
+}
+
+func TestCloudResourceName_HandlesMaxLenSmallerThanHashSuffix(t *testing.T) {
+	// Must not panic even for a maxLen too small to fit any real content --
+	// exercises the keep<0 clamp.
+	got := CloudResourceName([]string{testRolePrefix, testNamespace, testAppName}, 3)
+	if len(got) == 0 {
+		t.Fatalf("expected a non-empty result even for a very small maxLen")
+	}
 }

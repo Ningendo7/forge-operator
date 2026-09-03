@@ -19,6 +19,7 @@ package v1alpha1
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -109,8 +110,13 @@ func (v *ApplicationCustomValidator) ValidateCreate(ctx context.Context, obj *fo
 }
 
 // ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type Application.
-func (v *ApplicationCustomValidator) ValidateUpdate(ctx context.Context, _, newObj *forgev1alpha1.Application) (admission.Warnings, error) {
+func (v *ApplicationCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj *forgev1alpha1.Application) (admission.Warnings, error) {
 	applicationlog.Info("Validation for Application upon update", "name", newObj.GetName())
+
+	if err := validateProviderImmutable(oldObj, newObj); err != nil {
+		return nil, err
+	}
+
 	return v.validate(ctx, newObj)
 }
 
@@ -120,15 +126,54 @@ func (v *ApplicationCustomValidator) ValidateDelete(_ context.Context, obj *forg
 	return nil, nil
 }
 
-// validate holds the Akamai-specific checks shared by create and update.
-// Scoped deliberately to Akamai only — AWS's spec.storage.secretName is
-// optional/dual-purpose (see the Defaulter's doc comment above) and isn't
-// the collision class this webhook was added to catch.
+// validateProviderImmutable rejects changing spec.storage.provider on an
+// existing Application. Nothing in the reconciler cleans up the previous
+// provider's bucket/credentials when this changes -- it would just start
+// treating spec.storage as belonging entirely to the new provider from that
+// reconcile on, silently orphaning whatever the old provider had provisioned.
+func validateProviderImmutable(oldObj, newObj *forgev1alpha1.Application) error {
+	if oldObj.Spec.Storage == nil || newObj.Spec.Storage == nil {
+		return nil
+	}
+	oldProvider := oldObj.Spec.Storage.Provider
+	newProvider := newObj.Spec.Storage.Provider
+
+	if oldProvider != "" && newProvider != "" && oldProvider != newProvider {
+		return fmt.Errorf(
+			"spec.storage.provider is immutable once set (was %q, tried to change to %q): "+
+				"changing providers would silently orphan the old provider's bucket and credentials, "+
+				"since nothing cleans those up on a spec change -- delete and recreate the Application "+
+				"instead, which correctly cleans up the old provider's resources via its finalizer",
+			oldProvider, newProvider)
+	}
+	return nil
+}
+
+// validate holds the provider-aware checks shared by create and update.
+// Incompatible field combinations (e.g. spec.storage.akamai set when
+// provider is AWS) are handled by CRD-level CEL rules on StorageSpec
+// instead of here, since those don't need live cluster state -- only checks
+// that genuinely require it (Secret existence/contents) belong in the
+// webhook.
 func (v *ApplicationCustomValidator) validate(ctx context.Context, app *forgev1alpha1.Application) (admission.Warnings, error) {
-	if app.Spec.Storage == nil || app.Spec.Storage.Provider != forgev1alpha1.ProviderAkamaiObjectStorage {
+	if app.Spec.Storage == nil {
 		return nil, nil
 	}
 
+	switch app.Spec.Storage.Provider {
+	case forgev1alpha1.ProviderAkamaiObjectStorage:
+		return v.validateAkamai(ctx, app)
+	case forgev1alpha1.ProviderAWSS3:
+		return v.validateAWS(ctx, app)
+	}
+
+	return nil, nil
+}
+
+// validateAkamai holds the Akamai-specific checks: CEL/kubebuilder
+// validation markers structurally can't do these (CEL only ever sees the
+// object being validated, never other cluster state).
+func (v *ApplicationCustomValidator) validateAkamai(ctx context.Context, app *forgev1alpha1.Application) (admission.Warnings, error) {
 	outputSecret := naming.StorageSecret(app)
 	tokenSecret := naming.AkamaiTokenSecret(app)
 
@@ -153,6 +198,43 @@ func (v *ApplicationCustomValidator) validate(ctx context.Context, app *forgev1a
 		return admission.Warnings{fmt.Sprintf("could not verify Akamai credentials Secret %q: %v", tokenSecret, err)}, nil
 	case len(secret.Data["apiToken"]) == 0:
 		return nil, fmt.Errorf("secret %q (spec.storage.akamai.accessKeySecretRef) is missing required key %q", tokenSecret, "apiToken")
+	}
+
+	return nil, nil
+}
+
+// validateAWS checks the optional static-credentials Secret when
+// spec.storage.secretName is set, the same way validateAkamai checks its
+// required token Secret -- fail fast at admission instead of only
+// surfacing as Degraded status later. Unlike Akamai's token Secret, AWS's
+// spec.storage.secretName is optional (IRSA needs no Secret at all), so
+// this is a no-op unless it's actually set. Required keys mirror exactly
+// what internal/controller/s3/client.go's NewManager reads.
+func (v *ApplicationCustomValidator) validateAWS(ctx context.Context, app *forgev1alpha1.Application) (admission.Warnings, error) {
+	secretName := app.Spec.Storage.SecretName
+	if secretName == "" {
+		return nil, nil
+	}
+
+	secret := &corev1.Secret{}
+	err := v.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: app.Namespace}, secret)
+	switch {
+	case apierrors.IsNotFound(err):
+		return nil, fmt.Errorf(
+			"spec.storage.secretName Secret %q not found in namespace %q",
+			secretName, app.Namespace)
+	case err != nil:
+		return admission.Warnings{fmt.Sprintf("could not verify AWS credentials Secret %q: %v", secretName, err)}, nil
+	}
+
+	var missing []string
+	for _, key := range []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"} {
+		if len(secret.Data[key]) == 0 {
+			missing = append(missing, key)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("secret %q (spec.storage.secretName) is missing required key(s): %s", secretName, strings.Join(missing, ", "))
 	}
 
 	return nil, nil

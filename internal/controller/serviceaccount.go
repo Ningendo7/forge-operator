@@ -18,10 +18,11 @@ func shouldCreateServiceAccount(
 	if application.Spec.ServiceAccount == nil {
 		return true
 	}
-	if application.Spec.ServiceAccount.Create == nil {
-		return true
+	if application.Spec.ServiceAccount.Create != nil {
+		return *application.Spec.ServiceAccount.Create
 	}
-	return *application.Spec.ServiceAccount.Create
+	// Only default to creating one when neither field is set.
+	return application.Spec.ServiceAccount.Name == ""
 }
 
 func serviceAccountNameFor(
@@ -33,6 +34,24 @@ func serviceAccountNameFor(
 		return application.Spec.ServiceAccount.Name
 	}
 	return application.Name + "-sa"
+}
+
+// podServiceAccountName resolves the ServiceAccountName for the desired pod
+// spec, or "" when there's genuinely no ServiceAccount to reference. This is
+// deliberately independent of shouldCreateServiceAccount: whether the
+// operator owns/creates the ServiceAccount and whether the pod should
+// reference one are two different questions -- a user-supplied
+// (Create: false) ServiceAccount still needs to be wired into the pod spec,
+// it just isn't one this operator creates or force-owns. The only case with
+// nothing to reference is Create explicitly false with Name unset (rejected
+// at admission by the CRD's CEL rule for new/updated objects, but still
+// handled defensively here for objects that predate that rule).
+func podServiceAccountName(application *forgev1alpha1.Application) string {
+	sa := application.Spec.ServiceAccount
+	if sa != nil && sa.Create != nil && !*sa.Create && sa.Name == "" {
+		return ""
+	}
+	return serviceAccountNameFor(application)
 }
 
 func (r *ApplicationReconciler) desiredServiceAccount(
@@ -93,6 +112,14 @@ func (r *ApplicationReconciler) annotateServiceAccountWithIRSA(
 	application *forgev1alpha1.Application,
 	roleArn string,
 ) error {
+
+	// A user-managed ServiceAccount (Create: false) must not be force-owned
+	// or mutated just because IRSA needs an annotation on *some*
+	// ServiceAccount -- the Role ARN is already surfaced on
+	// Application.Status.Storage.AWS.RoleARN for them to wire in themselves.
+	if !shouldCreateServiceAccount(application) {
+		return nil
+	}
 
 	desired := r.desiredServiceAccount(application)
 
