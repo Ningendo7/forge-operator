@@ -98,9 +98,6 @@ func CloudResourceName(parts []string, maxLen int) string {
 	sum := sha256.Sum256([]byte(full))
 	suffix := "-" + hex.EncodeToString(sum[:])[:8]
 
-	keep := max(maxLen-len(suffix), 0)
-	if keep > len(full) {
-		keep = len(full)
-	}
+	keep := min(max(maxLen-len(suffix), 0), len(full))
 	return full[:keep] + suffix
 }
