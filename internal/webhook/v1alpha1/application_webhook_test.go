@@ -30,6 +30,9 @@ var _ = Describe("Application Webhook", func() {
 	const namespace = "default"
 	const akamaiAppName = "akamai-app"
 	const testBucket = "some-bucket"
+	const testWestRegion = "us-west-2"
+	const orphanConfigAppName = "orphan-config-app"
+	const orphanConfigMapName = "orphan-config-app-config"
 
 	var (
 		obj       *forgev1alpha1.Application
@@ -192,9 +195,24 @@ var _ = Describe("Application Webhook", func() {
 			Expect(err.Error()).To(ContainSubstring("immutable"))
 		})
 
-		It("admits an update that leaves spec.storage.provider unchanged", func() {
+		It("admits an update that leaves spec.storage.provider, bucket, and region unchanged", func() {
 			oldObj.Name = "stable-provider-app"
 			oldObj.Namespace = namespace
+			oldObj.Spec.Storage = &forgev1alpha1.StorageSpec{
+				Provider: forgev1alpha1.ProviderAWSS3,
+				Bucket:   testBucket,
+				Region:   testWestRegion,
+			}
+			newObj := oldObj.DeepCopy()
+			// Change something else entirely, to confirm this isn't
+			// accidentally rejecting unrelated updates.
+			newObj.Spec.Image = "nginx:1.28"
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, newObj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("rejects changing spec.storage.bucket on an existing Application", func() {
 			oldObj.Spec.Storage = &forgev1alpha1.StorageSpec{
 				Provider: forgev1alpha1.ProviderAWSS3,
 				Bucket:   testBucket,
@@ -203,7 +221,72 @@ var _ = Describe("Application Webhook", func() {
 			newObj.Spec.Storage.Bucket = "some-other-bucket"
 
 			_, err := validator.ValidateUpdate(ctx, oldObj, newObj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("immutable"))
+		})
+
+		It("rejects changing spec.storage.region on an existing Application", func() {
+			oldObj.Spec.Storage = &forgev1alpha1.StorageSpec{
+				Provider: forgev1alpha1.ProviderAWSS3,
+				Bucket:   testBucket,
+				Region:   testWestRegion,
+			}
+			newObj := oldObj.DeepCopy()
+			newObj.Spec.Storage.Region = "us-east-1"
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, newObj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("immutable"))
+		})
+
+		It("rejects removing spec.config while spec.container.configMapName still references it", func() {
+			oldObj.Name = orphanConfigAppName
+			oldObj.Spec.ConfigMap = &forgev1alpha1.ConfigSpec{Name: orphanConfigMapName}
+			oldObj.Spec.Container.ConfigMapName = orphanConfigMapName
+			newObj := oldObj.DeepCopy()
+			newObj.Spec.ConfigMap = nil
+			// Container.ConfigMapName deliberately left unchanged.
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, newObj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.config cannot be removed"))
+		})
+
+		It("admits removing spec.config when spec.container.configMapName is cleared in the same update", func() {
+			oldObj.Name = orphanConfigAppName
+			oldObj.Spec.ConfigMap = &forgev1alpha1.ConfigSpec{Name: orphanConfigMapName}
+			oldObj.Spec.Container.ConfigMapName = orphanConfigMapName
+			newObj := oldObj.DeepCopy()
+			newObj.Spec.ConfigMap = nil
+			newObj.Spec.Container.ConfigMapName = ""
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, newObj)
 			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("admits removing spec.config when spec.container.configMapName points at an unrelated, externally-managed ConfigMap", func() {
+			oldObj.Name = orphanConfigAppName
+			oldObj.Spec.ConfigMap = &forgev1alpha1.ConfigSpec{Name: orphanConfigMapName}
+			oldObj.Spec.Container.ConfigMapName = "some-externally-managed-configmap"
+			newObj := oldObj.DeepCopy()
+			newObj.Spec.ConfigMap = nil
+			// Container.ConfigMapName never named the operator's own
+			// ConfigMap in the first place -- nothing gets orphaned.
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, newObj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("rejects removing spec.secret while spec.container.secretName still references it", func() {
+			oldObj.Name = "orphan-secret-app"
+			oldObj.Spec.Secret = &forgev1alpha1.SecretSpec{Name: "orphan-secret-app-secret"}
+			oldObj.Spec.Container.SecretName = "orphan-secret-app-secret"
+			newObj := oldObj.DeepCopy()
+			newObj.Spec.Secret = nil
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, newObj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.secret cannot be removed"))
 		})
 
 		It("rejects spec.storage.akamai set when provider is AWS, enforced by the CRD's CEL rule at the API server", func() {

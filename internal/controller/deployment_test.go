@@ -521,6 +521,116 @@ func TestDesiredPodSpec_ServiceAccount(t *testing.T) {
 	}
 }
 
+func TestStorageCredentialEnvVars_NilWhenStorageUnset(t *testing.T) {
+	app := newTestApplication()
+
+	if got := storageCredentialEnvVars(app); got != nil {
+		t.Fatalf("expected nil when spec.storage is unset, got %#v", got)
+	}
+}
+
+func TestStorageCredentialEnvVars_NilWhenInjectCredentialsUnset(t *testing.T) {
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
+		Bucket:   testBucket,
+		Akamai:   &forgev1alpha1.AkamaiStorageSpec{},
+	}
+
+	if got := storageCredentialEnvVars(app); got != nil {
+		t.Fatalf("expected nil when injectCredentials is false (the default), got %#v", got)
+	}
+}
+
+func TestStorageCredentialEnvVars_NilForAWS(t *testing.T) {
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+	}
+
+	// AWS already gets equivalent access transparently through IRSA --
+	// there's deliberately no injectCredentials equivalent on
+	// AWSStorageSpec, so this must be nil regardless.
+	if got := storageCredentialEnvVars(app); got != nil {
+		t.Fatalf("expected nil for AWS storage, got %#v", got)
+	}
+}
+
+func TestStorageCredentialEnvVars_PopulatesStandardNamesFromStorageSecret(t *testing.T) {
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
+		Bucket:   testBucket,
+		Akamai:   &forgev1alpha1.AkamaiStorageSpec{InjectCredentials: true},
+	}
+
+	got := storageCredentialEnvVars(app)
+
+	want := map[string]string{
+		"AWS_ACCESS_KEY_ID":     "access_key",
+		"AWS_SECRET_ACCESS_KEY": "secret_key",
+		"AWS_ENDPOINT_URL":      "endpoint_url",
+		testAWSRegionEnvName:    "region",
+		"FORGE_STORAGE_BUCKET":  "bucket",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d env vars, got %d: %#v", len(want), len(got), got)
+	}
+	for _, ev := range got {
+		wantKey, ok := want[ev.Name]
+		if !ok {
+			t.Fatalf("unexpected env var %q", ev.Name)
+		}
+		if ev.ValueFrom == nil || ev.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("expected %q to be sourced from a Secret key, got %#v", ev.Name, ev)
+		}
+		if ev.ValueFrom.SecretKeyRef.Name != testStorageSecretName {
+			t.Errorf("expected %q to reference Secret %q, got %q", ev.Name, testStorageSecretName, ev.ValueFrom.SecretKeyRef.Name)
+		}
+		if ev.ValueFrom.SecretKeyRef.Key != wantKey {
+			t.Errorf("expected %q to reference key %q, got %q", ev.Name, wantKey, ev.ValueFrom.SecretKeyRef.Key)
+		}
+	}
+}
+
+func TestDesiredPodSpec_InjectedStorageCredentialsCanBeOverriddenByUserEnv(t *testing.T) {
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
+		Bucket:   testBucket,
+		Akamai:   &forgev1alpha1.AkamaiStorageSpec{InjectCredentials: true},
+	}
+	app.Spec.Env = []corev1.EnvVar{
+		{Name: testAWSRegionEnvName, Value: "user-overridden-region"},
+		{Name: "SOME_OTHER_VAR", Value: "hello"},
+	}
+
+	r := &ApplicationReconciler{}
+	podSpec := r.desiredPodSpec(app)
+	envVars := podSpec.Containers[0].Env
+
+	// Both the injected defaults and the user's own vars must be present --
+	// injected first, user's own after, so a same-named user var is the
+	// one the kubelet actually uses (last-defined wins in a pod's env list).
+	if len(envVars) != 7 {
+		t.Fatalf("expected 5 injected + 2 user env vars (1 override, 1 new), got %d: %#v", len(envVars), envVars)
+	}
+	last := envVars[len(envVars)-1]
+	if last.Name != "SOME_OTHER_VAR" || last.Value != "hello" {
+		t.Fatalf("expected the user's own extra env var last, got %#v", last)
+	}
+	foundOverride := false
+	for _, ev := range envVars {
+		if ev.Name == testAWSRegionEnvName && ev.Value == "user-overridden-region" {
+			foundOverride = true
+		}
+	}
+	if !foundOverride {
+		t.Fatalf("expected the user's own AWS_REGION value to appear after the injected default, got %#v", envVars)
+	}
+}
+
 func TestReconcileDeployment_CreatesDeployment(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)

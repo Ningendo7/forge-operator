@@ -113,7 +113,11 @@ func (v *ApplicationCustomValidator) ValidateCreate(ctx context.Context, obj *fo
 func (v *ApplicationCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj *forgev1alpha1.Application) (admission.Warnings, error) {
 	applicationlog.Info("Validation for Application upon update", "name", newObj.GetName())
 
-	if err := validateProviderImmutable(oldObj, newObj); err != nil {
+	if err := validateStorageIdentityImmutable(oldObj, newObj); err != nil {
+		return nil, err
+	}
+
+	if err := validateConfigAndSecretNotOrphaned(oldObj, newObj); err != nil {
 		return nil, err
 	}
 
@@ -126,26 +130,94 @@ func (v *ApplicationCustomValidator) ValidateDelete(_ context.Context, obj *forg
 	return nil, nil
 }
 
-// validateProviderImmutable rejects changing spec.storage.provider on an
-// existing Application. Nothing in the reconciler cleans up the previous
-// provider's bucket/credentials when this changes -- it would just start
-// treating spec.storage as belonging entirely to the new provider from that
-// reconcile on, silently orphaning whatever the old provider had provisioned.
-func validateProviderImmutable(oldObj, newObj *forgev1alpha1.Application) error {
+// validateStorageIdentityImmutable rejects changing spec.storage.provider,
+// spec.storage.bucket, or spec.storage.region on an existing Application.
+// Unlike most spec fields, these three don't just describe desired state --
+// each one names the identity of a real, already-provisioned cloud
+// resource. Nothing in the reconciler cleans up the old identity's bucket
+// or credentials when any of these change: it would just start treating
+// spec.storage as naming an entirely different resource from that reconcile
+// on, permanently orphaning whatever the old identity had provisioned, with
+// the operator never even aware anything was left behind (see
+// bucketCreationClaimWindow's own doc comment in the s3/Akamai packages for
+// the closely related problem of an operator-created bucket's name later
+// being reused by something else entirely -- an in-place rename here would
+// manufacture exactly that scenario deliberately).
+func validateStorageIdentityImmutable(oldObj, newObj *forgev1alpha1.Application) error {
 	if oldObj.Spec.Storage == nil || newObj.Spec.Storage == nil {
 		return nil
 	}
-	oldProvider := oldObj.Spec.Storage.Provider
-	newProvider := newObj.Spec.Storage.Provider
+	oldStorage := oldObj.Spec.Storage
+	newStorage := newObj.Spec.Storage
 
-	if oldProvider != "" && newProvider != "" && oldProvider != newProvider {
+	if oldStorage.Provider != "" && newStorage.Provider != "" && oldStorage.Provider != newStorage.Provider {
 		return fmt.Errorf(
 			"spec.storage.provider is immutable once set (was %q, tried to change to %q): "+
 				"changing providers would silently orphan the old provider's bucket and credentials, "+
 				"since nothing cleans those up on a spec change -- delete and recreate the Application "+
 				"instead, which correctly cleans up the old provider's resources via its finalizer",
-			oldProvider, newProvider)
+			oldStorage.Provider, newStorage.Provider)
 	}
+
+	if oldStorage.Bucket != "" && newStorage.Bucket != "" && oldStorage.Bucket != newStorage.Bucket {
+		return fmt.Errorf(
+			"spec.storage.bucket is immutable once set (was %q, tried to change to %q): "+
+				"a bucket name is the identity of a real cloud resource, not just a label -- renaming it "+
+				"here would abandon the old bucket permanently (nothing cleans it up on a spec change) "+
+				"while claiming a new one under the new name -- delete and recreate the Application "+
+				"instead, which correctly cleans up the old bucket via its finalizer",
+			oldStorage.Bucket, newStorage.Bucket)
+	}
+
+	if oldStorage.Region != "" && newStorage.Region != "" && oldStorage.Region != newStorage.Region {
+		return fmt.Errorf(
+			"spec.storage.region is immutable once set (was %q, tried to change to %q): "+
+				"a bucket cannot be moved between regions in place -- this would silently start treating "+
+				"an entirely different (and likely nonexistent) bucket as this Application's storage -- "+
+				"delete and recreate the Application instead",
+			oldStorage.Region, newStorage.Region)
+	}
+
+	return nil
+}
+
+// validateConfigAndSecretNotOrphaned rejects removing spec.config (or
+// spec.secret) while spec.container.configMapName (or secretName) still
+// names the exact ConfigMap/Secret that removal would delete.
+// container.configMapName/secretName are deliberately independent of
+// spec.config/spec.secret -- they can equally well point at some other,
+// externally-managed ConfigMap/Secret this operator never owns, the same
+// way spec.storage.secretName can reference an unrelated externally-managed
+// Secret. That flexibility is intentional and this check doesn't touch it.
+// The specific case it closes: container.configMapName was pointed at this
+// operator's own managed ConfigMap (matching the exact name spec.config
+// would have produced), and spec.config is now being removed -- reconcile
+// would delete that ConfigMap out from under a Deployment whose pod
+// template still mounts it by that same name, with no error and no
+// degraded status until the next pod restart hits a permanent FailedMount.
+func validateConfigAndSecretNotOrphaned(oldObj, newObj *forgev1alpha1.Application) error {
+	if oldObj.Spec.ConfigMap != nil && newObj.Spec.ConfigMap == nil {
+		orphanedName := naming.AppConfigMap(oldObj)
+		if newObj.Spec.Container.ConfigMapName == orphanedName {
+			return fmt.Errorf(
+				"spec.config cannot be removed while spec.container.configMapName still references %q: "+
+					"that ConfigMap would be deleted while the pod spec still mounts it by name, breaking "+
+					"the Deployment on its next pod restart -- clear or repoint spec.container.configMapName first",
+				orphanedName)
+		}
+	}
+
+	if oldObj.Spec.Secret != nil && newObj.Spec.Secret == nil {
+		orphanedName := naming.AppSecret(oldObj)
+		if newObj.Spec.Container.SecretName == orphanedName {
+			return fmt.Errorf(
+				"spec.secret cannot be removed while spec.container.secretName still references %q: "+
+					"that Secret would be deleted while the pod spec still mounts it by name, breaking "+
+					"the Deployment on its next pod restart -- clear or repoint spec.container.secretName first",
+				orphanedName)
+		}
+	}
+
 	return nil
 }
 

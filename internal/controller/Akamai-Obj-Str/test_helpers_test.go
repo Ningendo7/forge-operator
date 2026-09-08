@@ -7,6 +7,7 @@ import (
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/linode/linodego"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -22,6 +23,10 @@ const (
 	testDefaultEndpoint   = "us-east-1.linodeobjects.com"
 	testAppUID            = types.UID("11111111-1111-1111-1111-111111111111")
 	testOtherUID          = types.UID("22222222-2222-2222-2222-222222222222")
+	testStorageSecretName = "demo-app-storage"
+	testSecretKeyDataKey  = "secret_key"
+	testNewAccessKey      = "new-access-key"
+	testNewSecretKey      = "new-secret-key"
 )
 
 func newTestApp() *forgev1alpha1.Application {
@@ -33,8 +38,10 @@ func newTestApp() *forgev1alpha1.Application {
 // mockS3ObjectClient is the fake s3ObjectAPI standing in for a real
 // S3-compatible client in ownership tests.
 type mockS3ObjectClient struct {
-	getObjectFunc func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error)
-	putObjectFunc func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error)
+	getObjectFunc     func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error)
+	putObjectFunc     func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error)
+	listObjectsV2Func func(ctx context.Context, params *s3sdk.ListObjectsV2Input, optFns ...func(*s3sdk.Options)) (*s3sdk.ListObjectsV2Output, error)
+	deleteObjectsFunc func(ctx context.Context, params *s3sdk.DeleteObjectsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteObjectsOutput, error)
 }
 
 func (m *mockS3ObjectClient) GetObject(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
@@ -43,6 +50,20 @@ func (m *mockS3ObjectClient) GetObject(ctx context.Context, params *s3sdk.GetObj
 
 func (m *mockS3ObjectClient) PutObject(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
 	return m.putObjectFunc(ctx, params, optFns...)
+}
+
+func (m *mockS3ObjectClient) ListObjectsV2(ctx context.Context, params *s3sdk.ListObjectsV2Input, optFns ...func(*s3sdk.Options)) (*s3sdk.ListObjectsV2Output, error) {
+	if m.listObjectsV2Func == nil {
+		return &s3sdk.ListObjectsV2Output{}, nil
+	}
+	return m.listObjectsV2Func(ctx, params, optFns...)
+}
+
+func (m *mockS3ObjectClient) DeleteObjects(ctx context.Context, params *s3sdk.DeleteObjectsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteObjectsOutput, error) {
+	if m.deleteObjectsFunc == nil {
+		return &s3sdk.DeleteObjectsOutput{}, nil
+	}
+	return m.deleteObjectsFunc(ctx, params, optFns...)
 }
 
 // withS3ObjectClient swaps newS3ObjectClient for the duration of a test so
@@ -66,6 +87,7 @@ func newTestManager(akamaiClient AKAMAIAPI) *Manager {
 
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 
 	return &Manager{

@@ -2,11 +2,12 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -14,16 +15,19 @@ import (
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
 	"github.com/Ningendo7/forge-operator/internal/controller/naming"
+	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // storageReconcileTimeout bounds each storage provisioning attempt (bucket,
 // versioning, lifecycle, IAM role/policy, access key -- several sequential
 // cloud API calls). Without this, a hung or unusually slow call blocks this
-// reconcile indefinitely -- and with MaxConcurrentReconciles at its
-// controller-runtime default of 1 (see SetupWithManager), that blocks every
-// other Application in the cluster from reconciling too, not just this one.
+// reconcile indefinitely -- and that blocks every other Application in the
+// cluster from reconciling too, not just this one.
 // Bounded here means a stuck call becomes a normal, retryable error instead.
 const storageReconcileTimeout = 90 * time.Second
 
@@ -73,8 +77,31 @@ func (r *ApplicationReconciler) reconcileStorage(
 	application *forgev1alpha1.Application,
 ) error {
 
-	// If storage spec is nil, cleanup any existing storage resources and return
+	// If storage spec is nil, clean up any previously-provisioned cloud
+	// resource (not just the credentials Secret) before returning --
+	// otherwise removing spec.storage from an Application would silently
+	// orphan its bucket. finalizeApplication does exactly the cleanup (or
+	// deliberate Retain-skip) this needs, sourcing what to clean up from
+	// Status.Storage since Spec.Storage is nil here.
 	if application.Spec.Storage == nil {
+		if application.Status.Storage != nil {
+			if err := r.finalizeApplication(ctx, application); err != nil {
+				return fmt.Errorf("failed to clean up previously provisioned storage: %w", err)
+			}
+			// finalizeApplication only ever leaves the StorageReady condition
+			// at "cleanup in progress" (or a terminal failure) -- on the real
+			// deletion path that's harmless since the whole Application is
+			// gone moments later, but here the Application lives on, so a
+			// stuck, misleading condition would be left behind permanently.
+			// Removing it entirely (rather than setting some other reason)
+			// matches the condition an Application that never had storage
+			// configured shows: none at all.
+			application.Status.Storage = nil
+			apimeta.RemoveStatusCondition(&application.Status.Conditions, storagestatus.StorageReady)
+			if err := r.Status().Update(ctx, application); err != nil {
+				return fmt.Errorf("failed to clear storage status after cleanup: %w", err)
+			}
+		}
 		return r.reconcileStorageSecret(ctx, application, nil)
 	}
 
@@ -114,10 +141,36 @@ func (r *ApplicationReconciler) reconcileStorage(
 func (r *ApplicationReconciler) reconcileAWSStorage(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
-) error {
+) (err error) {
+
+	provider := string(forgev1alpha1.ProviderAWSS3)
+
+	// Child span of whatever's already in ctx -- the "Reconcile" root span
+	// from application_controller.go, in the normal reconcile path. Every
+	// individual AWS API call underneath this (via the otelaws middleware
+	// wired into the s3 package's NewManager) nests under this span in
+	// turn, since cloudCtx below is derived from this ctx.
+	ctx, span := forgemetrics.Tracer().Start(ctx, "reconcileAWSStorage",
+		trace.WithAttributes(
+			attribute.String("forge.storage.provider", provider),
+			attribute.String("forge.storage.bucket", application.Spec.Storage.Bucket),
+		),
+	)
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
 
 	cloudCtx, cancel := context.WithTimeout(ctx, storageReconcileTimeout)
 	defer cancel()
+
+	start := time.Now()
+	defer func() {
+		forgemetrics.StorageReconcileDuration.WithLabelValues(provider).Observe(time.Since(start).Seconds())
+	}()
 
 	// Initialize S3 Storage Manager with OIDC info for IRSA role creation
 
@@ -133,18 +186,23 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 	if err != nil {
 		storagestatus.SetNotReady(application, err)
 		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+		forgemetrics.StorageReconcileTotal.WithLabelValues(provider, classifyAWSStorageError(err, outcomeNotOwned)).Inc()
+		forgemetrics.StorageReady.WithLabelValues(application.Namespace, application.Name, provider).Set(0)
 		return fmt.Errorf("failed to create S3 storage manager: %w", err)
 	}
 
 	// Reconcile Bucket and IRSA
 	result, err := storageManager.ReconcileBucket(cloudCtx)
 	if err != nil {
-		if errors.Is(err, s3storage.ErrBucketNotOwned) {
+		outcome := classifyAWSStorageError(err, outcomeNotOwned)
+		if outcome == outcomeNotOwned {
 			storagestatus.SetNotOwned(application, err)
 		} else {
 			storagestatus.SetNotReady(application, err)
 		}
 		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+		forgemetrics.StorageReconcileTotal.WithLabelValues(provider, outcome).Inc()
+		forgemetrics.StorageReady.WithLabelValues(application.Namespace, application.Name, provider).Set(0)
 		return fmt.Errorf("failed to reconcile S3 bucket: %w", err)
 	}
 	if result.RoleARN != "" {
@@ -153,12 +211,25 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 		}
 	}
 
-	// Structured Status metdata
+	// Structured Status metadata. Created/CreatedAt are carried forward from
+	// whatever ReconcileBucket already durably recorded (via
+	// recordBucketCreated, on the same application pointer) rather than
+	// reconstructed here -- CreatedAt in particular must never be reset to
+	// "now" on a routine successful reconcile of an already-owned bucket, or
+	// it would defeat the whole point of bucketCreationClaimWindow bounding
+	// it in the s3 package.
+	createdAt := metav1.Now()
+	if application.Status.Storage != nil && !application.Status.Storage.CreatedAt.IsZero() {
+		createdAt = application.Status.Storage.CreatedAt
+	}
 	storageStatus := &forgev1alpha1.StorageStatus{
-		Provider: forgev1alpha1.ProviderAWSS3,
-		Bucket:   application.Spec.Storage.Bucket,
-		Region:   application.Spec.Storage.Region,
-		Created:  true,
+		Provider:       forgev1alpha1.ProviderAWSS3,
+		Bucket:         application.Spec.Storage.Bucket,
+		Region:         application.Spec.Storage.Region,
+		Created:        true,
+		CreatedAt:      createdAt,
+		SecretName:     application.Spec.Storage.SecretName,
+		DeletionPolicy: application.Spec.Storage.DeletionPolicy,
 		AWS: &forgev1alpha1.AWSStorageStatus{
 			RoleARN: result.RoleARN,
 		},
@@ -169,6 +240,9 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 	if err := r.Status().Update(ctx, application); err != nil {
 		return fmt.Errorf("failed to update storage status: %w", err)
 	}
+
+	forgemetrics.StorageReconcileTotal.WithLabelValues(provider, outcomeReady).Inc()
+	forgemetrics.StorageReady.WithLabelValues(application.Namespace, application.Name, provider).Set(1)
 
 	return nil
 
@@ -181,10 +255,32 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
-) (*akamaiobjstr.StorageResult, error) {
+) (result *akamaiobjstr.StorageResult, err error) {
+
+	provider := string(forgev1alpha1.ProviderAkamaiObjectStorage)
+
+	// Same reasoning as reconcileAWSStorage's span.
+	ctx, span := forgemetrics.Tracer().Start(ctx, "reconcileAkamaiStorage",
+		trace.WithAttributes(
+			attribute.String("forge.storage.provider", provider),
+			attribute.String("forge.storage.bucket", application.Spec.Storage.Bucket),
+		),
+	)
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
 
 	cloudCtx, cancel := context.WithTimeout(ctx, storageReconcileTimeout)
 	defer cancel()
+
+	start := time.Now()
+	defer func() {
+		forgemetrics.StorageReconcileDuration.WithLabelValues(provider).Observe(time.Since(start).Seconds())
+	}()
 
 	// Initialize Akamai Storage Manager
 	storageManager, err := newAkamaiStorageManager(
@@ -196,18 +292,23 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	if err != nil {
 		storagestatus.SetNotReady(application, err)
 		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+		forgemetrics.StorageReconcileTotal.WithLabelValues(provider, classifyAkamaiStorageError(err, outcomeNotOwned)).Inc()
+		forgemetrics.StorageReady.WithLabelValues(application.Namespace, application.Name, provider).Set(0)
 		return nil, fmt.Errorf("failed to create Akamai storage manager: %w", err)
 	}
 
 	// Reconcile Bucket and Access Key
-	result, err := storageManager.ReconcileBucket(cloudCtx)
+	result, err = storageManager.ReconcileBucket(cloudCtx)
 	if err != nil {
-		if errors.Is(err, akamaiobjstr.ErrBucketNotOwned) {
+		outcome := classifyAkamaiStorageError(err, outcomeNotOwned)
+		if outcome == outcomeNotOwned {
 			storagestatus.SetNotOwned(application, err)
 		} else {
 			storagestatus.SetNotReady(application, err)
 		}
 		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+		forgemetrics.StorageReconcileTotal.WithLabelValues(provider, outcome).Inc()
+		forgemetrics.StorageReady.WithLabelValues(application.Namespace, application.Name, provider).Set(0)
 		return nil, fmt.Errorf("failed to reconcile Akamai bucket: %w", err)
 	}
 
@@ -223,12 +324,22 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 		}
 	}
 
+	// See the identical comment in reconcileAWSStorage: CreatedAt must be
+	// carried forward, never regenerated, or bucketCreationClaimWindow's
+	// bound becomes meaningless.
+	createdAt := metav1.Now()
+	if application.Status.Storage != nil && !application.Status.Storage.CreatedAt.IsZero() {
+		createdAt = application.Status.Storage.CreatedAt
+	}
 	storageStatus := &forgev1alpha1.StorageStatus{
-		Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
-		Bucket:   application.Spec.Storage.Bucket,
-		Region:   application.Spec.Storage.Region,
-		Created:  true,
-		Akamai:   &forgev1alpha1.AkamaiStorageStatus{Endpoint: result.Endpoint},
+		Provider:       forgev1alpha1.ProviderAkamaiObjectStorage,
+		Bucket:         application.Spec.Storage.Bucket,
+		Region:         application.Spec.Storage.Region,
+		Created:        true,
+		CreatedAt:      createdAt,
+		SecretName:     application.Spec.Storage.SecretName,
+		DeletionPolicy: application.Spec.Storage.DeletionPolicy,
+		Akamai:         &forgev1alpha1.AkamaiStorageStatus{Endpoint: result.Endpoint},
 	}
 
 	storagestatus.SetReady(application, storageStatus, "Akamai bucket and access key provisioned")
@@ -236,6 +347,9 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	if err := r.Status().Update(ctx, application); err != nil {
 		return nil, fmt.Errorf("failed to update storage status: %w", err)
 	}
+
+	forgemetrics.StorageReconcileTotal.WithLabelValues(provider, outcomeReady).Inc()
+	forgemetrics.StorageReady.WithLabelValues(application.Namespace, application.Name, provider).Set(1)
 
 	return result, nil
 }

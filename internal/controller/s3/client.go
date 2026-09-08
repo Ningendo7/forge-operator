@@ -4,15 +4,19 @@ import (
 	"context"
 	"fmt"
 
-	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+
+	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 )
 
 const defaultRegion = "us-east-1"
@@ -116,6 +120,14 @@ func NewManager(
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
+
+	// Every S3 and IAM call this Manager makes (both clients are built
+	// FromConfig below) gets its own span automatically from here on --
+	// this middleware is the entire instrumentation for individual AWS API
+	// calls; there's no per-call span code anywhere else in this package.
+	// Like every span in this operator, these become no-ops if tracing was
+	// never initialized (see internal/controller/observability's Init).
+	otelaws.AppendMiddlewares(&awsCfg.APIOptions)
 
 	s3client := s3sdk.NewFromConfig(awsCfg, func(o *s3sdk.Options) {
 		if storage.Endpoint != "" {

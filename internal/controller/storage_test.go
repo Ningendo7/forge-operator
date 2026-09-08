@@ -7,10 +7,13 @@ import (
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
+	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -123,6 +126,38 @@ func TestDesiredStorage_InjectsAkamaiCredentialsFromCaller(t *testing.T) {
 	}
 	if secret.StringData["endpoint"] != testAkamaiEndpoint {
 		t.Errorf("expected endpoint to be overridden from Akamai creds, got %q", secret.StringData["endpoint"])
+	}
+}
+
+func TestDesiredStorage_EndpointURLStripsBucketPrefixForStandardSDKUse(t *testing.T) {
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Provider: forgev1alpha1.ProviderAkamaiObjectStorage, Bucket: testBucket}
+	// resolveEndpoint (Akamai-Obj-Str/obj_storage.go) prefers the bucket's
+	// own real hostname, which Linode returns bucket-prefixed --
+	// reproducing that shape here, not the bare-cluster-host shape
+	// testAkamaiEndpoint happens to already be in.
+	akamaiCreds := &akamaiobjstr.StorageResult{
+		AccessKey: testAccessKey,
+		SecretKey: testAkamaiSecretKey,
+		Endpoint:  testBucket + ".us-iad-10.linodeobjects.com",
+	}
+
+	r := &ApplicationReconciler{}
+	secret := r.desiredStorage(app, akamaiCreds)
+
+	// "endpoint" keeps the bucket-prefixed hostname as-is (unchanged,
+	// backward-compatible shape) -- only "endpoint_url" (feeding
+	// AWS_ENDPOINT_URL) needs the prefix stripped, matching how this
+	// operator's own S3 client (s3ClientFor) connects: bare cluster host
+	// + path-style addressing, bucket passed explicitly per request. A
+	// real SDK handed the bucket-prefixed host as its endpoint would
+	// double up the bucket reference the moment it also passes a Bucket
+	// parameter, which every normal S3 call does.
+	if got, want := secret.StringData["endpoint"], testBucket+".us-iad-10.linodeobjects.com"; got != want {
+		t.Errorf("expected endpoint to stay bucket-prefixed, got %q want %q", got, want)
+	}
+	if got, want := secret.StringData["endpoint_url"], "https://us-iad-10.linodeobjects.com"; got != want {
+		t.Errorf("expected endpoint_url to have the bucket prefix stripped, got %q want %q", got, want)
 	}
 }
 
@@ -249,6 +284,98 @@ func TestReconcileStorage_NilStorageReconcilesSecretOnly(t *testing.T) {
 
 	if err := r.reconcileStorage(context.Background(), app); err != nil {
 		t.Fatalf("reconcileStorage returned error: %v", err)
+	}
+}
+
+func TestReconcileStorage_SpecRemovalAttemptsCleanupUsingStatusStorage(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	// Spec.Storage is nil (removed), but Status.Storage still remembers a
+	// previously-provisioned bucket -- reconcileStorage must attempt real
+	// cleanup, not just silently drop the credentials Secret. The missing
+	// Secret referenced by SecretName proves the cloud cleanup path was
+	// actually entered (manager construction fails), the same technique
+	// finalizer_test.go already uses.
+	app := newTestApplication()
+	app.Status.Storage = &forgev1alpha1.StorageStatus{
+		Provider:   forgev1alpha1.ProviderAWSS3,
+		Bucket:     testBucket,
+		SecretName: testMissingCredsSecret,
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileStorage(context.Background(), app); err == nil {
+		t.Fatalf("expected an error: cleanup should have been attempted using Status.Storage and failed on the missing credentials Secret")
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+	if got.Status.Storage == nil {
+		t.Fatalf("expected Status.Storage to remain set after a failed cleanup attempt")
+	}
+	// finalizeApplication must never write a synthesized value onto
+	// application.Spec.Storage itself -- only into a local/throwaway copy --
+	// or it would leak into any later reconcile step in this same pass that
+	// also branches on Spec.Storage (e.g. pod volume/env wiring).
+	if app.Spec.Storage != nil {
+		t.Fatalf("expected Spec.Storage to remain nil (never mutated in place), got %#v", app.Spec.Storage)
+	}
+}
+
+func TestReconcileStorage_SpecRemovalWithRetainPolicySkipsCleanupAndClearsStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Status.Storage = &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		// A real manager would fail to construct on this missing Secret --
+		// if Retain actually skips the cloud path as intended, that failure
+		// is never reached.
+		SecretName:     testMissingCredsSecret,
+		DeletionPolicy: forgev1alpha1.DeletionPolicyRetain,
+	}
+	// Seeded to reproduce a real bug found live: finalizeApplication leaves
+	// the StorageReady condition at "cleanup in progress" (BucketCleanup) --
+	// harmless on the real deletion path since the whole Application is
+	// gone moments later, but here it survives, so without an explicit
+	// removal this condition would be stuck lying about state forever.
+	apimeta.SetStatusCondition(&app.Status.Conditions, metav1.Condition{
+		Type:               storagestatus.StorageReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             storagestatus.ReasonBucketCleanup,
+		Message:            "Storage cleanup in progress",
+		ObservedGeneration: app.Generation,
+	})
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	rec := &fakeEventRecorder{}
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme, Recorder: rec}
+
+	if err := r.reconcileStorage(context.Background(), app); err != nil {
+		t.Fatalf("expected no error when deletionPolicy is Retain, got %v", err)
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+	if got.Status.Storage != nil {
+		t.Fatalf("expected Status.Storage to be cleared once the operator stops tracking a retained bucket, got %#v", got.Status.Storage)
+	}
+	if len(rec.events) != 1 || rec.events[0].reason != "StorageRetained" {
+		t.Fatalf("expected a single StorageRetained event, got %#v", rec.events)
+	}
+	if cond := findAppCondition(got, storagestatus.StorageReady); cond != nil {
+		t.Fatalf("expected StorageReady condition to be removed once cleanup-on-removal succeeds, still found: %#v", cond)
 	}
 }
 
@@ -429,6 +556,10 @@ func TestReconcileAWSStorage_SetsReadyStatusAndAnnotatesServiceAccountOnSuccess(
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
+	provider := string(forgev1alpha1.ProviderAWSS3)
+	forgemetrics.StorageReconcileTotal.Reset()
+	forgemetrics.StorageReady.Reset()
+
 	if err := r.reconcileAWSStorage(context.Background(), app); err != nil {
 		t.Fatalf("reconcileAWSStorage returned error: %v", err)
 	}
@@ -450,6 +581,53 @@ func TestReconcileAWSStorage_SetsReadyStatusAndAnnotatesServiceAccountOnSuccess(
 	}
 	if sa.Annotations["eks.amazonaws.com/role-arn"] != testRoleARN {
 		t.Fatalf("expected IRSA annotation to be set, got %v", sa.Annotations)
+	}
+
+	if got := testutil.ToFloat64(forgemetrics.StorageReconcileTotal.WithLabelValues(provider, outcomeReady)); got != 1 {
+		t.Fatalf("expected StorageReconcileTotal{outcome=ready} to be 1, got %v", got)
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageReady.WithLabelValues(testNamespace, testAppName, provider)); got != 1 {
+		t.Fatalf("expected StorageReady gauge to be 1, got %v", got)
+	}
+}
+
+func TestReconcileAWSStorage_RecordsSecretNameAndDeletionPolicyInStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider:       forgev1alpha1.ProviderAWSS3,
+		Bucket:         testBucket,
+		SecretName:     testSharedCredsSecret,
+		DeletionPolicy: forgev1alpha1.DeletionPolicyRetain,
+	}
+
+	withS3StorageManager(t, &mockS3StorageManager{
+		reconcileBucketFunc: func(ctx context.Context) (*s3storage.StorageResult, error) {
+			return &s3storage.StorageResult{}, nil
+		},
+	})
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileAWSStorage(context.Background(), app); err != nil {
+		t.Fatalf("reconcileAWSStorage returned error: %v", err)
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+	// These are what make cleanup possible after spec.storage is later
+	// removed -- Status.Storage is all that survives at that point.
+	if got.Status.Storage.SecretName != testSharedCredsSecret {
+		t.Errorf("expected SecretName to be recorded in status, got %q", got.Status.Storage.SecretName)
+	}
+	if got.Status.Storage.DeletionPolicy != forgev1alpha1.DeletionPolicyRetain {
+		t.Errorf("expected DeletionPolicy to be recorded in status, got %q", got.Status.Storage.DeletionPolicy)
 	}
 }
 
@@ -524,6 +702,10 @@ func TestReconcileAWSStorage_SetsNotReadyWhenReconcileBucketFails(t *testing.T) 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
+	provider := string(forgev1alpha1.ProviderAWSS3)
+	forgemetrics.StorageReconcileTotal.Reset()
+	forgemetrics.StorageReady.Reset()
+
 	if err := r.reconcileAWSStorage(context.Background(), app); err == nil {
 		t.Fatalf("expected error from reconcileAWSStorage, got nil")
 	}
@@ -535,6 +717,13 @@ func TestReconcileAWSStorage_SetsNotReadyWhenReconcileBucketFails(t *testing.T) 
 	cond := findAppCondition(got, "StorageReady")
 	if cond == nil || cond.Status != testConditionFalse {
 		t.Fatalf("expected StorageReady=False, got %#v", cond)
+	}
+
+	if got := testutil.ToFloat64(forgemetrics.StorageReconcileTotal.WithLabelValues(provider, outcomeOther)); got != 1 {
+		t.Fatalf("expected StorageReconcileTotal{outcome=other_error} to be 1, got %v", got)
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageReady.WithLabelValues(testNamespace, testAppName, provider)); got != 0 {
+		t.Fatalf("expected StorageReady gauge to be 0, got %v", got)
 	}
 }
 
@@ -555,6 +744,10 @@ func TestReconcileAWSStorage_SetsNotOwnedReasonWhenBucketNotOwned(t *testing.T) 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
+	provider := string(forgev1alpha1.ProviderAWSS3)
+	forgemetrics.StorageReconcileTotal.Reset()
+	forgemetrics.StorageReady.Reset()
+
 	if err := r.reconcileAWSStorage(context.Background(), app); err == nil {
 		t.Fatalf("expected error from reconcileAWSStorage, got nil")
 	}
@@ -569,6 +762,14 @@ func TestReconcileAWSStorage_SetsNotOwnedReasonWhenBucketNotOwned(t *testing.T) 
 	}
 	if cond.Reason != storagestatus.ReasonBucketNotOwned {
 		t.Fatalf("expected reason %q, got %q", storagestatus.ReasonBucketNotOwned, cond.Reason)
+	}
+
+	// Guards the outcome := classifyAWSStorageError(...); if outcome ==
+	// outcomeNotOwned refactor: it must still route ErrBucketNotOwned to
+	// SetNotOwned (checked above) *and* record the same not_owned outcome
+	// on the metric, not silently fall through to other_error.
+	if got := testutil.ToFloat64(forgemetrics.StorageReconcileTotal.WithLabelValues(provider, outcomeNotOwned)); got != 1 {
+		t.Fatalf("expected StorageReconcileTotal{outcome=not_owned} to be 1, got %v", got)
 	}
 }
 
@@ -641,6 +842,10 @@ func TestReconcileAkamaiStorage_SetsReadyStatusOnSuccess(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
+	provider := string(forgev1alpha1.ProviderAkamaiObjectStorage)
+	forgemetrics.StorageReconcileTotal.Reset()
+	forgemetrics.StorageReady.Reset()
+
 	result, err := r.reconcileAkamaiStorage(context.Background(), app)
 	if err != nil {
 		t.Fatalf("reconcileAkamaiStorage returned error: %v", err)
@@ -661,6 +866,51 @@ func TestReconcileAkamaiStorage_SetsReadyStatusOnSuccess(t *testing.T) {
 	}
 	if got.Status.Storage.Akamai.Endpoint != testAkamaiEndpoint {
 		t.Fatalf("expected status.Storage.Akamai.Endpoint to be set, got %#v", got.Status.Storage.Akamai)
+	}
+
+	if got := testutil.ToFloat64(forgemetrics.StorageReconcileTotal.WithLabelValues(provider, outcomeReady)); got != 1 {
+		t.Fatalf("expected StorageReconcileTotal{outcome=ready} to be 1, got %v", got)
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageReady.WithLabelValues(testNamespace, testAppName, provider)); got != 1 {
+		t.Fatalf("expected StorageReady gauge to be 1, got %v", got)
+	}
+}
+
+func TestReconcileAkamaiStorage_RecordsSecretNameAndDeletionPolicyInStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider:       forgev1alpha1.ProviderAkamaiObjectStorage,
+		Bucket:         testBucket,
+		SecretName:     testSharedCredsSecret,
+		DeletionPolicy: forgev1alpha1.DeletionPolicyRetain,
+	}
+
+	withAkamaiStorageManager(t, &mockAkamaiStorageManager{
+		reconcileBucketFunc: func(ctx context.Context) (*akamaiobjstr.StorageResult, error) {
+			return &akamaiobjstr.StorageResult{AccessKey: testAccessKey, SecretKey: testAkamaiSecretKey, Endpoint: testAkamaiEndpoint}, nil
+		},
+	})
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if _, err := r.reconcileAkamaiStorage(context.Background(), app); err != nil {
+		t.Fatalf("reconcileAkamaiStorage returned error: %v", err)
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+	if got.Status.Storage.SecretName != testSharedCredsSecret {
+		t.Errorf("expected SecretName to be recorded in status, got %q", got.Status.Storage.SecretName)
+	}
+	if got.Status.Storage.DeletionPolicy != forgev1alpha1.DeletionPolicyRetain {
+		t.Errorf("expected DeletionPolicy to be recorded in status, got %q", got.Status.Storage.DeletionPolicy)
 	}
 }
 
@@ -774,6 +1024,9 @@ func TestReconcileAkamaiStorage_SetsNotOwnedReasonWhenBucketNotOwned(t *testing.
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
+	provider := string(forgev1alpha1.ProviderAkamaiObjectStorage)
+	forgemetrics.StorageReconcileTotal.Reset()
+
 	if _, err := r.reconcileAkamaiStorage(context.Background(), app); err == nil {
 		t.Fatalf("expected error from reconcileAkamaiStorage, got nil")
 	}
@@ -788,5 +1041,11 @@ func TestReconcileAkamaiStorage_SetsNotOwnedReasonWhenBucketNotOwned(t *testing.
 	}
 	if cond.Reason != storagestatus.ReasonBucketNotOwned {
 		t.Fatalf("expected reason %q, got %q", storagestatus.ReasonBucketNotOwned, cond.Reason)
+	}
+
+	// Same refactor guard as the AWS equivalent: outcome ==
+	// outcomeNotOwned must still drive both SetNotOwned and the metric.
+	if got := testutil.ToFloat64(forgemetrics.StorageReconcileTotal.WithLabelValues(provider, outcomeNotOwned)); got != 1 {
+		t.Fatalf("expected StorageReconcileTotal{outcome=not_owned} to be 1, got %v", got)
 	}
 }

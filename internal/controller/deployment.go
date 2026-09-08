@@ -195,11 +195,53 @@ func readinessProbeFor(application *forgev1alpha1.Application, port int32) *core
 	return defaultReadinessProbe(port)
 }
 
+// storageCredentialEnvVars returns the standard-AWS-SDK-style env vars that
+// let the Application's own container actually read/write its bucket,
+// sourced from the operator's own generated storage Secret -- but only when
+// spec.storage.akamai.injectCredentials opts in. Akamai-only: AWS
+// Applications already get equivalent, transparent access through IRSA (see
+// InjectCredentials's own doc comment for why), so there's nothing for this
+// to add there. Individual secretKeyRef entries rather than an envFrom of
+// the whole Secret, both so the env var names can be the standard ones real
+// S3 SDKs expect (the Secret's own keys are lowercase/non-standard) and so
+// application.Spec.Env, appended after these by the caller, can override
+// any of them by name -- the last-defined value for a given name wins in a
+// pod's env list.
+func storageCredentialEnvVars(application *forgev1alpha1.Application) []corev1.EnvVar {
+	storage := application.Spec.Storage
+	if storage == nil || storage.Provider != forgev1alpha1.ProviderAkamaiObjectStorage ||
+		storage.Akamai == nil || !storage.Akamai.InjectCredentials {
+		return nil
+	}
+
+	secretName := naming.StorageSecret(application)
+	envVar := func(name, secretKey string) corev1.EnvVar {
+		return corev1.EnvVar{
+			Name: name,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+					Key:                  secretKey,
+				},
+			},
+		}
+	}
+
+	return []corev1.EnvVar{
+		envVar("AWS_ACCESS_KEY_ID", "access_key"),
+		envVar("AWS_SECRET_ACCESS_KEY", "secret_key"),
+		envVar("AWS_ENDPOINT_URL", "endpoint_url"),
+		envVar("AWS_REGION", "region"),
+		envVar("FORGE_STORAGE_BUCKET", "bucket"),
+	}
+}
+
 func (r *ApplicationReconciler) desiredPodSpec(
 	application *forgev1alpha1.Application,
 ) corev1.PodSpec {
 
 	volumes, volumeMounts := r.buildVolumeAndMounts(application)
+	env := append(storageCredentialEnvVars(application), application.Spec.Env...)
 
 	port := int32(8080)
 	if application.Spec.Container.Port != 0 {
@@ -217,7 +259,7 @@ func (r *ApplicationReconciler) desiredPodSpec(
 						ContainerPort: port,
 					},
 				},
-				Env:             application.Spec.Env,
+				Env:             env,
 				Resources:       resourcesFor(application),
 				VolumeMounts:    volumeMounts,
 				SecurityContext: containerSecurityContextFor(application),

@@ -157,7 +157,7 @@ func TestNewManager_UsesDistinctDefaultFromOutputStorageSecret(t *testing.T) {
 	// holds no apiToken (it's the operator's own generated credentials
 	// Secret, not a user-supplied one) — NewManager must not look here.
 	outputSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-storage", Namespace: testNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: testStorageSecretName, Namespace: testNamespace},
 		Data:       map[string][]byte{"access_key": []byte("generated-key")},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(outputSecret).Build()

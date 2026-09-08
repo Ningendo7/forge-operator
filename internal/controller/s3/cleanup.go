@@ -9,6 +9,7 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithy "github.com/aws/smithy-go"
 
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
@@ -29,31 +30,108 @@ func isNotFoundError(err error) bool {
 	return false
 }
 
+// CleanupBucket deletes the bucket and this Application's own IRSA role.
+// irsaErr surfaces a role-cleanup failure to the caller (for an Event,
+// status, or similar) without making it fatal to the rest of cleanup --
+// it's returned separately from err, which is only ever the bucket
+// deletion's own error. Mirrors the identical accessKeyErr/err split on
+// the Akamai package's DeleteBucket, for the same reason.
+//
+// IRSA cleanup deliberately runs before, and independently of, the bucket
+// ownership check below: the role's identity is entirely deterministic
+// (irsaRoleName derives it from this Application's own namespace/name),
+// never ambiguous the way a bucket's ownership can be, so there's nothing
+// to verify before removing it. Confirmed live as a real gap: once a
+// bucket is adopted away from this Application via the adopt-bucket
+// annotation, verifyOwnership will correctly and permanently refuse to
+// touch that bucket for this Application from then on -- which, when IRSA
+// cleanup was gated behind that same check, meant this Application could
+// never clean up its own IAM role again either, leaking it indefinitely
+// even though the role itself was never in dispute.
 func (m *Manager) CleanupBucket(
 	ctx context.Context,
-) error {
+) (irsaErr error, err error) {
 
-	// Handle IRSA cleanup first
-	if err := m.cleanupAppIRSA(ctx); err != nil {
-		return fmt.Errorf("failed to cleanup IRSA: %w", err)
+	if cleanupErr := m.cleanupAppIRSA(ctx); cleanupErr != nil {
+		irsaErr = fmt.Errorf("failed to cleanup IRSA: %w", cleanupErr)
+	}
+
+	// Never delete the bucket on uncertain ownership: confirmed via the
+	// same tag check claimOrVerifyOwnership uses on the create path, but
+	// never claims/writes here. A missing or mismatched tag means this
+	// refuses to touch the bucket at all, surfaced as a failed cleanup for
+	// a human to resolve rather than risk deleting something this
+	// Application doesn't actually own.
+	if err := m.verifyOwnership(ctx); err != nil {
+		return irsaErr, fmt.Errorf("refusing to delete bucket %s: %w", m.bucket, err)
 	}
 
 	// Delete objects in the bucket before deleting the bucket itself
 	if err := m.deleteAllObjectVersions(ctx); err != nil {
-		return fmt.Errorf("failed to delete objects in bucket %s: %w", m.bucket, err)
+		return irsaErr, fmt.Errorf("failed to delete objects in bucket %s: %w", m.bucket, err)
 	}
 
 	// Abort any in-progress multipart uploads so they don't linger after the bucket is gone
 	if err := m.abortMultipartUploads(ctx); err != nil {
-		return fmt.Errorf("failed to abort multipart uploads in bucket %s: %w", m.bucket, err)
+		return irsaErr, fmt.Errorf("failed to abort multipart uploads in bucket %s: %w", m.bucket, err)
 	}
 
 	// Now delete the bucket
 	if err := m.deleteBucket(ctx); err != nil {
-		return fmt.Errorf("failed to delete bucket %s: %w", m.bucket, err)
+		return irsaErr, fmt.Errorf("failed to delete bucket %s: %w", m.bucket, err)
 	}
 
-	return nil
+	return irsaErr, nil
+}
+
+// verifyOwnership re-checks the bucket's ownership tag, reusing exactly
+// noSuchTagSetErrorCode/ownerTagKey/previouslyCreatedByUs/
+// adoptBucketRequested from desireds3.go (same package). A bucket that's
+// already gone entirely (noSuchBucketErrorCode, distinct from
+// noSuchTagSetErrorCode's "exists but untagged") is treated as a
+// successful no-op here -- confirmed live as a real gap otherwise: without
+// this, retrying cleanup on a bucket a previous attempt had already
+// successfully deleted wrongly reported ErrBucketNotOwned for a bucket
+// that was, in fact, correctly cleaned up already.
+func (m *Manager) verifyOwnership(ctx context.Context) error {
+	out, err := m.s3client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{
+		Bucket: aws.String(m.bucket),
+	})
+	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == noSuchBucketErrorCode {
+			// Already gone -- nothing to verify or clean up. Confirmed
+			// live, via this package's own integration test: without this
+			// check, retrying cleanup on a bucket a previous attempt had
+			// already successfully deleted (e.g. after a transient error
+			// removing the finalizer itself, or a controller restart
+			// mid-flight) wrongly reported ErrBucketNotOwned for a bucket
+			// that was in fact correctly cleaned up already, permanently
+			// stuck-failing an Application's deletion for no real reason.
+			return nil
+		}
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == noSuchTagSetErrorCode {
+			if m.previouslyCreatedByUs() || m.adoptBucketRequested() {
+				return nil
+			}
+			return fmt.Errorf("%w: no ownership tag and no durable record of creating or adopting it", ErrBucketNotOwned)
+		}
+		return fmt.Errorf("%w: could not verify ownership tag before deletion: %v", ErrBucketNotOwned, err)
+	}
+
+	for _, tag := range out.TagSet {
+		if aws.ToString(tag.Key) == ownerTagKey {
+			if aws.ToString(tag.Value) == string(m.app.UID) {
+				return nil
+			}
+			return fmt.Errorf("%w: ownership tag names a different Application", ErrBucketNotOwned)
+		}
+	}
+
+	if m.previouslyCreatedByUs() || m.adoptBucketRequested() {
+		return nil
+	}
+	return fmt.Errorf("%w: no ownership tag and no durable record of creating or adopting it", ErrBucketNotOwned)
 }
 
 func (m *Manager) deleteAllObjectVersions(

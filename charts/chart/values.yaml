@@ -176,6 +176,21 @@ metrics:
   # Note: Metrics authn/authz needs ClusterRole access.
   secure: true
 
+  reader:
+    ## The chart already creates a metrics-reader ClusterRole (nonResourceURLs
+    ## /metrics, verb get), but binds it to nobody by default -- something
+    ## still has to be granted that role before it can actually authenticate
+    ## to scrape /metrics when metrics.secure is true. List the ServiceAccount(s)
+    ## that need to read this operator's metrics here, e.g. the Prometheus
+    ## ServiceAccount from a kube-prometheus-stack install:
+    ##   serviceAccountBindings:
+    ##     - name: kube-prometheus-stack-prometheus
+    ##       namespace: monitoring
+    ## Only takes effect when metrics.enabled and metrics.secure are both true
+    ## (same gate as the metrics-reader ClusterRole itself).
+    ##
+    serviceAccountBindings: []
+
 ## Webhook server configuration (Application defaulting + validation).
 ## Requires cert-manager (certManager.enabled below) for TLS, since
 ## MutatingWebhookConfiguration/ValidatingWebhookConfiguration use
@@ -201,6 +216,44 @@ certManager:
 ##
 prometheus:
   enabled: false
+
+  ## Extra labels merged onto the ServiceMonitor/PrometheusRule this chart
+  ## creates. kube-prometheus-stack's Prometheus/Alertmanager CRs default
+  ## their serviceMonitorSelector/ruleSelector to matchLabels:
+  ## {release: <kube-prometheus-stack's own release name>} -- without that
+  ## label here, prometheus.enabled: true alone silently scrapes nothing.
+  ## Example if kube-prometheus-stack was installed as release "monitoring":
+  ##   additionalLabels:
+  ##     release: monitoring
+  ##
+  additionalLabels: {}
+
+  ## A curated set of 8 PrometheusRule alerts covering storage reconcile
+  ## failures/latency, stuck finalizers, access-denied errors, bucket
+  ## ownership adoption (audit), Application readiness, and reconcile
+  ## concurrency/queue saturation. Deliberately its own flag, separate from
+  ## prometheus.enabled above: turning on metrics scraping is harmless,
+  ## turning on a set of alerts that can page someone is a decision worth
+  ## making explicitly. Requires prometheus.enabled: true (the ServiceMonitor)
+  ## for these metrics to actually be scraped in the first place.
+  ##
+  rules:
+    enabled: false
+
+## A Grafana dashboard covering the same ground as the PrometheusRule alerts
+## above (application readiness, storage reconcile/finalizer health,
+## Kubernetes API errors, reconcile saturation), shipped as a ConfigMap
+## labeled grafana_dashboard: "1". kube-prometheus-stack's Grafana runs a
+## sidecar that auto-discovers dashboards carrying that label -- by default
+## it watches every namespace (NAMESPACE=ALL), so this needs no extra wiring
+## on a standard kube-prometheus-stack install. If your Grafana's sidecar is
+## scoped to specific namespaces instead, add this chart's release namespace
+## to it. Requires prometheus.enabled: true for the underlying metrics to
+## exist at all.
+##
+grafana:
+  dashboard:
+    enabled: false
 
 ## Network policies for controlling traffic flow.
 ## Enable to restrict ingress to the controller manager.

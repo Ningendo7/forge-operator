@@ -7,13 +7,20 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	"github.com/Ningendo7/forge-operator/internal/controller/naming"
+	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/linode/linodego"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func notFoundErr() error {
@@ -135,19 +142,35 @@ func TestEnsureBucketExists_PropagatesCreateError(t *testing.T) {
 
 // --- ensureAccessKey ---
 
-func TestEnsureAccessKey_ReusesExistingKey(t *testing.T) {
+func TestEnsureAccessKey_ReusesExistingKeyWithRecoverableSecret(t *testing.T) {
 	createCalled := false
+	deleteCalled := false
 	m := newTestManager(&mockAkamaiClient{
 		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
 			return []linodego.ObjectStorageKey{
-				{Label: testAccessKeyLabel, AccessKey: testExistingAccessKey},
+				{ID: 42, Label: testAccessKeyLabel, AccessKey: testExistingAccessKey},
 			}, nil
 		},
 		createObjectStorageKeyFunc: func(ctx context.Context, opts linodego.ObjectStorageKeyCreateOptions) (*linodego.ObjectStorageKey, error) {
 			createCalled = true
 			return &linodego.ObjectStorageKey{}, nil
 		},
+		deleteObjectStorageKeyFunc: func(ctx context.Context, keyID int) error {
+			deleteCalled = true
+			return nil
+		},
 	})
+
+	// The operator's own previously-written output Secret already has a
+	// recorded secret key from an earlier, fully-successful reconcile --
+	// the common case for any reconcile after the first.
+	storageSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testStorageSecretName, Namespace: testNamespace},
+		Data:       map[string][]byte{testSecretKeyDataKey: []byte("recovered-secret")},
+	}
+	if err := m.k8sClient.Create(context.Background(), storageSecret); err != nil {
+		t.Fatalf("failed to seed storage Secret: %v", err)
+	}
 
 	result, err := m.ensureAccessKey(context.Background())
 	if err != nil {
@@ -156,11 +179,65 @@ func TestEnsureAccessKey_ReusesExistingKey(t *testing.T) {
 	if result.AccessKey != testExistingAccessKey {
 		t.Errorf("expected existing access key to be reused, got %q", result.AccessKey)
 	}
-	if result.SecretKey != "" {
-		t.Errorf("expected empty secret key when reusing existing key, got %q", result.SecretKey)
+	if result.SecretKey != "recovered-secret" {
+		t.Errorf("expected the secret recovered from the output Secret, got %q", result.SecretKey)
 	}
 	if createCalled {
-		t.Fatalf("expected CreateObjectStorageKey not to be called when key already exists")
+		t.Fatalf("expected CreateObjectStorageKey not to be called when the secret was recoverable")
+	}
+	if deleteCalled {
+		t.Fatalf("expected DeleteObjectStorageKey not to be called when the secret was recoverable")
+	}
+}
+
+func TestEnsureAccessKey_ReplacesKeyWhenSecretUnrecoverable(t *testing.T) {
+	deletedKeyID := -1
+	m := newTestManager(&mockAkamaiClient{
+		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
+			return []linodego.ObjectStorageKey{
+				{ID: 42, Label: testAccessKeyLabel, AccessKey: testExistingAccessKey},
+			}, nil
+		},
+		deleteObjectStorageKeyFunc: func(ctx context.Context, keyID int) error {
+			deletedKeyID = keyID
+			return nil
+		},
+		createObjectStorageKeyFunc: func(ctx context.Context, opts linodego.ObjectStorageKeyCreateOptions) (*linodego.ObjectStorageKey, error) {
+			return &linodego.ObjectStorageKey{AccessKey: testNewAccessKey, SecretKey: testNewSecretKey}, nil
+		},
+	})
+	// Deliberately no output Secret seeded -- an earlier reconcile created
+	// this key but must have failed before ever reaching the step that
+	// writes it, so there's no way to recover the real secret. Nothing can
+	// be depending on these credentials since they were never exposed
+	// anywhere, so replacing the key outright is the correct, safe move.
+
+	result, err := m.ensureAccessKey(context.Background())
+	if err != nil {
+		t.Fatalf("ensureAccessKey returned error: %v", err)
+	}
+	if deletedKeyID != 42 {
+		t.Fatalf("expected the unusable key (ID 42) to be deleted, got deletedKeyID=%d", deletedKeyID)
+	}
+	if result.AccessKey != testNewAccessKey || result.SecretKey != testNewSecretKey {
+		t.Errorf("expected the newly created key's credentials to be returned, got %#v", result)
+	}
+}
+
+func TestEnsureAccessKey_PropagatesDeleteErrorWhenSecretUnrecoverable(t *testing.T) {
+	m := newTestManager(&mockAkamaiClient{
+		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
+			return []linodego.ObjectStorageKey{
+				{ID: 42, Label: testAccessKeyLabel, AccessKey: testExistingAccessKey},
+			}, nil
+		},
+		deleteObjectStorageKeyFunc: func(ctx context.Context, keyID int) error {
+			return errors.New("delete failed")
+		},
+	})
+
+	if _, err := m.ensureAccessKey(context.Background()); err == nil {
+		t.Fatalf("expected error from ensureAccessKey when deleting the unusable key fails, got nil")
 	}
 }
 
@@ -186,7 +263,7 @@ func TestEnsureAccessKey_CreatesNewKeyWhenNoneExists(t *testing.T) {
 			if access.Permissions != "read_write" {
 				t.Errorf("expected read_write permissions, got %q", access.Permissions)
 			}
-			return &linodego.ObjectStorageKey{AccessKey: "new-access-key", SecretKey: "new-secret-key"}, nil
+			return &linodego.ObjectStorageKey{AccessKey: testNewAccessKey, SecretKey: testNewSecretKey}, nil
 		},
 	})
 
@@ -194,7 +271,7 @@ func TestEnsureAccessKey_CreatesNewKeyWhenNoneExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureAccessKey returned error: %v", err)
 	}
-	if result.AccessKey != "new-access-key" || result.SecretKey != "new-secret-key" {
+	if result.AccessKey != testNewAccessKey || result.SecretKey != testNewSecretKey {
 		t.Errorf("expected new key credentials to be returned, got %#v", result)
 	}
 }
@@ -280,9 +357,21 @@ func TestReconcileBucket_HappyPath(t *testing.T) {
 			return &linodego.ObjectStorageBucket{Label: bucket}, nil
 		},
 		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
-			return []linodego.ObjectStorageKey{{Label: testAccessKeyLabel, AccessKey: testExistingAccessKey}}, nil
+			return []linodego.ObjectStorageKey{{ID: 42, Label: testAccessKeyLabel, AccessKey: testExistingAccessKey}}, nil
 		},
 	})
+	// The bucket and marker already existing and matching implies an
+	// earlier reconcile already succeeded end-to-end, which would also have
+	// already written the output Secret -- seeded here so ensureAccessKey's
+	// reuse path can recover a real secret, same as a real established
+	// Application would see.
+	storageSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: testStorageSecretName, Namespace: testNamespace},
+		Data:       map[string][]byte{testSecretKeyDataKey: []byte("recovered-secret")},
+	}
+	if err := m.k8sClient.Create(context.Background(), storageSecret); err != nil {
+		t.Fatalf("failed to seed storage Secret: %v", err)
+	}
 
 	result, err := m.ReconcileBucket(context.Background())
 	if err != nil {
@@ -315,13 +404,20 @@ func TestClaimOrVerifyOwnership_ClaimsMissingMarkerWhenPreviouslyCreatedByUs(t *
 	})
 
 	m := newTestManager(nil)
-	m.app.Status.Storage = &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true}
+	m.app.Status.Storage = &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true, CreatedAt: metav1.Now()}
+
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
 
 	if err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk"); err != nil {
 		t.Fatalf("claimOrVerifyOwnership returned error: %v", err)
 	}
 	if !claimed {
 		t.Fatalf("expected a missing marker to be claimed when previously created by us")
+	}
+	// This is recovery, not adoption -- previouslyCreatedByUs alone must
+	// never be counted as taking over someone else's bucket.
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAkamaiObjectStorage))); got != 0 {
+		t.Fatalf("expected StorageBucketAdoptedTotal to stay 0 for a previouslyCreatedByUs recovery, got %v", got)
 	}
 }
 
@@ -341,11 +437,16 @@ func TestClaimOrVerifyOwnership_ClaimsMissingMarkerWhenAdoptAnnotationSet(t *tes
 	// No Status.Storage seeded -- only the explicit human opt-in this time.
 	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
 
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
 	if err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk"); err != nil {
 		t.Fatalf("claimOrVerifyOwnership returned error: %v", err)
 	}
 	if !claimed {
 		t.Fatalf("expected a missing marker to be claimed when adopt annotation is set")
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAkamaiObjectStorage))); got != 1 {
+		t.Fatalf("expected StorageBucketAdoptedTotal to be 1 after an actual adoption, got %v", got)
 	}
 }
 
@@ -385,18 +486,33 @@ func TestRecordBucketCreated_PersistsCreatedFlagToStatus(t *testing.T) {
 	if got.Status.Storage.Bucket != testBucket {
 		t.Fatalf("expected Status.Storage.Bucket to be %q, got %q", testBucket, got.Status.Storage.Bucket)
 	}
+	if got.Status.Storage.CreatedAt.IsZero() {
+		t.Fatalf("expected Status.Storage.CreatedAt to be persisted non-zero")
+	}
 }
 
 func TestPreviouslyCreatedByUs(t *testing.T) {
+	now := metav1.Now()
+	stale := metav1.NewTime(time.Now().Add(-2 * bucketCreationClaimWindow))
+
 	tests := []struct {
 		name    string
 		storage *forgev1alpha1.StorageStatus
 		want    bool
 	}{
 		{name: "nil status", storage: nil, want: false},
-		{name: "matching bucket, created true", storage: &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true}, want: true},
-		{name: "matching bucket, created false", storage: &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: false}, want: false},
-		{name: "different bucket, created true", storage: &forgev1alpha1.StorageStatus{Bucket: "some-other-bucket", Created: true}, want: false},
+		{name: "matching bucket, created true, fresh", storage: &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true, CreatedAt: now}, want: true},
+		{name: "matching bucket, created false", storage: &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: false, CreatedAt: now}, want: false},
+		{name: "different bucket, created true, fresh", storage: &forgev1alpha1.StorageStatus{Bucket: "some-other-bucket", Created: true, CreatedAt: now}, want: false},
+		{
+			name: "matching bucket, created true, but past the claim window",
+			// The exact scenario bucketCreationClaimWindow exists to close:
+			// Created/Bucket alone would still say "ours" here even though
+			// this record is old enough that the name could plausibly have
+			// been released and reused by something else entirely since.
+			storage: &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true, CreatedAt: stale},
+			want:    false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -465,6 +581,8 @@ func TestClaimOrVerifyOwnership_AdoptsMismatchedMarkerWhenAnnotationSet(t *testi
 	m := newTestManager(nil)
 	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
 
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
 	// A marker naming a *different* Application must still be adoptable
 	// via the explicit annotation -- this is the deliberate human-in-the-
 	// loop override, distinct from (and not gated by) previouslyCreatedByUs,
@@ -474,6 +592,57 @@ func TestClaimOrVerifyOwnership_AdoptsMismatchedMarkerWhenAnnotationSet(t *testi
 	}
 	if !claimed {
 		t.Fatalf("expected a mismatched marker to be overwritten when the adopt annotation is set")
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAkamaiObjectStorage))); got != 1 {
+		t.Fatalf("expected StorageBucketAdoptedTotal to be 1 after an actual adoption, got %v", got)
+	}
+}
+
+func TestClaimOrVerifyOwnership_RefusesToAdoptWhenPreviousOwnerStillExists(t *testing.T) {
+	putCalled := false
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(string(testOtherUID)))}, nil
+		},
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			putCalled = true
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+
+	app := newTestApp()
+	app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
+	// The Application actually named by the marker's UID is still very
+	// much alive -- adopt-bucket must not be able to take its bucket away
+	// from it just because the annotation is set.
+	stillAliveOwner := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "still-alive-owner", Namespace: testNamespace, UID: testOtherUID},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app, stillAliveOwner).WithStatusSubresource(app).Build()
+
+	m := &Manager{
+		k8sClient: fakeClient,
+		app:       app,
+		storage:   &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testRegion},
+		bucket:    testBucket,
+		region:    testRegion,
+	}
+
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
+	err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk")
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned when the previous owner still exists, got %v", err)
+	}
+	if putCalled {
+		t.Fatalf("expected the marker to be left untouched when the previous owner still exists")
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAkamaiObjectStorage))); got != 0 {
+		t.Fatalf("expected no adoption to be recorded, got %v", got)
 	}
 }
 
@@ -545,17 +714,44 @@ func TestReconcileBucket_ShortCircuitsOnNotOwnedBucket(t *testing.T) {
 		},
 	})
 
+	// Stateful, mirroring the real API: findAccessKeyIDByLabel must see the
+	// newly-created key (43), not the stale one ensureAccessKey already
+	// deleted (42), or this test can't tell "leaked the pre-existing key
+	// again" apart from "correctly cleaned up the new one".
+	currentKeyID := 42
+	var deletedKeyIDs []int
 	m := newTestManager(&mockAkamaiClient{
 		getObjectStorageBucketFunc: func(ctx context.Context, clusterID, bucket string) (*linodego.ObjectStorageBucket, error) {
 			return &linodego.ObjectStorageBucket{Label: bucket}, nil
 		},
 		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
-			return []linodego.ObjectStorageKey{{Label: testAccessKeyLabel, AccessKey: testExistingAccessKey}}, nil
+			return []linodego.ObjectStorageKey{{ID: currentKeyID, Label: testAccessKeyLabel, AccessKey: testExistingAccessKey}}, nil
+		},
+		// No output Secret is seeded (irrelevant to what this test actually
+		// checks), so ensureAccessKey takes its delete-and-recreate path --
+		// this no-op is just there to satisfy that, not to assert anything
+		// about it.
+		deleteObjectStorageKeyFunc: func(ctx context.Context, keyID int) error {
+			deletedKeyIDs = append(deletedKeyIDs, keyID)
+			return nil
+		},
+		createObjectStorageKeyFunc: func(ctx context.Context, opts linodego.ObjectStorageKeyCreateOptions) (*linodego.ObjectStorageKey, error) {
+			currentKeyID = 43
+			return &linodego.ObjectStorageKey{ID: currentKeyID, AccessKey: testExistingAccessKey}, nil
 		},
 	})
 
 	_, err := m.ReconcileBucket(context.Background())
 	if !errors.Is(err, ErrBucketNotOwned) {
 		t.Fatalf("expected ErrBucketNotOwned from ReconcileBucket, got %v", err)
+	}
+	// ensureAccessKey necessarily runs before ownership can even be
+	// checked -- confirmed live, via this same package's integration
+	// tests, that the access key it creates was silently leaked whenever
+	// ownership then turned out to fail. Expect both deletions: 42 (the
+	// stale key ensureAccessKey replaced on its way in) and 43 (the fresh
+	// key that replaced it, now cleaned up since ownership failed).
+	if len(deletedKeyIDs) != 2 || deletedKeyIDs[0] != 42 || deletedKeyIDs[1] != 43 {
+		t.Fatalf("expected DeleteObjectStorageKey(42) then DeleteObjectStorageKey(43), got %v", deletedKeyIDs)
 	}
 }

@@ -17,18 +17,25 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -37,6 +44,7 @@ import (
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	"github.com/Ningendo7/forge-operator/internal/controller"
+	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
 	webhookv1alpha1 "github.com/Ningendo7/forge-operator/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
@@ -159,6 +167,27 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	// secretCacheSelector restricts the manager's informer cache for Secrets to
+	// only the ones this operator itself creates and labels (see
+	// controller.SecretRoleLabel) -- not every Secret in the cluster. Without
+	// this, Owns(&corev1.Secret{}) in ApplicationReconciler.SetupWithManager
+	// makes the cache watch and hold a live copy of every Secret in every
+	// namespace, cluster-wide, in this pod's memory, regardless of whether the
+	// operator has any relationship to it -- a much bigger blast radius in
+	// practice than the RBAC grant on paper (RBAC still permits cluster-wide
+	// secret access; narrowing that is a separate, larger decision). Reads of
+	// arbitrary user-supplied credentials Secrets (spec.storage.secretName,
+	// spec.storage.akamai.accessKeySecretRef) still work: they're exempted
+	// from the cache entirely below (Client.Cache.DisableFor), so they go
+	// straight to the API server rather than being filtered out by this
+	// selector.
+	secretRoleExists, err := labels.NewRequirement(controller.SecretRoleLabel, selection.Exists, nil)
+	if err != nil {
+		setupLog.Error(err, "Failed to build Secret cache label selector")
+		os.Exit(1)
+	}
+	secretCacheSelector := labels.NewSelector().Add(*secretRoleExists)
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -166,6 +195,22 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "9429151e.ningendo7.github.io",
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Secret{}: {Label: secretCacheSelector},
+			},
+		},
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				// Belt-and-suspenders alongside the selector above: any
+				// Secret read/list this operator issues goes straight to
+				// the API server, live, rather than through the
+				// (already label-scoped) cache -- covers reads of Secrets
+				// this operator doesn't own or label at all, like
+				// spec.storage.secretName.
+				DisableFor: []client.Object{&corev1.Secret{}},
+			},
+		},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
@@ -181,6 +226,36 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)
+	}
+
+	ctx := ctrl.SetupSignalHandler()
+
+	// Tracing is opt-in: only initialized if OTEL_EXPORTER_OTLP_ENDPOINT is
+	// actually set, so a deployment with nothing running to receive traces
+	// (e.g. no Jaeger) makes zero network attempts and pays zero cost --
+	// every span created via forgemetrics.Tracer().Start elsewhere in this
+	// operator is a documented no-op until this runs.
+	if endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); endpoint != "" {
+		shutdownTracing, err := forgemetrics.Init(ctx)
+		if err != nil {
+			setupLog.Error(err, "Failed to initialize OpenTelemetry tracing")
+			os.Exit(1)
+		}
+		defer func() {
+			// A fresh, short-lived context, deliberately not ctx -- ctx is
+			// already cancelled by the time this runs (mgr.Start returned
+			// because the signal handler fired), but the shutdown flush
+			// still needs its own brief window to actually send whatever
+			// spans were buffered.
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdownTracing(shutdownCtx); err != nil {
+				setupLog.Error(err, "Failed to shut down OpenTelemetry tracing cleanly")
+			}
+		}()
+		setupLog.Info("OpenTelemetry tracing enabled", "endpoint", endpoint)
+	} else {
+		setupLog.Info("OpenTelemetry tracing disabled (OTEL_EXPORTER_OTLP_ENDPOINT not set)")
 	}
 
 	oidcProviderARN := os.Getenv("OIDC_PROVIDER_ARN")
@@ -217,7 +292,7 @@ func main() {
 	}
 
 	setupLog.Info("Starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}

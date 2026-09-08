@@ -3,11 +3,15 @@
 package naming
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // AdoptBucketAnnotation, when set to "true" on an Application, tells the
@@ -24,6 +28,53 @@ const AdoptBucketAnnotation = "forge-operator.ningendo7.github.io/adopt-bucket"
 // to for it to take effect (kept alongside the key so both packages read it
 // from one shared source, matching AdoptBucketAnnotation's own reasoning).
 const AdoptBucketAnnotationValue = "true"
+
+// ApplicationExistsWithUID reports whether any Application in the cluster
+// currently has the given UID. AdoptBucketAnnotation's whole premise is
+// taking over a bucket left behind by an Application that's genuinely
+// gone (most commonly one retained via spec.storage.deletionPolicy:
+// Retain) -- but the ownership tag/marker it's overwriting only ever
+// stores a bare UID, with no namespace/name to check directly, and
+// Kubernetes has no "get by UID" lookup. Listing every Application and
+// scanning for a match is the only way to answer "is the previous owner
+// actually gone" rather than just assuming it because the annotation was
+// set, which is what let a live, still-in-use bucket be silently taken
+// over from its still-running owner before this existed.
+//
+// Deliberately checks existence, not readiness: an Application mid
+// transient failure (a flaky dependency, a brief misconfiguration --
+// anything recoverable) must not become adoptable by anyone with the
+// annotation just because it's temporarily not Ready. Only a Kubernetes
+// object that's actually gone from the API server counts as "gone" here.
+//
+// Requires cluster-wide list/watch on Applications -- already granted
+// unconditionally in this chart's default (ClusterRole) RBAC mode, since
+// any cluster-scoped operator needs it to reconcile every Application in
+// every namespace regardless of this function. If this chart is instead
+// deployed with rbac.namespaced: true (a Role, not a ClusterRole), this
+// List call will only ever see Applications in the operator's own
+// namespace, or fail outright with Forbidden -- callers MUST treat any
+// non-nil error here as "cannot confirm the previous owner is gone" and
+// refuse the adoption, not as "must be gone since we couldn't find it".
+// Silently permitting a live takeover under reduced RBAC would be far
+// worse than adopt-bucket simply not working there.
+func ApplicationExistsWithUID(ctx context.Context, c client.Client, uid types.UID) (bool, error) {
+	if uid == "" {
+		return false, nil
+	}
+
+	var list forgev1alpha1.ApplicationList
+	if err := c.List(ctx, &list); err != nil {
+		return false, fmt.Errorf("failed to list Applications while checking for UID %s: %w", uid, err)
+	}
+
+	for i := range list.Items {
+		if list.Items[i].UID == uid {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 // Service returns the name of the Application's Service.
 func Service(application *forgev1alpha1.Application) string {
@@ -48,6 +99,27 @@ func HPA(application *forgev1alpha1.Application) string {
 // PDB returns the name of the Application's PodDisruptionBudget.
 func PDB(application *forgev1alpha1.Application) string {
 	return application.Name + "-pdb"
+}
+
+// AppConfigMap returns the name of the operator-managed ConfigMap, honoring
+// spec.config.name when set. Exported (rather than kept private to the
+// configmap reconciler) so the webhook can compute the same name a removed
+// spec.config would have used, to detect spec.container.configMapName still
+// dangling a reference to it.
+func AppConfigMap(application *forgev1alpha1.Application) string {
+	if application.Spec.ConfigMap != nil && application.Spec.ConfigMap.Name != "" {
+		return application.Spec.ConfigMap.Name
+	}
+	return application.Name + "-config"
+}
+
+// AppSecret returns the name of the operator-managed app Secret, honoring
+// spec.secret.name when set. Exported for the same reason as AppConfigMap.
+func AppSecret(application *forgev1alpha1.Application) string {
+	if application.Spec.Secret != nil && application.Spec.Secret.Name != "" {
+		return application.Spec.Secret.Name
+	}
+	return application.Name + "-secret"
 }
 
 // StorageSecret returns the name of the operator-managed Secret that holds

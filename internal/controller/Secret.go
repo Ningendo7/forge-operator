@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
@@ -16,30 +17,23 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// secretRoleLabel distinguishes the app-managed Secret from the storage credentials
+// SecretRoleLabel distinguishes the app-managed Secret from the storage credentials
 // Secret, since both carry the same "app" label and would otherwise be indistinguishable
-// when cleaning up stale/renamed resources.
-const secretRoleLabel = "forge.ningendo7.github.io/secret-role"
+// when cleaning up stale/renamed resources. Exported so cmd/main.go can scope the
+// manager's Secret cache to exactly the Secrets that carry it -- see the Cache/Client
+// options built around it there.
+const SecretRoleLabel = "forge.ningendo7.github.io/secret-role"
 
 const (
 	secretRoleApp     = "app"
 	secretRoleStorage = "storage"
 )
 
-// secretResourceNameFor names the operator-managed Secret from spec.secret.name,
-// independent of Container.SecretName which only drives what gets mounted.
-func secretResourceNameFor(application *forgev1alpha1.Application) string {
-	if application.Spec.Secret != nil && application.Spec.Secret.Name != "" {
-		return application.Spec.Secret.Name
-	}
-	return application.Name + "-secret"
-}
-
 func (r *ApplicationReconciler) desiredSecret(
 	application *forgev1alpha1.Application,
 ) *corev1.Secret {
 
-	labels := map[string]string{appLabelKey: application.Name, secretRoleLabel: secretRoleApp}
+	labels := map[string]string{appLabelKey: application.Name, SecretRoleLabel: secretRoleApp}
 	secretType := corev1.SecretTypeOpaque
 	var secretData map[string]string
 
@@ -56,7 +50,7 @@ func (r *ApplicationReconciler) desiredSecret(
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretResourceNameFor(application),
+			Name:      naming.AppSecret(application),
 			Namespace: application.Namespace,
 			Labels:    labels,
 		},
@@ -103,6 +97,24 @@ func (r *ApplicationReconciler) desiredStorage(
 		}
 
 		secretData["endpoint"] = akamaiCreds.Endpoint
+		// "endpoint" above is deliberately a bare hostname (see
+		// resolveEndpoint's own doc comment) -- kept as-is for backward
+		// compatibility with anything already reading it, and it's
+		// deliberately still the bucket-prefixed hostname
+		// (bucket.cluster.linodeobjects.com) resolveEndpoint returns.
+		// endpoint_url is different on purpose: this operator's own S3
+		// client (s3ClientFor in the Akamai package) strips that same
+		// bucket prefix back off before connecting, using path-style
+		// addressing (BaseEndpoint = bare cluster host, bucket passed
+		// explicitly in each request) rather than virtual-hosted-style --
+		// the standard, documented way to talk to Akamai/most
+		// S3-compatible providers. Handing a real SDK the bucket-prefixed
+		// host as its endpoint would double up the bucket reference the
+		// moment it also passes a Bucket parameter (which every normal
+		// S3 SDK call does), so this strips the same prefix the same way
+		// before adding the scheme AWS_ENDPOINT_URL requires.
+		endpointHost := strings.TrimPrefix(akamaiCreds.Endpoint, application.Spec.Storage.Bucket+".")
+		secretData["endpoint_url"] = "https://" + endpointHost
 	}
 
 	return &corev1.Secret{
@@ -113,7 +125,7 @@ func (r *ApplicationReconciler) desiredStorage(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: application.Namespace,
-			Labels:    map[string]string{appLabelKey: application.Name, secretRoleLabel: secretRoleStorage},
+			Labels:    map[string]string{appLabelKey: application.Name, SecretRoleLabel: secretRoleStorage},
 		},
 		Type:       corev1.SecretTypeOpaque,
 		StringData: secretData,
@@ -131,7 +143,7 @@ func (r *ApplicationReconciler) deleteStaleSecrets(
 	logger := logf.FromContext(ctx)
 
 	var list corev1.SecretList
-	if err := r.List(ctx, &list, client.InNamespace(application.Namespace), client.MatchingLabels{appLabelKey: application.Name, secretRoleLabel: role}); err != nil {
+	if err := r.List(ctx, &list, client.InNamespace(application.Namespace), client.MatchingLabels{appLabelKey: application.Name, SecretRoleLabel: role}); err != nil {
 		return fmt.Errorf("failed to list Secrets for cleanup: %w", err)
 	}
 

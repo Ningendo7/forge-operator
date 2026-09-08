@@ -18,6 +18,8 @@ It manages the lifecycle of application workloads, core Kubernetes resources, an
 
 `spec.storage` is optional — omit it entirely for an `Application` with no object storage need at all.
 
+On AWS, the workload gets read/write access to its own bucket transparently via IRSA — no credentials ever touch a Secret your `Application` can see. On Akamai, there's no IRSA equivalent, so that access is opt-in: set `spec.storage.akamai.injectCredentials: true` to have the operator inject `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_ENDPOINT_URL`/`AWS_REGION`/`FORGE_STORAGE_BUCKET` env vars (sourced from the operator's own generated Secret) into the workload's containers, so any S3-compatible client — the AWS SDK, `aws-cli`, `mc`, etc. — just works against the bucket. Defaults to `false`. See [Authentication & Storage](docs/authentication-and-storage.md) for details.
+
 ## Quickstart
 
 The chart enables the Application admission webhooks and cert-manager-issued TLS by default, so **[cert-manager](https://cert-manager.io/docs/installation/) must already be installed in the cluster** before you install this chart — otherwise the install will fail (it creates `Certificate`/`Issuer` custom resources that don't exist without cert-manager's CRDs). If you don't want that, pass `--set certManager.enabled=false --set webhook.enabled=false`; see [Webhooks](docs/architecture.md#webhooks) for what you lose by doing that.
@@ -56,8 +58,9 @@ See [Installation and Configuration](docs/installation-and-configuration.md) for
 ## Documentation
 
 - **[Architecture](docs/architecture.md)** — reconciliation flow, the Application API, replica/autoscaling handoff, admission webhooks, repository layout
-- **[Authentication & Storage](docs/authentication-and-storage.md)** — AWS IRSA and Akamai credential flows, bucket ownership verification, drift detection, deletion/cleanup behavior
+- **[Authentication & Storage](docs/authentication-and-storage.md)** — AWS IRSA and Akamai credential flows, workload credential injection, bucket ownership verification, drift detection, deletion/cleanup behavior
 - **[Installation & Configuration](docs/installation-and-configuration.md)** — Helm/Kustomize install, every Helm value and controller env var, Terraform infrastructure
+- **[Observability](docs/observability.md)** — Prometheus metrics/alerts, Grafana dashboard, OpenTelemetry tracing
 - **[Development & Operations](docs/development-and-operations.md)** — local dev commands, e2e test coverage, security notes, current limitations
 
 ## License

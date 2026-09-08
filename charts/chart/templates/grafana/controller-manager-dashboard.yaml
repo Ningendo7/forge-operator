@@ -1,0 +1,136 @@
+{{- if .Values.grafana.dashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: {{ include "forge-operator.name" . }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    grafana_dashboard: "1"
+  name: {{ include "forge-operator.resourceName" (dict "suffix" "controller-manager-dashboard" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+data:
+  forge-operator.json: |
+    {
+      "uid": "forge-operator",
+      "title": "forge-operator",
+      "tags": ["forge-operator"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "refresh": "30s",
+      "time": { "from": "now-6h", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "query": "label_values(forge_application_ready, exported_namespace)",
+            "multi": true,
+            "includeAll": true,
+            "current": { "text": "All", "value": "$__all" },
+            "refresh": 2
+          },
+          {
+            "name": "application",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "query": "label_values(forge_application_ready{exported_namespace=~\"$namespace\"}, name)",
+            "multi": true,
+            "includeAll": true,
+            "current": { "text": "All", "value": "$__all" },
+            "refresh": 2
+          }
+        ]
+      },
+      "panels": [
+        { "id": 1, "type": "row", "title": "Application", "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 } },
+        {
+          "id": 2, "type": "table", "title": "Application Ready",
+          "description": "1 = Ready. exported_namespace/name are this metric's own labels -- \"namespace\"/\"pod\" on this series describe the operator's own pod, not the Application.",
+          "gridPos": { "x": 0, "y": 1, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "forge_application_ready{exported_namespace=~\"$namespace\", name=~\"$application\"}", "format": "table", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 3, "type": "timeseries", "title": "Applications Not Ready",
+          "gridPos": { "x": 12, "y": 1, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "count(forge_application_ready{exported_namespace=~\"$namespace\", name=~\"$application\"} == 0) or vector(0)", "legendFormat": "not ready", "refId": "A" } ]
+        },
+
+        { "id": 10, "type": "row", "title": "Storage", "gridPos": { "x": 0, "y": 9, "w": 24, "h": 1 } },
+        {
+          "id": 11, "type": "table", "title": "Storage Ready",
+          "gridPos": { "x": 0, "y": 10, "w": 8, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "forge_storage_ready{exported_namespace=~\"$namespace\", name=~\"$application\"}", "format": "table", "instant": true, "refId": "A" } ]
+        },
+        {
+          "id": 12, "type": "timeseries", "title": "Storage Reconcile Rate by Outcome",
+          "description": "outcome=ready is healthy; anything else (not_owned/timeout/access_denied/other_error) is worth investigating.",
+          "gridPos": { "x": 8, "y": 10, "w": 8, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (provider, outcome) (rate(forge_storage_reconcile_total[5m]))", "legendFormat": "{{ "{{" }}provider{{ "}}" }} / {{ "{{" }}outcome{{ "}}" }}", "refId": "A" } ]
+        },
+        {
+          "id": 13, "type": "timeseries", "title": "Storage Reconcile Duration (p95)",
+          "description": "Approaching storageReconcileTimeout (90s) is an early warning before reconciles start timing out.",
+          "gridPos": { "x": 16, "y": 10, "w": 8, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.95, sum by (provider, le) (rate(forge_storage_reconcile_duration_seconds_bucket[5m])))", "legendFormat": "{{ "{{" }}provider{{ "}}" }}", "refId": "A" } ],
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+        },
+        {
+          "id": 14, "type": "stat", "title": "Bucket Adoptions (lifetime)",
+          "description": "Ownership taken over via the adopt-bucket annotation, total since this counter was last reset. Rare and deliberate -- confirm any nonzero value was intentional. Deliberately not increase()-windowed: an infrequent, one-off counter like this can sit at exactly one sample for a long time, and increase() needs at least two samples of a series to compute anything, so it reads 0 immediately after the first-ever adoption until a second scrape lands.",
+          "gridPos": { "x": 0, "y": 18, "w": 6, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(forge_storage_bucket_adopted_total) or vector(0)", "refId": "A" } ]
+        },
+
+        { "id": 20, "type": "row", "title": "Finalizer Cleanup", "gridPos": { "x": 0, "y": 22, "w": 24, "h": 1 } },
+        {
+          "id": 21, "type": "timeseries", "title": "Finalizer Cleanup Rate by Outcome",
+          "gridPos": { "x": 0, "y": 23, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (provider, outcome) (rate(forge_finalizer_cleanup_total[15m]))", "legendFormat": "{{ "{{" }}provider{{ "}}" }} / {{ "{{" }}outcome{{ "}}" }}", "refId": "A" } ]
+        },
+        {
+          "id": 22, "type": "timeseries", "title": "Finalizer Cleanup Duration (p95)",
+          "description": "finalizerCleanupTimeout is 5m -- a stuck finalizer blocks that Application's deletion until resolved manually.",
+          "gridPos": { "x": 12, "y": 23, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.95, sum by (provider, le) (rate(forge_finalizer_cleanup_duration_seconds_bucket[15m])))", "legendFormat": "{{ "{{" }}provider{{ "}}" }}", "refId": "A" } ],
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+        },
+
+        { "id": 30, "type": "row", "title": "Kubernetes API & Saturation", "gridPos": { "x": 0, "y": 31, "w": 24, "h": 1 } },
+        {
+          "id": 31, "type": "timeseries", "title": "Kubernetes API Errors/Throttling",
+          "gridPos": { "x": 0, "y": 32, "w": 8, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (code, method) (rate(rest_client_requests_total{code=~\"5..|429\"}[5m]))", "legendFormat": "{{ "{{" }}code{{ "}}" }} {{ "{{" }}method{{ "}}" }}", "refId": "A" } ]
+        },
+        {
+          "id": 32, "type": "timeseries", "title": "Reconcile Concurrency",
+          "description": "active_workers reaching max_concurrent_reconciles for a sustained period means it's worth raising MaxConcurrentReconciles.",
+          "gridPos": { "x": 8, "y": 32, "w": 8, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "controller_runtime_active_workers{controller=\"application\"}", "legendFormat": "active workers", "refId": "A" },
+            { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "controller_runtime_max_concurrent_reconciles{controller=\"application\"}", "legendFormat": "max concurrent", "refId": "B" }
+          ]
+        },
+        {
+          "id": 33, "type": "timeseries", "title": "Workqueue Wait Time (p95)",
+          "description": "A leading indicator of saturation before Reconcile Concurrency maxes out.",
+          "gridPos": { "x": 16, "y": 32, "w": 8, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [ { "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(workqueue_queue_duration_seconds_bucket{controller=\"application\"}[5m])))", "refId": "A" } ],
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+        }
+      ]
+    }
+{{- end }}

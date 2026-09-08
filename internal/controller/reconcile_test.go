@@ -6,7 +6,9 @@ import (
 	"time"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
@@ -60,6 +62,8 @@ func TestReconcile_SetsFailedStatusWhenEnsureDesiredStateFails(t *testing.T) {
 		StatusManager: statusmanager.NewStatusManager(fakeClient),
 	}
 
+	forgemetrics.ApplicationReady.Reset()
+
 	_, err := r.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: client.ObjectKey{Name: testAppName, Namespace: testNamespace},
 	})
@@ -76,6 +80,9 @@ func TestReconcile_SetsFailedStatusWhenEnsureDesiredStateFails(t *testing.T) {
 	if degraded == nil || degraded.Status != "True" {
 		t.Fatalf("expected Degraded=True after ensureDesiredState failure, got %#v", degraded)
 	}
+	if got := testutil.ToFloat64(forgemetrics.ApplicationReady.WithLabelValues(testNamespace, testAppName)); got != 0 {
+		t.Fatalf("expected ApplicationReady gauge to be 0, got %v", got)
+	}
 }
 
 func TestReconcile_RequeuesWhenComputeNotYetReady(t *testing.T) {
@@ -87,6 +94,8 @@ func TestReconcile_RequeuesWhenComputeNotYetReady(t *testing.T) {
 		Scheme:        scheme,
 		StatusManager: statusmanager.NewStatusManager(fakeClient),
 	}
+
+	forgemetrics.ApplicationReady.Reset()
 
 	result, err := r.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: client.ObjectKey{Name: testAppName, Namespace: testNamespace},
@@ -110,6 +119,9 @@ func TestReconcile_RequeuesWhenComputeNotYetReady(t *testing.T) {
 	dep := &appsv1.Deployment{}
 	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testDeploymentName, Namespace: testNamespace}, dep); err != nil {
 		t.Fatalf("expected Deployment to have been created by ensureDesiredState: %v", err)
+	}
+	if got := testutil.ToFloat64(forgemetrics.ApplicationReady.WithLabelValues(testNamespace, testAppName)); got != 0 {
+		t.Fatalf("expected ApplicationReady gauge to be 0 while not ready, got %v", got)
 	}
 }
 
@@ -142,6 +154,8 @@ func TestReconcile_SetsReadyWhenComputeIsHealthy(t *testing.T) {
 		t.Fatalf("failed to update Deployment status: %v", err)
 	}
 
+	forgemetrics.ApplicationReady.Reset()
+
 	result, err := r.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: client.ObjectKey{Name: testAppName, Namespace: testNamespace},
 	})
@@ -160,6 +174,9 @@ func TestReconcile_SetsReadyWhenComputeIsHealthy(t *testing.T) {
 	if ready == nil || ready.Status != "True" {
 		t.Fatalf("expected Ready=True once compute is healthy, got %#v", ready)
 	}
+	if got := testutil.ToFloat64(forgemetrics.ApplicationReady.WithLabelValues(testNamespace, testAppName)); got != 1 {
+		t.Fatalf("expected ApplicationReady gauge to be 1 once compute is healthy, got %v", got)
+	}
 }
 
 func TestReconcile_ReturnsEarlyWhenDeleting(t *testing.T) {
@@ -177,6 +194,9 @@ func TestReconcile_ReturnsEarlyWhenDeleting(t *testing.T) {
 		t.Fatalf("failed to delete application: %v", err)
 	}
 
+	forgemetrics.ApplicationReady.Reset()
+	forgemetrics.ApplicationReady.WithLabelValues(testNamespace, testAppName).Set(1)
+
 	result, err := r.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: client.ObjectKey{Name: testAppName, Namespace: testNamespace},
 	})
@@ -190,6 +210,12 @@ func TestReconcile_ReturnsEarlyWhenDeleting(t *testing.T) {
 	err = fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, &forgev1alpha1.Application{})
 	if err == nil {
 		t.Fatalf("expected Application to be fully removed after finalizer cleanup")
+	}
+
+	// The Application is genuinely gone now -- its ApplicationReady gauge
+	// series must not be left behind.
+	if got := testutil.CollectAndCount(forgemetrics.ApplicationReady); got != 0 {
+		t.Fatalf("expected ApplicationReady gauge series to be deleted after finalize, got %d series", got)
 	}
 }
 
