@@ -108,6 +108,8 @@ metadata:
 
 With that set, a mismatched tag/marker is overwritten with the current Application's own UID instead of being rejected — but only if the `Application` that currently owns the bucket (per the UID in that tag/marker) can no longer be found in the cluster. This is a live check against the Kubernetes API at reconcile time, not just a permission gate: adopt-bucket is meant to reclaim a bucket left behind by an `Application` that's genuinely gone, not to let a second `Application` take a bucket away from one that's still alive and using it. If the previous owner still exists, adoption is refused the same as if adopt-bucket weren't set at all (`Degraded`, reason `BucketNotOwned`). It's still a deliberate, explicit, human-in-the-loop opt-in otherwise — there's no automatic reclaiming.
 
+This check needs a cluster-wide list of `Application`s, since the tag/marker only ever stores a bare UID with no namespace to scope the lookup to. That's already covered by this chart's default RBAC mode (a ClusterRole). If you instead install with `rbac.namespaced: true` (a `Role`, scoped to one namespace), this check can only ever see `Application`s in the operator's own namespace — any error or an incomplete view is treated as "cannot confirm the previous owner is gone," so adoption fails closed (refused) rather than risking a live takeover, but this does mean adopt-bucket may never succeed at all under `rbac.namespaced: true` for a previous owner in a different namespace.
+
 ## AWS bucket versioning and lifecycle policy
 
 Both are configurable under `spec.storage.aws`:

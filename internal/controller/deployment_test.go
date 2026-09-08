@@ -571,7 +571,7 @@ func TestStorageCredentialEnvVars_PopulatesStandardNamesFromStorageSecret(t *tes
 		"AWS_ACCESS_KEY_ID":     "access_key",
 		"AWS_SECRET_ACCESS_KEY": "secret_key",
 		"AWS_ENDPOINT_URL":      "endpoint_url",
-		"AWS_REGION":            "region",
+		testAWSRegionEnvName:    "region",
 		"FORGE_STORAGE_BUCKET":  "bucket",
 	}
 	if len(got) != len(want) {
@@ -602,7 +602,7 @@ func TestDesiredPodSpec_InjectedStorageCredentialsCanBeOverriddenByUserEnv(t *te
 		Akamai:   &forgev1alpha1.AkamaiStorageSpec{InjectCredentials: true},
 	}
 	app.Spec.Env = []corev1.EnvVar{
-		{Name: "AWS_REGION", Value: "user-overridden-region"},
+		{Name: testAWSRegionEnvName, Value: "user-overridden-region"},
 		{Name: "SOME_OTHER_VAR", Value: "hello"},
 	}
 
@@ -622,7 +622,7 @@ func TestDesiredPodSpec_InjectedStorageCredentialsCanBeOverriddenByUserEnv(t *te
 	}
 	foundOverride := false
 	for _, ev := range envVars {
-		if ev.Name == "AWS_REGION" && ev.Value == "user-overridden-region" {
+		if ev.Name == testAWSRegionEnvName && ev.Value == "user-overridden-region" {
 			foundOverride = true
 		}
 	}

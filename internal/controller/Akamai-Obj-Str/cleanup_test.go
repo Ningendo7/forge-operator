@@ -24,8 +24,8 @@ import (
 func seedRecoverableSecret(t *testing.T, m *Manager) {
 	t.Helper()
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-storage", Namespace: testNamespace},
-		Data:       map[string][]byte{"secret_key": []byte("recovered-secret")},
+		ObjectMeta: metav1.ObjectMeta{Name: testStorageSecretName, Namespace: testNamespace},
+		Data:       map[string][]byte{testSecretKeyDataKey: []byte("recovered-secret")},
 	}
 	if err := m.k8sClient.Create(context.Background(), secret); err != nil {
 		t.Fatalf("failed to seed storage Secret: %v", err)
@@ -301,7 +301,7 @@ func TestDeleteBucket_PropagatesBucketDeletionError(t *testing.T) {
 			return []linodego.ObjectStorageKey{}, nil
 		},
 		createObjectStorageKeyFunc: func(ctx context.Context, opts linodego.ObjectStorageKeyCreateOptions) (*linodego.ObjectStorageKey, error) {
-			return &linodego.ObjectStorageKey{AccessKey: "new-access-key", SecretKey: "new-secret-key"}, nil
+			return &linodego.ObjectStorageKey{AccessKey: testNewAccessKey, SecretKey: testNewSecretKey}, nil
 		},
 		deleteObjectStorageBucketFunc: func(ctx context.Context, clusterID, bucket string) error {
 			return errors.New("delete bucket failed")

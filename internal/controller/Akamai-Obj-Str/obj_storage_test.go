@@ -165,8 +165,8 @@ func TestEnsureAccessKey_ReusesExistingKeyWithRecoverableSecret(t *testing.T) {
 	// recorded secret key from an earlier, fully-successful reconcile --
 	// the common case for any reconcile after the first.
 	storageSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-storage", Namespace: testNamespace},
-		Data:       map[string][]byte{"secret_key": []byte("recovered-secret")},
+		ObjectMeta: metav1.ObjectMeta{Name: testStorageSecretName, Namespace: testNamespace},
+		Data:       map[string][]byte{testSecretKeyDataKey: []byte("recovered-secret")},
 	}
 	if err := m.k8sClient.Create(context.Background(), storageSecret); err != nil {
 		t.Fatalf("failed to seed storage Secret: %v", err)
@@ -203,7 +203,7 @@ func TestEnsureAccessKey_ReplacesKeyWhenSecretUnrecoverable(t *testing.T) {
 			return nil
 		},
 		createObjectStorageKeyFunc: func(ctx context.Context, opts linodego.ObjectStorageKeyCreateOptions) (*linodego.ObjectStorageKey, error) {
-			return &linodego.ObjectStorageKey{AccessKey: "new-access-key", SecretKey: "new-secret-key"}, nil
+			return &linodego.ObjectStorageKey{AccessKey: testNewAccessKey, SecretKey: testNewSecretKey}, nil
 		},
 	})
 	// Deliberately no output Secret seeded -- an earlier reconcile created
@@ -219,7 +219,7 @@ func TestEnsureAccessKey_ReplacesKeyWhenSecretUnrecoverable(t *testing.T) {
 	if deletedKeyID != 42 {
 		t.Fatalf("expected the unusable key (ID 42) to be deleted, got deletedKeyID=%d", deletedKeyID)
 	}
-	if result.AccessKey != "new-access-key" || result.SecretKey != "new-secret-key" {
+	if result.AccessKey != testNewAccessKey || result.SecretKey != testNewSecretKey {
 		t.Errorf("expected the newly created key's credentials to be returned, got %#v", result)
 	}
 }
@@ -263,7 +263,7 @@ func TestEnsureAccessKey_CreatesNewKeyWhenNoneExists(t *testing.T) {
 			if access.Permissions != "read_write" {
 				t.Errorf("expected read_write permissions, got %q", access.Permissions)
 			}
-			return &linodego.ObjectStorageKey{AccessKey: "new-access-key", SecretKey: "new-secret-key"}, nil
+			return &linodego.ObjectStorageKey{AccessKey: testNewAccessKey, SecretKey: testNewSecretKey}, nil
 		},
 	})
 
@@ -271,7 +271,7 @@ func TestEnsureAccessKey_CreatesNewKeyWhenNoneExists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureAccessKey returned error: %v", err)
 	}
-	if result.AccessKey != "new-access-key" || result.SecretKey != "new-secret-key" {
+	if result.AccessKey != testNewAccessKey || result.SecretKey != testNewSecretKey {
 		t.Errorf("expected new key credentials to be returned, got %#v", result)
 	}
 }
@@ -366,8 +366,8 @@ func TestReconcileBucket_HappyPath(t *testing.T) {
 	// reuse path can recover a real secret, same as a real established
 	// Application would see.
 	storageSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-app-storage", Namespace: testNamespace},
-		Data:       map[string][]byte{"secret_key": []byte("recovered-secret")},
+		ObjectMeta: metav1.ObjectMeta{Name: testStorageSecretName, Namespace: testNamespace},
+		Data:       map[string][]byte{testSecretKeyDataKey: []byte("recovered-secret")},
 	}
 	if err := m.k8sClient.Create(context.Background(), storageSecret); err != nil {
 		t.Fatalf("failed to seed storage Secret: %v", err)

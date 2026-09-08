@@ -128,7 +128,8 @@ func (r *ApplicationReconciler) finalizeApplication(
 	}()
 
 	if storage.DeletionPolicy == forgev1alpha1.DeletionPolicyRetain {
-		return r.retainStorage(ctx, application, storage.Bucket)
+		r.retainStorage(ctx, application, storage.Bucket)
+		return nil
 	}
 
 	cleanupApp := application.DeepCopy()
@@ -219,12 +220,14 @@ func (r *ApplicationReconciler) finalizeApplication(
 // Emits an Event so this is visible and auditable, not silent. bucket is
 // passed in explicitly rather than read from application.Spec.Storage since
 // the caller may be cleaning up a bucket described only by Status.Storage
-// (spec.storage already removed).
+// (spec.storage already removed). Never fails: retaining storage is just
+// skipping cloud calls, and a best-effort status/Event write here shouldn't
+// block the Application's own deletion from proceeding.
 func (r *ApplicationReconciler) retainStorage(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
 	bucket string,
-) error {
+) {
 	storagestatus.SetRetained(application, bucket)
 	logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
 
@@ -234,7 +237,6 @@ func (r *ApplicationReconciler) retainStorage(
 	}
 
 	logf.FromContext(ctx).Info("Storage retained per deletionPolicy, skipping cloud cleanup", "bucket", bucket)
-	return nil
 }
 
 // failStorageCleanup records the StorageReady condition as cleanup-failed

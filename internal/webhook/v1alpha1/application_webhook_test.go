@@ -31,6 +31,8 @@ var _ = Describe("Application Webhook", func() {
 	const akamaiAppName = "akamai-app"
 	const testBucket = "some-bucket"
 	const testWestRegion = "us-west-2"
+	const orphanConfigAppName = "orphan-config-app"
+	const orphanConfigMapName = "orphan-config-app-config"
 
 	var (
 		obj       *forgev1alpha1.Application
@@ -238,9 +240,9 @@ var _ = Describe("Application Webhook", func() {
 		})
 
 		It("rejects removing spec.config while spec.container.configMapName still references it", func() {
-			oldObj.Name = "orphan-config-app"
-			oldObj.Spec.ConfigMap = &forgev1alpha1.ConfigSpec{Name: "orphan-config-app-config"}
-			oldObj.Spec.Container.ConfigMapName = "orphan-config-app-config"
+			oldObj.Name = orphanConfigAppName
+			oldObj.Spec.ConfigMap = &forgev1alpha1.ConfigSpec{Name: orphanConfigMapName}
+			oldObj.Spec.Container.ConfigMapName = orphanConfigMapName
 			newObj := oldObj.DeepCopy()
 			newObj.Spec.ConfigMap = nil
 			// Container.ConfigMapName deliberately left unchanged.
@@ -251,9 +253,9 @@ var _ = Describe("Application Webhook", func() {
 		})
 
 		It("admits removing spec.config when spec.container.configMapName is cleared in the same update", func() {
-			oldObj.Name = "orphan-config-app"
-			oldObj.Spec.ConfigMap = &forgev1alpha1.ConfigSpec{Name: "orphan-config-app-config"}
-			oldObj.Spec.Container.ConfigMapName = "orphan-config-app-config"
+			oldObj.Name = orphanConfigAppName
+			oldObj.Spec.ConfigMap = &forgev1alpha1.ConfigSpec{Name: orphanConfigMapName}
+			oldObj.Spec.Container.ConfigMapName = orphanConfigMapName
 			newObj := oldObj.DeepCopy()
 			newObj.Spec.ConfigMap = nil
 			newObj.Spec.Container.ConfigMapName = ""
@@ -263,8 +265,8 @@ var _ = Describe("Application Webhook", func() {
 		})
 
 		It("admits removing spec.config when spec.container.configMapName points at an unrelated, externally-managed ConfigMap", func() {
-			oldObj.Name = "orphan-config-app"
-			oldObj.Spec.ConfigMap = &forgev1alpha1.ConfigSpec{Name: "orphan-config-app-config"}
+			oldObj.Name = orphanConfigAppName
+			oldObj.Spec.ConfigMap = &forgev1alpha1.ConfigSpec{Name: orphanConfigMapName}
 			oldObj.Spec.Container.ConfigMapName = "some-externally-managed-configmap"
 			newObj := oldObj.DeepCopy()
 			newObj.Spec.ConfigMap = nil

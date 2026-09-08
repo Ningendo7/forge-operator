@@ -23,6 +23,10 @@ const (
 	testDefaultEndpoint   = "us-east-1.linodeobjects.com"
 	testAppUID            = types.UID("11111111-1111-1111-1111-111111111111")
 	testOtherUID          = types.UID("22222222-2222-2222-2222-222222222222")
+	testStorageSecretName = "demo-app-storage"
+	testSecretKeyDataKey  = "secret_key"
+	testNewAccessKey      = "new-access-key"
+	testNewSecretKey      = "new-secret-key"
 )
 
 func newTestApp() *forgev1alpha1.Application {

@@ -43,6 +43,7 @@ const (
 	testAkamaiEndpoint      = "us-east-1.linodeobjects.com"
 	testSharedCredsSecret   = "shared-creds"
 	testBucket              = "demo-bucket"
+	testAWSRegionEnvName    = "AWS_REGION"
 )
 
 func newTestApplication() *forgev1alpha1.Application {

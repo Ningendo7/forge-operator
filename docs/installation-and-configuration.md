@@ -52,7 +52,7 @@ Full reference: [charts/chart/values.yaml](../charts/chart/values.yaml). The one
 | `manager.replicas` | Controller pod count (leader election, not `Application` replicas — see below) |
 | `manager.args` | Extra manager flags, e.g. `--leader-elect` (already set by default) |
 | `serviceAccount.annotations` | e.g. `eks\.amazonaws\.com/role-arn` for the controller's own AWS IRSA role — see [Authentication Flows](authentication-and-storage.md#wiring-the-controllers-own-irsa-role-after-terraform-apply) |
-| `rbac.namespaced` | `false` (default) = ClusterRole covering all namespaces; `true` = Role scoped to the release namespace only |
+| `rbac.namespaced` | `false` (default) = ClusterRole covering all namespaces; `true` = Role scoped to the release namespace only — note this can make the [adopt-bucket](authentication-and-storage.md#ownership-verification) previous-owner check fail closed across namespaces |
 | `crd.keep` | Keep CRDs on `helm uninstall` (default `true`, so deleting the release never silently deletes your `Application` resources) |
 | `metrics.enabled` / `metrics.secure` | Expose the `/metrics` endpoint, optionally behind authn/authz |
 | `webhook.enabled` / `webhook.port` | Register the Application admission webhooks (default `true`) — see [Webhooks](architecture.md#webhooks) |

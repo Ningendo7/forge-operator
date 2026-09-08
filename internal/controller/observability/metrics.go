@@ -9,6 +9,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
+// providerLabel is the label name shared by every metric below that's
+// broken out per cloud provider (AWS/Akamai).
+const providerLabel = "provider"
+
 // All metrics here register into controller-runtime's own metrics.Registry,
 // so they're exposed on the same /metrics endpoint the operator already
 // serves (see cmd/main.go's metricsServerOptions) -- no separate server,
@@ -29,7 +33,7 @@ var (
 			Name: "forge_storage_reconcile_total",
 			Help: "Total storage reconcile attempts, by provider and outcome (ready, not_owned, timeout, access_denied, other_error).",
 		},
-		[]string{"provider", "outcome"},
+		[]string{providerLabel, "outcome"},
 	)
 
 	// StorageReconcileDuration times the cloud-call-bound portion of a
@@ -42,7 +46,7 @@ var (
 			Help:    "Time spent reconciling storage (bucket + IRSA/access key), by provider.",
 			Buckets: []float64{0.5, 1, 2.5, 5, 10, 20, 30, 45, 60, 75, 90},
 		},
-		[]string{"provider"},
+		[]string{providerLabel},
 	)
 
 	// StorageReady reflects the current StorageReady condition for a single
@@ -59,7 +63,7 @@ var (
 			Name: "forge_storage_ready",
 			Help: "Whether an Application's storage currently reports Ready (1) or not (0), by namespace, name, and provider.",
 		},
-		[]string{"namespace", "name", "provider"},
+		[]string{"namespace", "name", providerLabel},
 	)
 
 	// StorageBucketAdoptedTotal counts bucket ownership adoptions via the
@@ -73,7 +77,7 @@ var (
 			Name: "forge_storage_bucket_adopted_total",
 			Help: "Bucket ownership adoptions via the adopt-bucket annotation, by provider.",
 		},
-		[]string{"provider"},
+		[]string{providerLabel},
 	)
 
 	// FinalizerCleanupTotal counts every storage cleanup attempt during
@@ -86,7 +90,7 @@ var (
 			Name: "forge_finalizer_cleanup_total",
 			Help: "Total storage cleanup attempts during finalization, by provider and outcome (success, timeout, access_denied, other_error).",
 		},
-		[]string{"provider", "outcome"},
+		[]string{providerLabel, "outcome"},
 	)
 
 	// FinalizerCleanupDuration times storage cleanup during finalization.
@@ -98,7 +102,7 @@ var (
 			Help:    "Time spent cleaning up storage during finalization, by provider.",
 			Buckets: []float64{1, 5, 15, 30, 60, 120, 180, 240, 270, 300},
 		},
-		[]string{"provider"},
+		[]string{providerLabel},
 	)
 
 	// ApplicationReady reflects the current overall Ready condition for a
