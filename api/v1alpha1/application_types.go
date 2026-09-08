@@ -54,6 +54,7 @@ const (
 )
 
 // ApplicationSpec defines the desired state of Application
+// +kubebuilder:validation:XValidation:rule="!(has(self.autoscaling) && has(self.autoscaling.cpuUtilization) && !('cpu' in self.resources.requests))",message="spec.resources.requests.cpu must be set when spec.autoscaling.cpuUtilization is set -- the HPA can't compute utilization without a CPU request to divide by"
 type ApplicationSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
@@ -163,9 +164,39 @@ type StorageStatus struct {
 	// +optional
 	Created bool `json:"created,omitempty"`
 
+	// CreatedAt records when Created was set, bounding how long it's
+	// trusted as ownership provenance. Cloud bucket names are typically
+	// released back to the provider's global namespace once deleted --
+	// without a bound, a bucket this operator created that was later
+	// deleted and had its name picked up again by something completely
+	// unrelated (same cloud account or a different one) would be silently
+	// reclaimed as ours the next time the untagged-bucket path runs, since
+	// Created/Bucket alone can't tell the two apart. Scoped to the retry
+	// window Created actually exists for -- recovering from a transient
+	// failure in the ownership-tagging step right after creation -- not
+	// meant as a permanent claim on the name.
+	// +optional
+	CreatedAt metav1.Time `json:"createdAt,omitempty"`
+
 	// Region is the cloud region where the bucket was provisioned.
 	// +optional
 	Region string `json:"region,omitempty"`
+
+	// SecretName is the Secret spec.storage.secretName pointed at when this
+	// bucket was last successfully reconciled, if any. Recorded so cleanup
+	// can still authenticate to the cloud provider after spec.storage has
+	// been removed from the Application -- at that point this is the only
+	// remaining record of which credentials Secret to use.
+	// +optional
+	SecretName string `json:"secretName,omitempty"`
+
+	// DeletionPolicy is spec.storage.deletionPolicy as it stood when this
+	// bucket was last successfully reconciled. Recorded for the same reason
+	// as SecretName: once spec.storage is removed, this is the only
+	// remaining record of whether the bucket should actually be deleted or
+	// left in place during the cleanup that removal triggers.
+	// +optional
+	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
 
 	// AWS contains AWS-specific status information.
 	// +optional
@@ -336,6 +367,8 @@ type AutoscalingSpec struct {
 
 	// Target CPU utilization percentage.
 	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
 	CPUUtilization *int32 `json:"cpuUtilization,omitempty"`
 }
 
@@ -488,6 +521,24 @@ type AkamaiStorageSpec struct {
 	// Optional endpoint override
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
+
+	// InjectCredentials adds this bucket's access key/secret key/endpoint/
+	// region/bucket name to the Application's own container as environment
+	// variables (standard AWS-SDK-style names: AWS_ACCESS_KEY_ID,
+	// AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL, AWS_REGION, plus
+	// FORGE_STORAGE_BUCKET), sourced from the operator's own generated
+	// storage Secret. Defaults to false: without this, an Akamai-backed
+	// Application has a bucket and working credentials, but no way for its
+	// own container to actually read or write it -- unlike AWS, Akamai has
+	// no IRSA-equivalent web-identity mechanism, so this is the only path
+	// to make the bucket genuinely usable by the Application itself, not
+	// just administratively provisioned. Akamai-only: AWS Applications
+	// already get this transparently through IRSA (the ServiceAccount's
+	// IRSA annotation plus the IAM policy's object-level
+	// GetObject/PutObject/DeleteObject/ListBucket grants), with no
+	// per-Application opt-in needed.
+	// +optional
+	InjectCredentials bool `json:"injectCredentials,omitempty"`
 }
 
 // +kubebuilder:object:root=true

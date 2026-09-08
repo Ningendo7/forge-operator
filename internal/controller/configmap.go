@@ -5,19 +5,13 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
-
-func configResourceNameFor(application *forgev1alpha1.Application) string {
-	if application.Spec.ConfigMap != nil && application.Spec.ConfigMap.Name != "" {
-		return application.Spec.ConfigMap.Name
-	}
-	return application.Name + "-config"
-}
 
 func (r *ApplicationReconciler) desiredConfigMap(
 	application *forgev1alpha1.Application,
@@ -40,7 +34,7 @@ func (r *ApplicationReconciler) desiredConfigMap(
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      configResourceNameFor(application),
+			Name:      naming.AppConfigMap(application),
 			Namespace: application.Namespace,
 			Labels:    labels,
 		},

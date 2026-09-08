@@ -1,0 +1,162 @@
+{{- if .Values.prometheus.rules.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: {{ include "forge-operator.name" . }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    control-plane: controller-manager
+    {{- with .Values.prometheus.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  name: {{ include "forge-operator.resourceName" (dict "suffix" "controller-manager-alert-rules" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  groups:
+    - name: forge-operator.storage
+      rules:
+        # Errors: sustained storage reconcile failures, any provider/reason.
+        - alert: ForgeStorageReconcileFailing
+          expr: sum by (provider) (rate(forge_storage_reconcile_total{outcome!="ready"}[15m])) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "forge-operator storage reconciles are failing for provider {{ "{{" }} $labels.provider {{ "}}" }}"
+            description: >-
+              Storage reconciles for provider {{ "{{" }} $labels.provider {{ "}}" }} have been failing for at
+              least 10 minutes. Check forge_storage_reconcile_total's outcome label
+              (not_owned/timeout/access_denied/other_error) to narrow down the cause.
+
+        # Latency: p95 approaching storageReconcileTimeout (90s) -- early
+        # warning before reconciles actually start timing out.
+        - alert: ForgeStorageReconcileNearTimeout
+          expr: histogram_quantile(0.95, sum by (provider, le) (rate(forge_storage_reconcile_duration_seconds_bucket[15m]))) > 70
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "forge-operator storage reconciles for {{ "{{" }} $labels.provider {{ "}}" }} are close to timing out"
+            description: >-
+              p95 storage reconcile duration for provider {{ "{{" }} $labels.provider {{ "}}" }} has exceeded
+              70s, approaching the 90s storageReconcileTimeout. Investigate before this
+              turns into outright timeout errors.
+
+        # Errors: an Application literally cannot be deleted. Fires on a
+        # single occurrence, not a rate -- this is a stuck finalizer, not
+        # something to wait out.
+        - alert: ForgeFinalizerCleanupStuck
+          expr: increase(forge_finalizer_cleanup_total{outcome="timeout"}[15m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "forge-operator storage cleanup timed out during finalization ({{ "{{" }} $labels.provider {{ "}}" }})"
+            description: >-
+              A storage cleanup attempt hit finalizerCleanupTimeout (5m) for provider
+              {{ "{{" }} $labels.provider {{ "}}" }}. The affected Application's finalizer is
+              still attached and deletion is blocked until this is resolved manually.
+
+        # Errors, but distinct runbook from the generic rule above: this is
+        # specifically IAM/credentials, not a hang or a naming conflict --
+        # exactly the payoff of classifying errors this finely in the first
+        # place.
+        - alert: ForgeStorageAccessDenied
+          expr: increase(forge_storage_reconcile_total{outcome="access_denied"}[15m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "forge-operator got Access Denied from {{ "{{" }} $labels.provider {{ "}}" }}"
+            description: >-
+              Storage reconciles for provider {{ "{{" }} $labels.provider {{ "}}" }} are being rejected
+              as access denied. Check IAM role/policy (AWS) or API token scope (Akamai) --
+              this is a permissions problem, not a transient failure.
+
+        # Audit signal, not an incident: bucket ownership was taken over via
+        # the adopt-bucket annotation. Rare and deliberate -- worth knowing
+        # it happened, not worth paging over.
+        - alert: ForgeStorageBucketAdopted
+          expr: increase(forge_storage_bucket_adopted_total[1h]) > 0
+          labels:
+            severity: info
+          annotations:
+            summary: "forge-operator adopted a bucket for provider {{ "{{" }} $labels.provider {{ "}}" }}"
+            description: >-
+              A bucket ownership adoption occurred via the adopt-bucket annotation for
+              provider {{ "{{" }} $labels.provider {{ "}}" }} in the last hour. Confirm this was
+              intentional.
+
+    - name: forge-operator.kubernetes-api
+      rules:
+        # Errors: the Kubernetes API server itself is erroring or throttling
+        # this operator's requests -- distinct from any outcome label above,
+        # since Get/Create/Update/Patch/Delete span every reconcile path, not
+        # just storage. rest_client_requests_total is controller-runtime's
+        # own built-in client-go instrumentation, not something this
+        # operator adds itself -- see cmd/main.go's metrics setup for why no
+        # matching latency alert exists here (client-go's metrics
+        # registration is a process-wide sync.Once controller-runtime's own
+        # init() already claims for the request-count counter only).
+        - alert: ForgeKubernetesAPIErrors
+          expr: sum by (code, method) (rate(rest_client_requests_total{code=~"5..|429"}[15m])) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "forge-operator is getting {{ "{{" }} $labels.code {{ "}}" }} errors from the Kubernetes API on {{ "{{" }} $labels.method {{ "}}" }} requests"
+            description: >-
+              Sustained {{ "{{" }} $labels.code {{ "}}" }} responses from the Kubernetes API server for
+              {{ "{{" }} $labels.method {{ "}}" }} requests over the last 10 minutes -- 5xx suggests the
+              API server itself is degraded, 429 means this operator is being
+              rate-limited (check client-side QPS/burst settings or API server load).
+
+    - name: forge-operator.application
+      rules:
+        # Errors, current-state: which Applications are unhealthy right now,
+        # not just a rate of past failures.
+        - alert: ForgeApplicationsDegraded
+          expr: forge_application_ready == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Application {{ "{{" }} $labels.namespace {{ "}}" }}/{{ "{{" }} $labels.name {{ "}}" }} is not Ready"
+            description: >-
+              Application {{ "{{" }} $labels.namespace {{ "}}" }}/{{ "{{" }} $labels.name {{ "}}" }} has not
+              reported Ready for at least 15 minutes. Check its status conditions and
+              events.
+
+    - name: forge-operator.saturation
+      rules:
+        # Saturation: reconcile concurrency ceiling, using
+        # controller-runtime's own built-in metrics -- no custom
+        # instrumentation needed for this one.
+        - alert: ForgeReconcileConcurrencySaturated
+          expr: |
+            controller_runtime_active_workers{controller="application"}
+              >= controller_runtime_max_concurrent_reconciles{controller="application"}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "forge-operator is consistently at its reconcile concurrency ceiling"
+            description: >-
+              All configured concurrent reconcile workers have been busy for at least
+              10 minutes. Consider whether MaxConcurrentReconciles needs raising.
+
+        # Saturation, leading indicator: items sitting a long time before a
+        # worker even picks them up, also from controller-runtime's own
+        # workqueue instrumentation.
+        - alert: ForgeReconcileQueueBacklogGrowing
+          expr: histogram_quantile(0.95, sum by (le) (rate(workqueue_queue_duration_seconds_bucket{controller="application"}[15m]))) > 30
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "forge-operator's reconcile queue backlog is growing"
+            description: >-
+              p95 time an item spends waiting in the workqueue before being picked up
+              has exceeded 30s for 10 minutes -- a leading sign of saturation before
+              ForgeReconcileConcurrencySaturated would fire.
+{{- end }}

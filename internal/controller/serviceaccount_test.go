@@ -273,6 +273,62 @@ func TestAnnotateServiceAccountWithIRSA_SkipsWhenCreateIsFalse(t *testing.T) {
 	}
 }
 
+func TestReconcileServiceAccount_RenameCleansUpPreviousName(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	trueVal := true
+	app := newTestApplication()
+	app.Spec.ServiceAccount = &forgev1alpha1.ServiceAccountSpec{Name: testOldName, Create: &trueVal}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileServiceAccount(context.Background(), app); err != nil {
+		t.Fatalf("failed to create service account: %v", err)
+	}
+
+	app.Spec.ServiceAccount.Name = testNewName
+	if err := r.reconcileServiceAccount(context.Background(), app); err != nil {
+		t.Fatalf("reconcileServiceAccount returned error on rename: %v", err)
+	}
+
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testNewName, Namespace: testNamespace}, &corev1.ServiceAccount{}); err != nil {
+		t.Fatalf("expected new-name ServiceAccount to exist: %v", err)
+	}
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testOldName, Namespace: testNamespace}, &corev1.ServiceAccount{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected old-name ServiceAccount to have been cleaned up after rename, got err=%v", err)
+	}
+}
+
+func TestReconcileServiceAccount_SwitchingToUserManagedCleansUpPrevious(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileServiceAccount(context.Background(), app); err != nil {
+		t.Fatalf("failed to create service account: %v", err)
+	}
+
+	falseVal := false
+	app.Spec.ServiceAccount = &forgev1alpha1.ServiceAccountSpec{Name: testCustomSAName, Create: &falseVal}
+	if err := r.reconcileServiceAccount(context.Background(), app); err != nil {
+		t.Fatalf("reconcileServiceAccount returned error when switching to user-managed: %v", err)
+	}
+
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testSAName, Namespace: testNamespace}, &corev1.ServiceAccount{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected operator-created ServiceAccount to have been cleaned up, got err=%v", err)
+	}
+}
+
 // Unhappy path : Error Handling and Failure Scenarios
 
 func TestReconcileServiceAccount_ReturnsErrorWhenPatchFails(t *testing.T) {

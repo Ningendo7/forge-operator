@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 )
@@ -74,6 +75,34 @@ func (r *ApplicationReconciler) desiredServiceAccount(
 	}
 }
 
+// deleteStaleServiceAccounts deletes ServiceAccounts owned by application other than
+// keepName, so a rename or switch to a user-managed ServiceAccount can never orphan
+// the previous one.
+func (r *ApplicationReconciler) deleteStaleServiceAccounts(
+	ctx context.Context,
+	application *forgev1alpha1.Application,
+	keepName string,
+) error {
+	logger := logf.FromContext(ctx)
+
+	var list corev1.ServiceAccountList
+	if err := r.List(ctx, &list, client.InNamespace(application.Namespace), client.MatchingLabels{appLabelKey: application.Name}); err != nil {
+		return fmt.Errorf("failed to list ServiceAccounts for cleanup: %w", err)
+	}
+
+	for i := range list.Items {
+		sa := &list.Items[i]
+		if sa.Name == keepName || !metav1.IsControlledBy(sa, application) {
+			continue
+		}
+		if err := r.Delete(ctx, sa); client.IgnoreNotFound(err) != nil {
+			return fmt.Errorf("failed to delete stale ServiceAccount %s: %w", sa.Name, err)
+		}
+		logger.Info("Deleted stale ServiceAccount", "name", sa.Name)
+	}
+	return nil
+}
+
 func (r *ApplicationReconciler) reconcileServiceAccount(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
@@ -81,7 +110,7 @@ func (r *ApplicationReconciler) reconcileServiceAccount(
 
 	// Respect user-managed ServiceAccounts
 	if !shouldCreateServiceAccount(application) {
-		return nil
+		return r.deleteStaleServiceAccounts(ctx, application, "")
 	}
 
 	desired := r.desiredServiceAccount(application)
@@ -102,6 +131,10 @@ func (r *ApplicationReconciler) reconcileServiceAccount(
 		client.ForceOwnership,
 	); err != nil {
 		return fmt.Errorf("failed to apply ServiceAccount: %w", err)
+	}
+
+	if err := r.deleteStaleServiceAccounts(ctx, application, desired.Name); err != nil {
+		return fmt.Errorf("failed to clean up stale ServiceAccount: %w", err)
 	}
 
 	return nil

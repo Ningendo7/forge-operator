@@ -6,23 +6,44 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3sdktypes "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/linode/linodego"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	"github.com/Ningendo7/forge-operator/internal/controller/naming"
+	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 )
 
 const ownerMarkerKey = ".forge-operator-owner"
 
-// akamaiKeyLabelMaxLen: Linode's Object Storage key label limit isn't
-// documented in linodego's own types, so this uses AWS's IAM role name
-// limit (64) as a conservative stand-in -- adjust if Linode's actual limit
-// turns out to differ.
-const akamaiKeyLabelMaxLen = 64
+// bucketCreationClaimWindow bounds how long Created (recorded by
+// recordBucketCreated) is trusted as ownership provenance for a bucket
+// found with no ownership marker. It exists to survive a transient failure
+// in the marker-write step right after creation -- a retry within minutes,
+// not an unconditional, permanent claim on this bucket name. Bucket names
+// are released back to the provider's global namespace on deletion, so
+// without this bound, a bucket we created, deleted, and later had its name
+// reused by a completely unrelated bucket would be silently reclaimed the
+// next time this unmarked-bucket path runs.
+const bucketCreationClaimWindow = time.Hour
+
+// akamaiKeyLabelMaxLen is Linode's real, confirmed Object Storage key
+// label limit -- not documented in linodego's own types, so the original
+// value here was a guess (AWS's unrelated IAM role name limit, 64, used as
+// a "conservative" stand-in). Confirmed wrong live, via this package's own
+// integration test: Linode's API rejects any label over 50 characters
+// with "[400] [label] Length must be 3-50 characters". A namespace+name
+// combination long enough to need truncation at all was silently building
+// an invalid label the whole time this was 64.
+const akamaiKeyLabelMaxLen = 50
 
 // accessKeyLabel builds this Application's per-app Object Storage access
 // key label. Must be used identically everywhere it's referenced (creation
@@ -64,9 +85,14 @@ func (m *Manager) claimOrVerifyOwnership(
 	if err != nil {
 		var noSuchKey *s3sdktypes.NoSuchKey
 		if errors.As(err, &noSuchKey) {
-			if m.previouslyCreatedByUs() || m.adoptBucketRequested() {
+			if m.previouslyCreatedByUs() {
 				return m.claimOwnership(ctx, s3Client)
 			}
+			if m.adoptBucketRequested() {
+				forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAkamaiObjectStorage)).Inc()
+				return m.claimOwnership(ctx, s3Client)
+			}
+
 			return ErrBucketNotOwned
 		}
 		// A genuine failure (permission denied, network error, ...) must
@@ -81,8 +107,24 @@ func (m *Manager) claimOrVerifyOwnership(
 	}
 	if string(body) != string(m.app.UID) {
 		if m.adoptBucketRequested() {
+			// adopt-bucket is meant for reclaiming a bucket left behind by
+			// an Application that's genuinely gone (typically one retained
+			// via deletionPolicy: Retain) -- not for taking a bucket away
+			// from an Application that's still alive and using it right
+			// now. The marker only ever stores a bare UID, so this is the
+			// only way to tell those two cases apart.
+			exists, existsErr := naming.ApplicationExistsWithUID(ctx, m.k8sClient, types.UID(body))
+			if existsErr != nil {
+				return fmt.Errorf("%w: could not confirm the previous owner no longer exists: %v", ErrBucketNotOwned, existsErr)
+			}
+			if exists {
+				return fmt.Errorf("%w: adopt-bucket requested, but the Application that currently owns this bucket still exists", ErrBucketNotOwned)
+			}
+
+			forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAkamaiObjectStorage)).Inc()
 			return m.claimOwnership(ctx, s3Client)
 		}
+
 		return ErrBucketNotOwned
 	}
 	return nil
@@ -117,9 +159,10 @@ func (m *Manager) adoptBucketRequested() bool {
 // record.
 func (m *Manager) recordBucketCreated(ctx context.Context) error {
 	m.app.Status.Storage = &forgev1alpha1.StorageStatus{
-		Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
-		Bucket:   m.bucket,
-		Created:  true,
+		Provider:  forgev1alpha1.ProviderAkamaiObjectStorage,
+		Bucket:    m.bucket,
+		Created:   true,
+		CreatedAt: metav1.Now(),
 	}
 	if err := m.k8sClient.Status().Update(ctx, m.app); err != nil {
 		return fmt.Errorf("failed to record bucket creation for %s: %w", m.bucket, err)
@@ -128,17 +171,25 @@ func (m *Manager) recordBucketCreated(ctx context.Context) error {
 }
 
 // previouslyCreatedByUs reports whether Application.Status durably records
-// this operator having created this exact bucket in an earlier reconcile.
+// this operator having created this exact bucket in an earlier reconcile,
+// recently enough that CreatedAt still falls within
+// bucketCreationClaimWindow. Bounded so this can only ever recover from a
+// transient failure in the marker-write step shortly after creation, never
+// stand in as a permanent claim on the name -- which a bucket that was
+// deleted and later recreated by something else entirely would otherwise
+// silently inherit.
 func (m *Manager) previouslyCreatedByUs() bool {
-	return m.app.Status.Storage != nil &&
-		m.app.Status.Storage.Bucket == m.bucket &&
-		m.app.Status.Storage.Created
+	status := m.app.Status.Storage
+	return status != nil &&
+		status.Bucket == m.bucket &&
+		status.Created &&
+		time.Since(status.CreatedAt.Time) < bucketCreationClaimWindow
 }
 
 // ReconcileBucket orchestrates bucket + key setup.
 func (m *Manager) ReconcileBucket(
 	ctx context.Context,
-) (*StorageResult, error) {
+) (result *StorageResult, err error) {
 
 	if err := m.validateStorageSpec(); err != nil {
 		return nil, fmt.Errorf("invalid storage spec: %w", err)
@@ -154,8 +205,27 @@ func (m *Manager) ReconcileBucket(
 		return nil, fmt.Errorf("failed to ensure access key: %w", err)
 	}
 
+	// If ownership ultimately can't be established below, the access key
+	// just ensured above is useless -- this Application will never be
+	// permitted to use this bucket -- so clean it up rather than leaking
+	// it. Confirmed live via this package's own integration test: an
+	// Application that attempts to claim an already-owned bucket (and is
+	// correctly rejected) still created a real, orphaned access key for
+	// itself in the process, since ensureAccessKey necessarily runs before
+	// ownership can be checked at all. Mirrors the identical cleanup on
+	// the delete path in verifyOwnershipAndEmptyBucket. Scoped to
+	// ErrBucketNotOwned specifically: any other error is worth retrying
+	// with this same key.
+	defer func() {
+		if errors.Is(err, ErrBucketNotOwned) {
+			if cleanupErr := m.deleteApplicationAccessKey(ctx); cleanupErr != nil {
+				logf.FromContext(ctx).Error(cleanupErr, "Failed to clean up access key after ownership could not be established", "bucket", m.bucket)
+			}
+		}
+	}()
+
 	endpoint := m.resolveEndpoint(bucket)
-	if err := m.claimOrVerifyOwnership(ctx, endpoint, keyResult.AccessKey, keyResult.SecretKey); err != nil {
+	if err = m.claimOrVerifyOwnership(ctx, endpoint, keyResult.AccessKey, keyResult.SecretKey); err != nil {
 		return nil, err
 	}
 
@@ -213,6 +283,25 @@ func (m *Manager) ensureBucketExists(
 	return newBucket, nil
 }
 
+// ensureAccessKey finds or creates this Application's Object Storage access
+// key. Linode only ever returns a key's secret once, at creation -- listing
+// an existing key never includes it. Reusing an existing key without
+// accounting for that would hand back an unusable empty secret to
+// claimOrVerifyOwnership moments later in this same ReconcileBucket call --
+// and not just on some later, deliberate reconcile: any second call to
+// ReconcileBucket for the same Application, for any reason including
+// ordinary workqueue retry churn, finds the key an earlier call already
+// created and hits this path.
+//
+// Recovery has two tiers. First, try the operator's own previously-written
+// output Secret (naming.StorageSecret) -- the common case, covering any
+// reconcile after one that fully succeeded. If that has nothing either (the
+// key was created, but an earlier reconcile failed before ever reaching the
+// step that writes the output Secret), fall back to deleting the orphaned
+// key and creating a fresh one: the output Secret is the only place this
+// operator ever exposes an Object Storage secret, so if it was never
+// written, nothing could possibly be depending on the old key's
+// credentials, and replacing it is safe.
 func (m *Manager) ensureAccessKey(
 	ctx context.Context,
 ) (*AccessKeyResult, error) {
@@ -224,14 +313,20 @@ func (m *Manager) ensureAccessKey(
 		return nil, fmt.Errorf("failed to list storage keys: %w", err)
 	}
 
-	// Reuse existing key if it exists
 	for _, key := range keys {
-		if key.Label == keyLabel {
+		if key.Label != keyLabel {
+			continue
+		}
+		if secret := m.recoverSecretKey(ctx); secret != "" {
 			return &AccessKeyResult{
 				AccessKey: key.AccessKey,
-				SecretKey: "",
+				SecretKey: secret,
 			}, nil
 		}
+		if err := m.akamaiClient.DeleteObjectStorageKey(ctx, key.ID); err != nil {
+			return nil, fmt.Errorf("failed to delete unusable access key '%d': %w", key.ID, err)
+		}
+		break
 	}
 
 	// Create a new scoped access key. BucketName is what actually confines
@@ -260,6 +355,24 @@ func (m *Manager) ensureAccessKey(
 		AccessKey: key.AccessKey,
 		SecretKey: key.SecretKey,
 	}, nil
+}
+
+// recoverSecretKey reads this Application's own operator-managed storage
+// Secret for a previously-recorded Object Storage secret key. Returns "" if
+// there's nothing there yet -- callers must treat that as "no secret
+// available", not an error; it's the expected outcome the first time a key
+// is reused before its secret was ever durably recorded anywhere.
+func (m *Manager) recoverSecretKey(ctx context.Context) string {
+	var secret corev1.Secret
+	key := types.NamespacedName{
+		Name:      naming.StorageSecret(m.app),
+		Namespace: m.app.Namespace,
+	}
+
+	if err := m.k8sClient.Get(ctx, key, &secret); err != nil {
+		return ""
+	}
+	return string(secret.Data["secret_key"])
 }
 
 func (m *Manager) resolveEndpoint(bucket *linodego.ObjectStorageBucket) string {

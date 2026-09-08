@@ -28,6 +28,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -140,6 +141,54 @@ var _ = Describe("Application integration", func() {
 			err := k8sClient.Get(ctx, types.NamespacedName{Name: "hpa-app-hpa", Namespace: namespace}, &autoscalingv2.HorizontalPodAutoscaler{})
 			return apierrors.IsNotFound(err)
 		}, eventualTimeout, pollInterval).Should(BeTrue())
+	})
+
+	It("rejects an autoscaling.cpuUtilization outside the 1-100 range", func() {
+		tooHigh := int32(150)
+		app := &forgev1alpha1.Application{
+			ObjectMeta: metav1.ObjectMeta{Name: "hpa-cpu-oor-app", Namespace: namespace},
+			Spec: forgev1alpha1.ApplicationSpec{
+				Image: testImage,
+				Autoscaling: &forgev1alpha1.AutoscalingSpec{
+					MinReplicas: 1, MaxReplicas: 3, CPUUtilization: &tooHigh,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, app)).NotTo(Succeed())
+	})
+
+	It("rejects autoscaling.cpuUtilization when spec.resources.requests.cpu is unset", func() {
+		target := int32(80)
+		app := &forgev1alpha1.Application{
+			ObjectMeta: metav1.ObjectMeta{Name: "hpa-cpu-norequest-app", Namespace: namespace},
+			Spec: forgev1alpha1.ApplicationSpec{
+				Image: testImage,
+				Autoscaling: &forgev1alpha1.AutoscalingSpec{
+					MinReplicas: 1, MaxReplicas: 3, CPUUtilization: &target,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, app)).NotTo(Succeed())
+	})
+
+	It("admits autoscaling.cpuUtilization when spec.resources.requests.cpu is set", func() {
+		target := int32(80)
+		app := &forgev1alpha1.Application{
+			ObjectMeta: metav1.ObjectMeta{Name: "hpa-cpu-withrequest-app", Namespace: namespace},
+			Spec: forgev1alpha1.ApplicationSpec{
+				Image: testImage,
+				Autoscaling: &forgev1alpha1.AutoscalingSpec{
+					MinReplicas: 1, MaxReplicas: 3, CPUUtilization: &target,
+				},
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, app)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, app)
+		})
 	})
 
 	It("only uses spec.replicas to seed the initial count once an HPA is configured, then leaves scaling to it", func() {

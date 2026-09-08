@@ -8,14 +8,17 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
-
-	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
-	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	"github.com/linode/linodego"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"golang.org/x/oauth2"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 )
 
 // AKAMAIAPI defines the interface for interacting with Linode Object Storage.
@@ -59,6 +62,8 @@ type AccessKeyResult struct {
 type s3ObjectAPI interface {
 	GetObject(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error)
 	PutObject(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error)
+	ListObjectsV2(ctx context.Context, params *s3sdk.ListObjectsV2Input, optFns ...func(*s3sdk.Options)) (*s3sdk.ListObjectsV2Output, error)
+	DeleteObjects(ctx context.Context, params *s3sdk.DeleteObjectsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.DeleteObjectsOutput, error)
 }
 
 // newS3ObjectClient is a var-bound constructor so tests can substitute a
@@ -75,9 +80,31 @@ var newS3ObjectClient = func(region, clusterEndpoint, accessKey, secretKey strin
 		Credentials: credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
 	}
 
+	// Same otelaws middleware as the main s3 package -- the ownership
+	// marker's GetObject/PutObject calls are the same aws-sdk-go-v2 S3
+	// client type, just pointed at Akamai's S3-compatible endpoint instead
+	// of AWS's.
+	otelaws.AppendMiddlewares(&cfg.APIOptions)
+
 	return s3sdk.NewFromConfig(cfg, func(o *s3sdk.Options) {
 		o.BaseEndpoint = aws.String("https://" + clusterEndpoint)
 		o.UsePathStyle = true
+
+		// aws-sdk-go-v2 defaults to computing a flexible checksum (CRC32,
+		// sent via an aws-chunked trailer) on every PutObject/GetObject
+		// call since it added that feature -- AWS itself handles this
+		// fine, but Akamai/Linode's Ceph RGW-based Object Storage does
+		// not: it accepts the request and returns success with no error,
+		// but silently never persists the body. Confirmed live: writing
+		// the ownership marker via this client reported success on every
+		// call, yet the object was never actually retrievable afterward,
+		// while writing the identical key/content via a plain S3 client
+		// (mc) round-tripped correctly immediately. WhenRequired restores
+		// the classic behavior (only checksum when the operation actually
+		// demands one), matching how every other S3-compatible provider
+		// with this same incompatibility is worked around.
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 	})
 }
 
@@ -142,9 +169,14 @@ func NewManager(
 		return nil, fmt.Errorf("key 'apiToken' not found in secret %s", secretName)
 	}
 
-	// Initialize linode client
+	// Initialize linode client. linodego has no OTel middleware of its own
+	// (unlike aws-sdk-go-v2's otelaws above), but it accepts a plain
+	// *http.Client -- wrapping its Transport with otelhttp.NewTransport
+	// auto-instruments every linodego call (bucket/key management) the same
+	// "free," no-per-call-code way otelaws covers AWS.
 	tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: string(tokenBytes)})
 	oauthClient := oauth2.NewClient(ctx, tokenSource)
+	oauthClient.Transport = otelhttp.NewTransport(oauthClient.Transport)
 	linodeClient := linodego.NewClient(oauthClient)
 
 	return &Manager{

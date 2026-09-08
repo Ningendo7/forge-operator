@@ -57,7 +57,9 @@ Full reference: [charts/chart/values.yaml](../charts/chart/values.yaml). The one
 | `metrics.enabled` / `metrics.secure` | Expose the `/metrics` endpoint, optionally behind authn/authz |
 | `webhook.enabled` / `webhook.port` | Register the Application admission webhooks (default `true`) — see [Webhooks](architecture.md#webhooks) |
 | `certManager.enabled` | Use cert-manager for the webhook server's and metrics endpoint's TLS certificates (default `true`); required for `webhook.enabled` to actually work, since `failurePolicy: Fail` means an untrusted cert blocks every `Application` create/update |
-| `prometheus.enabled` | Install a `ServiceMonitor` (requires prometheus-operator CRDs) |
+| `prometheus.enabled` / `prometheus.rules.enabled` / `prometheus.additionalLabels` | Install a `ServiceMonitor` and/or a curated `PrometheusRule`, and merge extra labels onto both (needed for kube-prometheus-stack's default selectors) — see [Observability](observability.md#prometheus-servicemonitor-and-alerts) |
+| `grafana.dashboard.enabled` | Install a Grafana dashboard ConfigMap (auto-discovered by kube-prometheus-stack's Grafana sidecar) — see [Observability](observability.md#grafana-dashboard) |
+| `metrics.reader.serviceAccountBindings` | ServiceAccounts granted the `metrics-reader` ClusterRole, e.g. Prometheus's own ServiceAccount when `metrics.secure: true` — see [Observability](observability.md#prometheus-servicemonitor-and-alerts) |
 | `manager.env` | Extra environment variables on the manager container — this is how you set the variables below |
 
 ## Controller environment variables
@@ -80,6 +82,7 @@ manager:
 | `OIDC_PROVIDER_ARN` | Required for AWS IRSA role trust policies |
 | `OIDC_PROVIDER_URL` | Required for AWS IRSA role trust policies |
 | `DEFAULT_AKAMAI_REGION` | Fallback region for Akamai/Linode storage when an `Application` doesn't set `spec.storage.region` itself (which always takes precedence). Should match wherever your Akamai/Linode infrastructure actually runs — there's no built-in default; an unset default plus an unset `spec.storage.region` fails loudly with a clear error from Linode's API rather than silently guessing a region |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Standard OpenTelemetry env var — set it to enable OTLP/gRPC trace export (e.g. to Jaeger). Unset (the default) means tracing is a true no-op, not just "disabled" — zero network calls. See [Observability](observability.md#tracing) |
 
 If deploying via kustomize instead of Helm, there's no built-in mechanism for this — add your own patch targeting `spec.template.spec.containers[0].env` (see [`config/default/manager_webhook_patch.yaml`](../config/default/manager_webhook_patch.yaml) for the JSON-patch style already used there).
 

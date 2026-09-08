@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -13,10 +14,13 @@ import (
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithy "github.com/aws/smithy-go"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	"github.com/Ningendo7/forge-operator/internal/controller/naming"
+	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 )
 
 const ownerTagKey = "forge-operator.ningendo7.github.io/owner-uid"
@@ -25,6 +29,24 @@ const ownerTagKey = "forge-operator.ningendo7.github.io/owner-uid"
 // at all -- the one GetBucketTagging failure claimOrVerifyOwnership treats
 // as safe to claim rather than a hard failure.
 const noSuchTagSetErrorCode = "NoSuchTagSet"
+
+// noSuchBucketErrorCode is the S3 API error code GetBucketTagging returns
+// when the bucket itself doesn't exist at all (distinct from
+// noSuchTagSetErrorCode, which means the bucket exists but has no tags) --
+// the one verifyOwnership treats as "already gone, nothing to clean up"
+// rather than a hard ownership failure.
+const noSuchBucketErrorCode = "NoSuchBucket"
+
+// bucketCreationClaimWindow bounds how long Created (recorded by
+// recordBucketCreated) is trusted as ownership provenance for a bucket
+// found with no ownership tag. It exists to survive a transient failure in
+// the tag-write step right after creation -- a retry within minutes, not an
+// unconditional, permanent claim on this bucket name. S3 bucket names are
+// released back to AWS's global namespace on deletion, so without this
+// bound, a bucket we created, deleted, and later had its name reused by a
+// completely unrelated bucket -- same AWS account or a different one --
+// would be silently reclaimed the next time this untagged-bucket path runs.
+const bucketCreationClaimWindow = time.Hour
 
 // awsIAMRoleNameMaxLen is AWS's own hard limit on IAM role name length.
 const awsIAMRoleNameMaxLen = 64
@@ -80,9 +102,10 @@ func (m *Manager) ReconcileBucket(
 // transient failure in that later step doesn't erase the record.
 func (m *Manager) recordBucketCreated(ctx context.Context) error {
 	m.app.Status.Storage = &forgev1alpha1.StorageStatus{
-		Provider: forgev1alpha1.ProviderAWSS3,
-		Bucket:   m.bucket,
-		Created:  true,
+		Provider:  forgev1alpha1.ProviderAWSS3,
+		Bucket:    m.bucket,
+		Created:   true,
+		CreatedAt: metav1.Now(),
 	}
 	if err := m.k8sClient.Status().Update(ctx, m.app); err != nil {
 		return fmt.Errorf("failed to record bucket creation for %s: %w", m.bucket, err)
@@ -91,11 +114,18 @@ func (m *Manager) recordBucketCreated(ctx context.Context) error {
 }
 
 // previouslyCreatedByUs reports whether Application.Status durably records
-// this operator having created this exact bucket in an earlier reconcile.
+// this operator having created this exact bucket in an earlier reconcile,
+// recently enough that CreatedAt still falls within
+// bucketCreationClaimWindow. Bounded so this can only ever recover from a
+// transient failure in the tag-write step shortly after creation, never
+// stand in as a permanent claim on the name -- which a bucket that was
+// deleted and later recreated by something else entirely would otherwise silently inherit.
 func (m *Manager) previouslyCreatedByUs() bool {
-	return m.app.Status.Storage != nil &&
-		m.app.Status.Storage.Bucket == m.bucket &&
-		m.app.Status.Storage.Created
+	status := m.app.Status.Storage
+	return status != nil &&
+		status.Bucket == m.bucket &&
+		status.Created &&
+		time.Since(status.CreatedAt.Time) < bucketCreationClaimWindow
 }
 
 // ErrBucketNotOwned means a bucket with the desired name exists but wasn't
@@ -183,7 +213,11 @@ func (m *Manager) claimOrVerifyOwnership(ctx context.Context) error {
 	if err != nil {
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == noSuchTagSetErrorCode {
-			if m.previouslyCreatedByUs() || m.adoptBucketRequested() {
+			if m.previouslyCreatedByUs() {
+				return m.tagAsOwned(ctx)
+			}
+			if m.adoptBucketRequested() {
+				forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3)).Inc()
 				return m.tagAsOwned(ctx)
 			}
 			return ErrBucketNotOwned
@@ -198,6 +232,21 @@ func (m *Manager) claimOrVerifyOwnership(ctx context.Context) error {
 				return nil
 			}
 			if m.adoptBucketRequested() {
+				// adopt-bucket is meant for reclaiming a bucket left behind
+				// by an Application that's genuinely gone (typically one
+				// retained via deletionPolicy: Retain) -- not for taking a
+				// bucket away from an Application that's still alive and
+				// using it right now. The tag only ever stores a bare UID,
+				// so this is the only way to tell those two cases apart.
+				exists, existsErr := naming.ApplicationExistsWithUID(ctx, m.k8sClient, types.UID(aws.ToString(tag.Value)))
+				if existsErr != nil {
+					return fmt.Errorf("%w: could not confirm the previous owner no longer exists: %v", ErrBucketNotOwned, existsErr)
+				}
+				if exists {
+					return fmt.Errorf("%w: adopt-bucket requested, but the Application that currently owns this bucket still exists", ErrBucketNotOwned)
+				}
+
+				forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3)).Inc()
 				log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s owned by a different Application, adopting per %s annotation", m.bucket, naming.AdoptBucketAnnotation))
 				return m.tagAsOwned(ctx)
 			}
@@ -206,9 +255,14 @@ func (m *Manager) claimOrVerifyOwnership(ctx context.Context) error {
 	}
 
 	// Tag set exists (so no NoSuchTagSet error) but carries no ownership tag.
-	if m.previouslyCreatedByUs() || m.adoptBucketRequested() {
+	if m.previouslyCreatedByUs() {
 		return m.tagAsOwned(ctx)
 	}
+	if m.adoptBucketRequested() {
+		forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3)).Inc()
+		return m.tagAsOwned(ctx)
+	}
+
 	return ErrBucketNotOwned
 }
 

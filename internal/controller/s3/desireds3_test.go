@@ -4,16 +4,22 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	"github.com/Ningendo7/forge-operator/internal/controller/naming"
+	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithy "github.com/aws/smithy-go"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // --- ensureBucketExists ---
@@ -96,6 +102,8 @@ func TestEnsureBucketExists_AdoptsMismatchedTagWhenAnnotationSet(t *testing.T) {
 	}, nil)
 	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
 
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
 	// A tag naming a *different* Application must still be adoptable via
 	// the explicit annotation -- this is the deliberate human-in-the-loop
 	// override, distinct from (and not gated by) previouslyCreatedByUs,
@@ -105,6 +113,66 @@ func TestEnsureBucketExists_AdoptsMismatchedTagWhenAnnotationSet(t *testing.T) {
 	}
 	if taggedOwner != string(testAppUID) {
 		t.Fatalf("expected the tag to be overwritten with this Application's own UID, got %q", taggedOwner)
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3))); got != 1 {
+		t.Fatalf("expected StorageBucketAdoptedTotal to be 1 after an actual adoption, got %v", got)
+	}
+}
+
+func TestEnsureBucketExists_RefusesToAdoptWhenPreviousOwnerStillExists(t *testing.T) {
+	putTaggingCalled := false
+	s3Client := &mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return &s3sdk.GetBucketTaggingOutput{
+				TagSet: []s3types.Tag{
+					{Key: aws.String(ownerTagKey), Value: aws.String(string(testOtherUID))},
+				},
+			}, nil
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			putTaggingCalled = true
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}
+
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace, UID: testAppUID},
+	}
+	app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
+	// The Application actually named by the tag's UID is still very much
+	// alive -- adopt-bucket must not be able to take its bucket away from
+	// it just because the annotation is set.
+	stillAliveOwner := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "still-alive-owner", Namespace: testNamespace, UID: testOtherUID},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app, stillAliveOwner).WithStatusSubresource(app).Build()
+
+	m := &Manager{
+		k8sClient: fakeClient,
+		s3client:  s3Client,
+		app:       app,
+		storage:   &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testRegion},
+		bucket:    testBucket,
+		region:    testRegion,
+	}
+
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
+	err := m.ensureBucketExists(context.Background())
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned when the previous owner still exists, got %v", err)
+	}
+	if putTaggingCalled {
+		t.Fatalf("expected the tag to be left untouched when the previous owner still exists")
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3))); got != 0 {
+		t.Fatalf("expected no adoption to be recorded, got %v", got)
 	}
 }
 
@@ -126,7 +194,9 @@ func TestEnsureBucketExists_ClaimsEmptyTagSetWhenPreviouslyCreatedByUs(t *testin
 			return &s3sdk.PutBucketTaggingOutput{}, nil
 		},
 	}, nil)
-	m.app.Status.Storage = &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true}
+	m.app.Status.Storage = &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true, CreatedAt: metav1.Now()}
+
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
 
 	// A bucket that exists with no ownership tag at all is claimed when we
 	// durably recorded creating it ourselves in an earlier reconcile -- this
@@ -138,6 +208,11 @@ func TestEnsureBucketExists_ClaimsEmptyTagSetWhenPreviouslyCreatedByUs(t *testin
 	}
 	if taggedOwner != string(testAppUID) {
 		t.Fatalf("expected bucket to be claimed with owner UID, got %q", taggedOwner)
+	}
+	// This is recovery, not adoption -- previouslyCreatedByUs alone must
+	// never be counted as taking over someone else's bucket.
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3))); got != 0 {
+		t.Fatalf("expected StorageBucketAdoptedTotal to stay 0 for a previouslyCreatedByUs recovery, got %v", got)
 	}
 }
 
@@ -162,11 +237,16 @@ func TestEnsureBucketExists_ClaimsEmptyTagSetWhenAdoptAnnotationSet(t *testing.T
 	// No Status.Storage seeded -- only the explicit human opt-in this time.
 	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
 
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
 	if err := m.ensureBucketExists(context.Background()); err != nil {
 		t.Fatalf("ensureBucketExists returned error: %v", err)
 	}
 	if taggedOwner != string(testAppUID) {
 		t.Fatalf("expected bucket to be claimed with owner UID, got %q", taggedOwner)
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3))); got != 1 {
+		t.Fatalf("expected StorageBucketAdoptedTotal to be 1 after an actual adoption, got %v", got)
 	}
 }
 
@@ -202,7 +282,7 @@ func TestEnsureBucketExists_ClaimsOnNoSuchTagSetErrorWhenPreviouslyCreatedByUs(t
 			return &s3sdk.PutBucketTaggingOutput{}, nil
 		},
 	}, nil)
-	m.app.Status.Storage = &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true}
+	m.app.Status.Storage = &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true, CreatedAt: metav1.Now()}
 
 	if err := m.ensureBucketExists(context.Background()); err != nil {
 		t.Fatalf("ensureBucketExists returned error: %v", err)
@@ -247,18 +327,33 @@ func TestRecordBucketCreated_PersistsCreatedFlagToStatus(t *testing.T) {
 	if got.Status.Storage.Bucket != testBucket {
 		t.Fatalf("expected Status.Storage.Bucket to be %q, got %q", testBucket, got.Status.Storage.Bucket)
 	}
+	if got.Status.Storage.CreatedAt.IsZero() {
+		t.Fatalf("expected Status.Storage.CreatedAt to be persisted non-zero")
+	}
 }
 
 func TestPreviouslyCreatedByUs(t *testing.T) {
+	now := metav1.Now()
+	stale := metav1.NewTime(time.Now().Add(-2 * bucketCreationClaimWindow))
+
 	tests := []struct {
 		name    string
 		storage *forgev1alpha1.StorageStatus
 		want    bool
 	}{
 		{name: "nil status", storage: nil, want: false},
-		{name: "matching bucket, created true", storage: &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true}, want: true},
-		{name: "matching bucket, created false", storage: &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: false}, want: false},
-		{name: "different bucket, created true", storage: &forgev1alpha1.StorageStatus{Bucket: "some-other-bucket", Created: true}, want: false},
+		{name: "matching bucket, created true, fresh", storage: &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true, CreatedAt: now}, want: true},
+		{name: "matching bucket, created false", storage: &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: false, CreatedAt: now}, want: false},
+		{name: "different bucket, created true, fresh", storage: &forgev1alpha1.StorageStatus{Bucket: "some-other-bucket", Created: true, CreatedAt: now}, want: false},
+		{
+			name: "matching bucket, created true, but past the claim window",
+			// The exact scenario bucketCreationClaimWindow exists to close:
+			// Created/Bucket alone would still say "ours" here even though
+			// this record is old enough that the name could plausibly have
+			// been released and reused by something else entirely since.
+			storage: &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true, CreatedAt: stale},
+			want:    false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

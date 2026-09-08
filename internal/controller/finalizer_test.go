@@ -5,7 +5,9 @@ import (
 	"testing"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -181,6 +183,31 @@ func TestFinalizeApplication_NoOpForUnrecognizedProvider(t *testing.T) {
 	}
 }
 
+func TestFinalizeApplication_UsesStatusStorageWhenSpecStorageIsNil(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+
+	// Simulates an Application deleted after spec.storage was already
+	// removed, before the cleanup that removal should have triggered ever
+	// ran (see reconcileStorage) -- Status.Storage is the only remaining
+	// record of what to clean up. The missing credentials Secret proves the
+	// AWS cleanup path was actually entered (manager construction fails)
+	// rather than silently no-op'd the way TestFinalizeApplication_NoOpWhenStorageIsNil
+	// correctly does when there's no prior status either.
+	app := newTestApplication()
+	app.Status.Storage = &forgev1alpha1.StorageStatus{
+		Provider:   forgev1alpha1.ProviderAWSS3,
+		Bucket:     testBucket,
+		SecretName: testMissingCredsSecret,
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.finalizeApplication(context.Background(), app); err == nil {
+		t.Fatalf("expected error: cleanup should have been attempted using Status.Storage, got nil")
+	}
+}
+
 func TestFinalizeApplication_ReturnsErrorWhenAWSManagerCreationFails(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)
@@ -229,6 +256,11 @@ func TestFinalizeApplication_SetsStorageReadyCleanupFailedOnError(t *testing.T) 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
+	provider := string(forgev1alpha1.ProviderAWSS3)
+	forgemetrics.FinalizerCleanupTotal.Reset()
+	forgemetrics.StorageReady.Reset()
+	forgemetrics.StorageReady.WithLabelValues(app.Namespace, app.Name, provider).Set(1)
+
 	if err := r.finalizeApplication(context.Background(), app); err == nil {
 		t.Fatalf("expected error when AWS storage manager creation fails, got nil")
 	}
@@ -249,6 +281,18 @@ func TestFinalizeApplication_SetsStorageReadyCleanupFailedOnError(t *testing.T) 
 	}
 	if storageReady.Reason != "BucketCleanupFailed" {
 		t.Fatalf("expected reason BucketCleanupFailed, got %q", storageReady.Reason)
+	}
+
+	// The manager-creation failure here is a k8s NotFound (missing Secret),
+	// not an AWS SDK error, so it classifies as other_error rather than
+	// timeout/access_denied/not_owned.
+	if got := testutil.ToFloat64(forgemetrics.FinalizerCleanupTotal.WithLabelValues(provider, outcomeOther)); got != 1 {
+		t.Fatalf("expected FinalizerCleanupTotal{outcome=other_error} to be 1, got %v", got)
+	}
+	// Cleanup failed, so the Application isn't actually gone yet -- its
+	// StorageReady gauge series must stay in place, not be deleted.
+	if got := testutil.CollectAndCount(forgemetrics.StorageReady); got != 1 {
+		t.Fatalf("expected StorageReady gauge series to survive a failed cleanup, got %d series", got)
 	}
 }
 
@@ -272,8 +316,18 @@ func TestFinalizeApplication_RetainSkipsCloudCleanupForAWS(t *testing.T) {
 	rec := &fakeEventRecorder{}
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme, Recorder: rec}
 
+	forgemetrics.StorageReady.Reset()
+	forgemetrics.StorageReady.WithLabelValues(app.Namespace, app.Name, string(forgev1alpha1.ProviderAWSS3)).Set(1)
+
 	if err := r.finalizeApplication(context.Background(), app); err != nil {
 		t.Fatalf("expected nil error when retaining storage, got %v", err)
+	}
+
+	// Retain still means the Application itself is going away -- only the
+	// cloud bucket is left alone -- so its StorageReady gauge series must be
+	// dropped, same as the Delete path.
+	if got := testutil.CollectAndCount(forgemetrics.StorageReady); got != 0 {
+		t.Fatalf("expected StorageReady gauge series to be deleted after a successful Retain finalize, got %d series", got)
 	}
 
 	got := &forgev1alpha1.Application{}

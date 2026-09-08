@@ -37,7 +37,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // readinessRequeueInterval is how soon Reconcile re-checks readiness when not yet ready.
@@ -66,7 +70,7 @@ type ApplicationReconciler struct {
 }
 
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=forge.ningendo7.github.io,resources=applications,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=forge.ningendo7.github.io,resources=applications/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=forge.ningendo7.github.io,resources=applications/finalizers,verbs=update
@@ -80,10 +84,36 @@ type ApplicationReconciler struct {
 func (r *ApplicationReconciler) Reconcile(
 	ctx context.Context,
 	req ctrl.Request,
-) (ctrl.Result, error) {
+) (result ctrl.Result, err error) {
 
-	logger := logf.FromContext(ctx)
-	logger.Info("Reconciling Application", "name", req.Name, "namespace", req.Namespace)
+	// Root span for this reconcile -- every other span this operator
+	// creates nests under this one because ctx carries it from here on.
+	// One trace per reconcile is the whole point: open one in Jaeger and
+	// see exactly where the time went, not just that it went somewhere.
+	ctx, span := forgemetrics.Tracer().Start(ctx, "Reconcile",
+		trace.WithAttributes(
+			attribute.String("forge.application.name", req.Name),
+			attribute.String("forge.application.namespace", req.Namespace),
+		),
+	)
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
+
+	// Enrich ctx itself with these fields, not just the local logger --
+	// every downstream call derives its own logger via logf.FromContext(ctx), and none of
+	// them previously had any way to know which Application they belonged
+	// to. Without this, every one of those logs is identical across every
+	// Application in every namespace -- impossible to tell apart once more
+	// than one Application is reconciling concurrently (MaxConcurrentReconciles
+	// makes that the normal case, not an edge case).
+	logger := logf.FromContext(ctx, "application", req.Name, "namespace", req.Namespace)
+	ctx = logf.IntoContext(ctx, logger)
+	logger.Info("Reconciling Application")
 
 	application := &forgev1alpha1.Application{}
 	if err := r.Get(ctx, req.NamespacedName, application); err != nil {
@@ -96,7 +126,7 @@ func (r *ApplicationReconciler) Reconcile(
 
 	isDeleting, err := r.handleFinalizer(ctx, application)
 	if err != nil {
-		logger.Error(err, "Error handling finalizer for Application", "name", req.Name, "namespace", req.Namespace)
+		logger.Error(err, "Error handling finalizer for Application")
 		return ctrl.Result{}, err
 	}
 
@@ -106,34 +136,38 @@ func (r *ApplicationReconciler) Reconcile(
 	}
 
 	if err := r.ensureDesiredState(ctx, application); err != nil {
-		logger.Error(err, "Failed to reconcile desired state", "name", req.Name, "namespace", req.Namespace)
+		logger.Error(err, "Failed to reconcile desired state")
 		if statusErr := r.StatusManager.SetFailed(ctx, application, err); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
+		forgemetrics.ApplicationReady.WithLabelValues(application.Namespace, application.Name).Set(0)
 		return ctrl.Result{}, err
 	}
 
 	ready, reason, err := r.StatusManager.EvaluateComputeReadiness(ctx, application)
 	if err != nil {
-		logger.Error(err, "Failed to evaluate Application readiness", "name", req.Name, "namespace", req.Namespace)
+		logger.Error(err, "Failed to evaluate Application readiness")
 		if statusErr := r.StatusManager.SetFailed(ctx, application, err); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
+		forgemetrics.ApplicationReady.WithLabelValues(application.Namespace, application.Name).Set(0)
 		return ctrl.Result{}, err
 	}
 
 	if !ready {
-		logger.Info("Application not yet ready", "name", req.Name, "namespace", req.Namespace, "reason", reason)
+		logger.Info("Application not yet ready", "reason", reason)
 		if err := r.StatusManager.SetReconciling(ctx, application, reason); err != nil {
 			return ctrl.Result{}, err
 		}
+		forgemetrics.ApplicationReady.WithLabelValues(application.Namespace, application.Name).Set(0)
 		return ctrl.Result{RequeueAfter: readinessRequeueInterval}, nil
 	}
 
-	logger.Info("Successfully reconciled Application", "name", req.Name, "namespace", req.Namespace)
+	logger.Info("Successfully reconciled Application")
 	if err := r.StatusManager.SetReady(ctx, application, reason); err != nil {
 		return ctrl.Result{}, err
 	}
+	forgemetrics.ApplicationReady.WithLabelValues(application.Namespace, application.Name).Set(1)
 
 	if application.Spec.Storage != nil {
 		return ctrl.Result{RequeueAfter: storageResyncInterval}, nil
