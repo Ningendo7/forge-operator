@@ -6,9 +6,11 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -37,6 +39,38 @@ func logStorageStatusUpdateError(ctx context.Context, err error) {
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "Failed to update Application storage status")
 	}
+}
+
+// retryStatusUpdate persists application.Status via Status().Update(),
+// retrying with a freshly-fetched copy on a resourceVersion conflict rather
+// than surfacing it as a hard Reconcile error. Mirrors
+// status.StatusManager.UpdateStatus's own fix for the identical class of bug
+// (see its doc comment for the full mechanism: application was Get()'d from
+// the manager's informer cache, which can briefly lag the API server's true
+// state right after a fast preceding write, so the resourceVersion this
+// Update() carries can be stale) -- generalized here for every place in this
+// package (and the s3/Akamai storage manager packages, which have their own
+// copy of this same helper) that writes application.Status directly instead
+// of going through StatusManager. Unlike StatusManager, this re-fetches via
+// the same cached client rather than a dedicated uncached APIReader (not
+// available to every caller of this helper) -- RetryOnConflict's own backoff
+// between attempts is relied on to give the cache time to catch up instead.
+func retryStatusUpdate(ctx context.Context, c client.Client, application *forgev1alpha1.Application) error {
+	desiredStatus := application.Status
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		application.Status = desiredStatus
+		updateErr := c.Status().Update(ctx, application)
+		if updateErr == nil {
+			return nil
+		}
+		if !apierrors.IsConflict(updateErr) {
+			return updateErr
+		}
+		if getErr := c.Get(ctx, client.ObjectKeyFromObject(application), application); getErr != nil {
+			return getErr
+		}
+		return updateErr
+	})
 }
 
 // s3StorageManager and akamaiStorageManager are the minimal surfaces reconcileAWSStorage
@@ -98,7 +132,7 @@ func (r *ApplicationReconciler) reconcileStorage(
 			// configured shows: none at all.
 			application.Status.Storage = nil
 			apimeta.RemoveStatusCondition(&application.Status.Conditions, storagestatus.StorageReady)
-			if err := r.Status().Update(ctx, application); err != nil {
+			if err := retryStatusUpdate(ctx, r.Client, application); err != nil {
 				return fmt.Errorf("failed to clear storage status after cleanup: %w", err)
 			}
 		}
@@ -126,7 +160,7 @@ func (r *ApplicationReconciler) reconcileStorage(
 	default:
 		err := fmt.Errorf("unsupported storage provider: %s", application.Spec.Storage.Provider)
 		storagestatus.SetNotReady(application, err)
-		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+		logStorageStatusUpdateError(ctx, retryStatusUpdate(ctx, r.Client, application))
 		return err
 	}
 
@@ -185,7 +219,7 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 
 	if err != nil {
 		storagestatus.SetNotReady(application, err)
-		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+		logStorageStatusUpdateError(ctx, retryStatusUpdate(ctx, r.Client, application))
 		forgemetrics.StorageReconcileTotal.WithLabelValues(provider, classifyAWSStorageError(err, outcomeNotOwned)).Inc()
 		forgemetrics.StorageReady.WithLabelValues(application.Namespace, application.Name, provider).Set(0)
 		return fmt.Errorf("failed to create S3 storage manager: %w", err)
@@ -200,7 +234,7 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 		} else {
 			storagestatus.SetNotReady(application, err)
 		}
-		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+		logStorageStatusUpdateError(ctx, retryStatusUpdate(ctx, r.Client, application))
 		forgemetrics.StorageReconcileTotal.WithLabelValues(provider, outcome).Inc()
 		forgemetrics.StorageReady.WithLabelValues(application.Namespace, application.Name, provider).Set(0)
 		return fmt.Errorf("failed to reconcile S3 bucket: %w", err)
@@ -237,7 +271,7 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 
 	storagestatus.SetReady(application, storageStatus, "S3 bucket and IRSA role provisioned")
 
-	if err := r.Status().Update(ctx, application); err != nil {
+	if err := retryStatusUpdate(ctx, r.Client, application); err != nil {
 		return fmt.Errorf("failed to update storage status: %w", err)
 	}
 
@@ -291,7 +325,7 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	)
 	if err != nil {
 		storagestatus.SetNotReady(application, err)
-		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+		logStorageStatusUpdateError(ctx, retryStatusUpdate(ctx, r.Client, application))
 		forgemetrics.StorageReconcileTotal.WithLabelValues(provider, classifyAkamaiStorageError(err, outcomeNotOwned)).Inc()
 		forgemetrics.StorageReady.WithLabelValues(application.Namespace, application.Name, provider).Set(0)
 		return nil, fmt.Errorf("failed to create Akamai storage manager: %w", err)
@@ -306,7 +340,7 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 		} else {
 			storagestatus.SetNotReady(application, err)
 		}
-		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+		logStorageStatusUpdateError(ctx, retryStatusUpdate(ctx, r.Client, application))
 		forgemetrics.StorageReconcileTotal.WithLabelValues(provider, outcome).Inc()
 		forgemetrics.StorageReady.WithLabelValues(application.Namespace, application.Name, provider).Set(0)
 		return nil, fmt.Errorf("failed to reconcile Akamai bucket: %w", err)
@@ -344,7 +378,7 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 
 	storagestatus.SetReady(application, storageStatus, "Akamai bucket and access key provisioned")
 
-	if err := r.Status().Update(ctx, application); err != nil {
+	if err := retryStatusUpdate(ctx, r.Client, application); err != nil {
 		return nil, fmt.Errorf("failed to update storage status: %w", err)
 	}
 

@@ -138,7 +138,7 @@ func (r *ApplicationReconciler) finalizeApplication(
 	switch provider {
 	case forgev1alpha1.ProviderAWSS3:
 		storagestatus.SetCleanupInProgress(application)
-		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+		logStorageStatusUpdateError(ctx, retryStatusUpdate(ctx, r.Client, application))
 
 		cloudCtx, cancel := context.WithTimeout(ctx, finalizerCleanupTimeout)
 		defer cancel()
@@ -176,7 +176,7 @@ func (r *ApplicationReconciler) finalizeApplication(
 		}
 	case forgev1alpha1.ProviderAkamaiObjectStorage:
 		storagestatus.SetCleanupInProgress(application)
-		logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+		logStorageStatusUpdateError(ctx, retryStatusUpdate(ctx, r.Client, application))
 
 		cloudCtx, cancel := context.WithTimeout(ctx, finalizerCleanupTimeout)
 		defer cancel()
@@ -229,7 +229,7 @@ func (r *ApplicationReconciler) retainStorage(
 	bucket string,
 ) {
 	storagestatus.SetRetained(application, bucket)
-	logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+	logStorageStatusUpdateError(ctx, retryStatusUpdate(ctx, r.Client, application))
 
 	if r.Recorder != nil {
 		r.Recorder.Eventf(application, nil, corev1.EventTypeNormal, "StorageRetained", "Cleanup",
@@ -247,6 +247,6 @@ func (r *ApplicationReconciler) failStorageCleanup(
 	err error,
 ) error {
 	storagestatus.SetCleanupFailed(application, err)
-	logStorageStatusUpdateError(ctx, r.Status().Update(ctx, application))
+	logStorageStatusUpdateError(ctx, retryStatusUpdate(ctx, r.Client, application))
 	return err
 }

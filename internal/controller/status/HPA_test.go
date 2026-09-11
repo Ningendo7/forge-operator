@@ -18,7 +18,7 @@ func newHPATestClient(objs ...runtime.Object) *fake.ClientBuilder {
 
 func TestIsHPAReady_NotFound(t *testing.T) {
 	fakeClient := newHPATestClient().Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.IsHPAReady(context.Background(), testNamespace, testHPAName)
 	if err != nil {
@@ -39,7 +39,7 @@ func TestIsHPAReady_ObservedGenerationLagsSpec(t *testing.T) {
 		Status:     autoscalingv2.HorizontalPodAutoscalerStatus{ObservedGeneration: &observed},
 	}
 	fakeClient := newHPATestClient(hpa).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, _, err := s.IsHPAReady(context.Background(), testNamespace, testHPAName)
 	if err != nil {
@@ -60,7 +60,7 @@ func TestIsHPAReady_AbleToScaleFalse(t *testing.T) {
 		},
 	}
 	fakeClient := newHPATestClient(hpa).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.IsHPAReady(context.Background(), testNamespace, testHPAName)
 	if err != nil {
@@ -85,7 +85,7 @@ func TestIsHPAReady_ReadyWhenNoIssues(t *testing.T) {
 		},
 	}
 	fakeClient := newHPATestClient(hpa).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.IsHPAReady(context.Background(), testNamespace, testHPAName)
 	if err != nil {

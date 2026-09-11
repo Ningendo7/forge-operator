@@ -38,7 +38,7 @@ func TestReconcile_ReturnsNilWhenApplicationNotFound(t *testing.T) {
 	r := &ApplicationReconciler{
 		Client:        fakeClient,
 		Scheme:        scheme,
-		StatusManager: statusmanager.NewStatusManager(fakeClient),
+		StatusManager: statusmanager.NewStatusManager(fakeClient, fakeClient),
 	}
 
 	result, err := r.Reconcile(context.Background(), reconcile.Request{
@@ -59,7 +59,7 @@ func TestReconcile_SetsFailedStatusWhenEnsureDesiredStateFails(t *testing.T) {
 	r := &ApplicationReconciler{
 		Client:        &failingPatchClient{Client: fakeClient},
 		Scheme:        scheme,
-		StatusManager: statusmanager.NewStatusManager(fakeClient),
+		StatusManager: statusmanager.NewStatusManager(fakeClient, fakeClient),
 	}
 
 	forgemetrics.ApplicationReady.Reset()
@@ -92,7 +92,7 @@ func TestReconcile_RequeuesWhenComputeNotYetReady(t *testing.T) {
 	r := &ApplicationReconciler{
 		Client:        fakeClient,
 		Scheme:        scheme,
-		StatusManager: statusmanager.NewStatusManager(fakeClient),
+		StatusManager: statusmanager.NewStatusManager(fakeClient, fakeClient),
 	}
 
 	forgemetrics.ApplicationReady.Reset()
@@ -132,7 +132,7 @@ func TestReconcile_SetsReadyWhenComputeIsHealthy(t *testing.T) {
 	r := &ApplicationReconciler{
 		Client:        fakeClient,
 		Scheme:        scheme,
-		StatusManager: statusmanager.NewStatusManager(fakeClient),
+		StatusManager: statusmanager.NewStatusManager(fakeClient, fakeClient),
 	}
 
 	// First reconcile creates the child resources (Deployment will not be ready yet).
@@ -187,7 +187,7 @@ func TestReconcile_ReturnsEarlyWhenDeleting(t *testing.T) {
 	r := &ApplicationReconciler{
 		Client:        fakeClient,
 		Scheme:        scheme,
-		StatusManager: statusmanager.NewStatusManager(fakeClient),
+		StatusManager: statusmanager.NewStatusManager(fakeClient, fakeClient),
 	}
 
 	if err := fakeClient.Delete(context.Background(), app); err != nil {

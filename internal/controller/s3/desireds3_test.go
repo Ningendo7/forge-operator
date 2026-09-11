@@ -216,6 +216,96 @@ func TestEnsureBucketExists_ClaimsEmptyTagSetWhenPreviouslyCreatedByUs(t *testin
 	}
 }
 
+func TestEnsureBucketExists_PreservesUnrelatedTagsWhenClaiming(t *testing.T) {
+	// PutBucketTagging replaces a bucket's entire tag set rather than
+	// merging into it -- so claiming ownership must round-trip whatever
+	// unrelated tags (Terraform's default_tags, cost-allocation tags, ...)
+	// the bucket already carried, not just write the ownership tag alone.
+	unrelatedTag := s3types.Tag{Key: aws.String("cost-center"), Value: aws.String("platform")}
+	var putTagSet []s3types.Tag
+	m := newTestManager(&mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return &s3sdk.GetBucketTaggingOutput{TagSet: []s3types.Tag{unrelatedTag}}, nil
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			putTagSet = params.Tagging.TagSet
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}, nil)
+	m.app.Status.Storage = &forgev1alpha1.StorageStatus{Bucket: testBucket, Created: true, CreatedAt: metav1.Now()}
+
+	if err := m.ensureBucketExists(context.Background()); err != nil {
+		t.Fatalf("ensureBucketExists returned error: %v", err)
+	}
+
+	foundOwner, foundUnrelated := false, false
+	for _, tag := range putTagSet {
+		switch aws.ToString(tag.Key) {
+		case ownerTagKey:
+			foundOwner = aws.ToString(tag.Value) == string(testAppUID)
+		case "cost-center":
+			foundUnrelated = aws.ToString(tag.Value) == "platform"
+		}
+	}
+	if !foundOwner {
+		t.Fatalf("expected the ownership tag to be set, got %#v", putTagSet)
+	}
+	if !foundUnrelated {
+		t.Fatalf("expected the pre-existing, unrelated tag to survive claiming ownership, got %#v", putTagSet)
+	}
+}
+
+func TestEnsureBucketExists_PreservesUnrelatedTagsWhenAdopting(t *testing.T) {
+	// Same preservation requirement on the adopt-bucket path, which
+	// overwrites an existing (mismatched) ownership tag rather than adding
+	// one to an empty set -- every *other* tag must still round-trip, and
+	// the old owner's tag must not linger alongside the new one.
+	unrelatedTag := s3types.Tag{Key: aws.String("cost-center"), Value: aws.String("platform")}
+	var putTagSet []s3types.Tag
+	m := newTestManager(&mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return &s3sdk.GetBucketTaggingOutput{
+				TagSet: []s3types.Tag{
+					unrelatedTag,
+					{Key: aws.String(ownerTagKey), Value: aws.String(string(testOtherUID))},
+				},
+			}, nil
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			putTagSet = params.Tagging.TagSet
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}, nil)
+	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
+
+	if err := m.ensureBucketExists(context.Background()); err != nil {
+		t.Fatalf("ensureBucketExists returned error: %v", err)
+	}
+
+	ownerCount, foundOwner, foundUnrelated := 0, false, false
+	for _, tag := range putTagSet {
+		switch aws.ToString(tag.Key) {
+		case ownerTagKey:
+			ownerCount++
+			foundOwner = aws.ToString(tag.Value) == string(testAppUID)
+		case "cost-center":
+			foundUnrelated = aws.ToString(tag.Value) == "platform"
+		}
+	}
+	if ownerCount != 1 || !foundOwner {
+		t.Fatalf("expected exactly one ownership tag set to this Application's UID, got %#v", putTagSet)
+	}
+	if !foundUnrelated {
+		t.Fatalf("expected the pre-existing, unrelated tag to survive adoption, got %#v", putTagSet)
+	}
+}
+
 func TestEnsureBucketExists_ClaimsEmptyTagSetWhenAdoptAnnotationSet(t *testing.T) {
 	var taggedOwner string
 	m := newTestManager(&mockS3Client{
@@ -454,7 +544,7 @@ func TestTagAsOwned_PropagatesError(t *testing.T) {
 		},
 	}, nil)
 
-	if err := m.tagAsOwned(context.Background()); err == nil {
+	if err := m.tagAsOwned(context.Background(), nil); err == nil {
 		t.Fatalf("expected error from tagAsOwned, got nil")
 	}
 }

@@ -45,7 +45,7 @@ func TestEvaluateComputeReadiness_NotReadyWhenServiceMissing(t *testing.T) {
 	app := newTestApplication()
 	scheme := newComputeReadyScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(readyDeployment()).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.EvaluateComputeReadiness(context.Background(), app)
 	if err != nil {
@@ -63,7 +63,7 @@ func TestEvaluateComputeReadiness_NotReadyWhenDeploymentNotReady(t *testing.T) {
 	app := newTestApplication()
 	scheme := newComputeReadyScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(readyService()).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, _, err := s.EvaluateComputeReadiness(context.Background(), app)
 	if err != nil {
@@ -79,7 +79,7 @@ func TestEvaluateComputeReadiness_NotReadyWhenIngressEnabledButNotReady(t *testi
 	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: "example.com"}
 	scheme := newComputeReadyScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(readyService(), readyDeployment()).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.EvaluateComputeReadiness(context.Background(), app)
 	if err != nil {
@@ -94,7 +94,7 @@ func TestEvaluateComputeReadiness_SkipsIngressCheckWhenNotConfigured(t *testing.
 	app := newTestApplication()
 	scheme := newComputeReadyScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(readyService(), readyDeployment()).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.EvaluateComputeReadiness(context.Background(), app)
 	if err != nil {
@@ -110,7 +110,7 @@ func TestEvaluateComputeReadiness_NotReadyWhenAutoscalingEnabledButNotReady(t *t
 	app.Spec.Autoscaling = &forgev1alpha1.AutoscalingSpec{MinReplicas: 1, MaxReplicas: 3}
 	scheme := newComputeReadyScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(readyService(), readyDeployment()).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.EvaluateComputeReadiness(context.Background(), app)
 	if err != nil {
@@ -127,7 +127,7 @@ func TestEvaluateComputeReadiness_NotReadyWhenPDBEnabledButNotReady(t *testing.T
 	app.Spec.PDB = &forgev1alpha1.PDBSpec{MinAvailable: &minAvailable}
 	scheme := newComputeReadyScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(readyService(), readyDeployment()).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.EvaluateComputeReadiness(context.Background(), app)
 	if err != nil {
@@ -171,7 +171,7 @@ func TestEvaluateComputeReadiness_ReadyWhenAllEnabledResourcesAreReady(t *testin
 		WithScheme(scheme).
 		WithObjects(readyService(), readyDeployment(), ingress, hpa, pdb).
 		Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.EvaluateComputeReadiness(context.Background(), app)
 	if err != nil {

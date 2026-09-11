@@ -98,7 +98,7 @@ var _ = BeforeSuite(func() {
 	err = (&ApplicationReconciler{
 		Client:        k8sManager.GetClient(),
 		Scheme:        k8sManager.GetScheme(),
-		StatusManager: statusmanager.NewStatusManager(k8sManager.GetClient()),
+		StatusManager: statusmanager.NewStatusManager(k8sManager.GetClient(), k8sManager.GetAPIReader()),
 	}).SetupWithManager(k8sManager)
 	Expect(err).NotTo(HaveOccurred())
 

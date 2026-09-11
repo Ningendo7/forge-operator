@@ -18,7 +18,7 @@ func newPDBTestClient(objs ...runtime.Object) *fake.ClientBuilder {
 
 func TestIsPDBReady_NotFound(t *testing.T) {
 	fakeClient := newPDBTestClient().Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.IsPDBReady(context.Background(), testNamespace, testPDBName)
 	if err != nil {
@@ -42,7 +42,7 @@ func TestIsPDBReady_UnhealthyWhenNoDisruptionsAllowedAndBelowDesired(t *testing.
 		},
 	}
 	fakeClient := newPDBTestClient(pdb).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.IsPDBReady(context.Background(), testNamespace, testPDBName)
 	if err != nil {
@@ -63,7 +63,7 @@ func TestIsPDBReady_HealthyWhenDisruptionsAllowed(t *testing.T) {
 		},
 	}
 	fakeClient := newPDBTestClient(pdb).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.IsPDBReady(context.Background(), testNamespace, testPDBName)
 	if err != nil {
@@ -84,7 +84,7 @@ func TestIsPDBReady_HealthyWhenCurrentMeetsDesiredDespiteNoDisruptionsAllowed(t 
 		},
 	}
 	fakeClient := newPDBTestClient(pdb).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.IsPDBReady(context.Background(), testNamespace, testPDBName)
 	if err != nil {

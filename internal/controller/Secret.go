@@ -212,6 +212,27 @@ func (r *ApplicationReconciler) reconcileStorageSecret(
 		return r.deleteStaleSecrets(ctx, application, secretRoleStorage, "")
 	}
 
+	// AWS with an explicitly-set spec.storage.secretName means "use static
+	// credentials from this Secret instead of IRSA" (see s3storage.NewManager)
+	// -- that Secret is a user-supplied input the operator only ever reads,
+	// playing the same role AkamaiTokenSecret's accessKeySecretRef plays for
+	// Akamai's own input token (see that function's doc comment for the
+	// identical reasoning). Taking ownership of it the same way this
+	// function does for its own generated output Secret below -- via
+	// SetControllerReference plus a force-applied SSA write -- would mean
+	// deleting the Application cascades into deleting the user's own
+	// credentials Secret, even though this operator never created it.
+	// Confirmed live: deleting an Application configured this way deleted a
+	// Secret the operator never made, breaking reuse of the same static
+	// credentials across a deleted-and-recreated Application (exactly an
+	// adopt-bucket workflow). The informational fields this function would
+	// otherwise write (provider/bucket/region/endpoint/role_arn) are already
+	// readable from Application.Status.Storage directly, so skipping the
+	// write here loses nothing.
+	if application.Spec.Storage.Provider == forgev1alpha1.ProviderAWSS3 && application.Spec.Storage.SecretName != "" {
+		return r.deleteStaleSecrets(ctx, application, secretRoleStorage, "")
+	}
+
 	logger.Info("Reconciling Storage Secret")
 
 	desired := r.desiredStorage(application, akamaiCreds)

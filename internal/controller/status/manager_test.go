@@ -15,7 +15,7 @@ func newTestStatusManager(app *forgev1alpha1.Application) *StatusManager {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
-	return NewStatusManager(fakeClient)
+	return NewStatusManager(fakeClient, fakeClient)
 }
 
 func TestSetReconciling_SetsProgressingTrueAndReadyFalse(t *testing.T) {
@@ -117,7 +117,7 @@ func TestUpdateStatus_ReturnsErrorWhenClientFails(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
-	s := NewStatusManager(&failingStatusClient{Client: fakeClient})
+	s := NewStatusManager(&failingStatusClient{Client: fakeClient}, fakeClient)
 
 	if err := s.UpdateStatus(context.Background(), app); err == nil {
 		t.Fatalf("expected error from UpdateStatus, got nil")

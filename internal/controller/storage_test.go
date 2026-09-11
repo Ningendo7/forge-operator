@@ -271,6 +271,58 @@ func TestReconcileStorageSecret_SetsControllerReference(t *testing.T) {
 	}
 }
 
+func TestReconcileStorageSecret_DoesNotOwnAWSStaticCredentialsSecret(t *testing.T) {
+	// spec.storage.secretName, when explicitly set for AWS, means "use
+	// static credentials from this Secret instead of IRSA" -- a
+	// user-supplied input this operator only ever reads (see
+	// s3storage.NewManager), never one it should own or overwrite. Before
+	// this fix, reconcileStorageSecret treated it identically to its own
+	// generated output Secret (SetControllerReference + force-applied SSA
+	// write), so deleting the Application cascaded into deleting the user's
+	// own credentials Secret -- confirmed live against a real EKS cluster.
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	const userSecretName = "user-static-creds"
+	userSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: userSecretName, Namespace: testNamespace},
+		Data: map[string][]byte{
+			"AWS_ACCESS_KEY_ID":     []byte("AKIAEXAMPLE"),
+			"AWS_SECRET_ACCESS_KEY": []byte("secretexample"),
+		},
+	}
+
+	app := newTestApplication()
+	app.UID = "12345"
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider:   forgev1alpha1.ProviderAWSS3,
+		Bucket:     testBucket,
+		SecretName: userSecretName,
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(userSecret).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileStorageSecret(context.Background(), app, nil); err != nil {
+		t.Fatalf("reconcileStorageSecret returned error: %v", err)
+	}
+
+	secret := &corev1.Secret{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: userSecretName, Namespace: testNamespace}, secret); err != nil {
+		t.Fatalf("failed to get user's static-credentials Secret: %v", err)
+	}
+	if len(secret.OwnerReferences) != 0 {
+		t.Fatalf("expected no owner references on the user's own Secret (would cascade-delete it with the Application), got %#v", secret.OwnerReferences)
+	}
+	if _, ok := secret.Data["provider"]; ok {
+		t.Fatalf("expected the user's Secret to be left untouched, but it was written with operator-informational fields: %#v", secret.Data)
+	}
+	if string(secret.Data["AWS_ACCESS_KEY_ID"]) != "AKIAEXAMPLE" {
+		t.Fatalf("expected the user's own credential data to survive unchanged, got %#v", secret.Data)
+	}
+}
+
 // --- reconcileStorage dispatch ---
 
 func TestReconcileStorage_NilStorageReconcilesSecretOnly(t *testing.T) {

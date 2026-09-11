@@ -182,6 +182,52 @@ func TestAbortMultipartUploads_ReturnsNilWhenBucketNotFound(t *testing.T) {
 	}
 }
 
+func TestAbortMultipartUploads_PropagatesPerUploadAbortError(t *testing.T) {
+	// AbortMultipartUpload's own error was previously discarded outright
+	// (`_, _ = m.s3client.AbortMultipartUpload(...)`) -- a genuine failure
+	// here (permission denied, network error, ...) must be surfaced, not
+	// silently treated as success while the upload is actually still
+	// sitting in the bucket (and still billed).
+	m := newTestManager(&mockS3Client{
+		listMultipartUploadsFunc: func(ctx context.Context, params *s3sdk.ListMultipartUploadsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.ListMultipartUploadsOutput, error) {
+			return &s3sdk.ListMultipartUploadsOutput{
+				Uploads: []s3types.MultipartUpload{
+					{Key: aws.String("upload1.txt"), UploadId: aws.String("id1")},
+				},
+			}, nil
+		},
+		abortMultipartUploadFunc: func(ctx context.Context, params *s3sdk.AbortMultipartUploadInput, optFns ...func(*s3sdk.Options)) (*s3sdk.AbortMultipartUploadOutput, error) {
+			return nil, errors.New("abort denied")
+		},
+	}, nil)
+
+	if err := m.abortMultipartUploads(context.Background()); err == nil {
+		t.Fatalf("expected abortMultipartUploads to propagate a per-upload abort failure, got nil")
+	}
+}
+
+func TestAbortMultipartUploads_TreatsAlreadyGoneUploadAsSuccess(t *testing.T) {
+	// A concurrent retry aborting/completing the same upload first is not a
+	// failure -- same "already gone" treatment isNotFoundError gets
+	// elsewhere in this file.
+	m := newTestManager(&mockS3Client{
+		listMultipartUploadsFunc: func(ctx context.Context, params *s3sdk.ListMultipartUploadsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.ListMultipartUploadsOutput, error) {
+			return &s3sdk.ListMultipartUploadsOutput{
+				Uploads: []s3types.MultipartUpload{
+					{Key: aws.String("upload1.txt"), UploadId: aws.String("id1")},
+				},
+			}, nil
+		},
+		abortMultipartUploadFunc: func(ctx context.Context, params *s3sdk.AbortMultipartUploadInput, optFns ...func(*s3sdk.Options)) (*s3sdk.AbortMultipartUploadOutput, error) {
+			return nil, newHTTPStatusError(404, "no such upload")
+		},
+	}, nil)
+
+	if err := m.abortMultipartUploads(context.Background()); err != nil {
+		t.Fatalf("expected an already-gone upload to be treated as success, got %v", err)
+	}
+}
+
 func TestAbortMultipartUploads_PropagatesListError(t *testing.T) {
 	m := newTestManager(&mockS3Client{
 		listMultipartUploadsFunc: func(ctx context.Context, params *s3sdk.ListMultipartUploadsInput, optFns ...func(*s3sdk.Options)) (*s3sdk.ListMultipartUploadsOutput, error) {
