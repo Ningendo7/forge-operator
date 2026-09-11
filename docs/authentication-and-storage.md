@@ -91,8 +91,8 @@ flowchart TD
 
 Before an `Application` reconciles against an existing bucket — whether it's finding one that already exists, or one it just created a moment ago — the operator verifies it's actually the owner, rather than silently adopting (and potentially later deleting) a bucket someone else created with the same name:
 
-- **AWS**: the bucket is tagged with the `Application`'s Kubernetes UID (`forge-operator.ningendo7.github.io/owner-uid`) on creation.
-- **Akamai**: Linode's Object Storage bucket API has no tagging support at all, so a small marker object (`.forge-operator-owner`) is written inside the bucket instead, via the S3-compatible protocol using the generated access key.
+- **AWS**: the bucket is tagged with the `Application`'s Kubernetes UID (`forge-operator.ningendo7.github.io/owner-uid`) on creation. S3's `PutBucketTagging` replaces a bucket's entire tag set rather than merging into it, so every write of this tag reads the bucket's existing tags first and writes them back alongside the ownership tag — any other tags on the bucket (Terraform's own `default_tags`, cost-allocation tags, anything else already there) are preserved, not wiped, each time ownership is (re-)established.
+- **Akamai**: Linode's Object Storage bucket API has no tagging support at all, so a small marker object (`.forge-operator-owner`) is written inside the bucket instead, via the S3-compatible protocol using the generated access key. This is a single-object write, not a tag-set replace, so it has no equivalent risk to the AWS case above.
 
 On every reconcile, the rule is the same for both providers: **no tag/marker at all → claim it, but only if this operator durably recorded (in `Application.status`) having created this exact bucket itself within the last hour, or the adopt-bucket annotation (below) is set; present and naming a different Application → reject (`Degraded`, reason `BucketNotOwned`), unless adopt-bucket is set; present and matching → proceed.**
 

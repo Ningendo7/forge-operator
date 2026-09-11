@@ -126,6 +126,92 @@ func TestDesiredServiceAccount_UsesConfiguredName(t *testing.T) {
 	}
 }
 
+func TestDesiredServiceAccount_OmitsIRSAAnnotationWhenRoleARNUnknown(t *testing.T) {
+	app := newTestApplication()
+
+	r := &ApplicationReconciler{}
+	sa := r.desiredServiceAccount(app)
+
+	if _, ok := sa.Annotations["eks.amazonaws.com/role-arn"]; ok {
+		t.Fatalf("expected no IRSA annotation before a role ARN is known, got %#v", sa.Annotations)
+	}
+}
+
+func TestDesiredServiceAccount_PreservesIRSAAnnotationFromStatus(t *testing.T) {
+	// annotateServiceAccountWithIRSA (called later, from storage
+	// reconciliation) and reconcileServiceAccount's own apply of this
+	// desired object both Server-Side Apply under the same field manager,
+	// which replaces that manager's entire claimed field set on every call.
+	// If this builder didn't carry the annotation forward once it's already
+	// known (via Status, from a prior reconcile), reconcileServiceAccount's
+	// own apply -- which always runs before annotateServiceAccountWithIRSA
+	// in the same pass -- would strip it every single reconcile, only for
+	// it to be re-added moments later: a real content change each time that
+	// self-perpetuates an unbounded reconcile loop once anything watches
+	// this object. Confirmed live against a real EKS cluster before this
+	// fix: exactly this ping-pong, sustained, ~1-2 reconciles/sec
+	// indefinitely, zero errors.
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Provider: forgev1alpha1.ProviderAWSS3, Bucket: testBucket}
+	app.Status.Storage = &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		AWS:      &forgev1alpha1.AWSStorageStatus{RoleARN: testRoleARN},
+	}
+
+	r := &ApplicationReconciler{}
+	sa := r.desiredServiceAccount(app)
+
+	if got := sa.Annotations["eks.amazonaws.com/role-arn"]; got != testRoleARN {
+		t.Fatalf("expected IRSA annotation %q to be carried forward from Status, got %q", testRoleARN, got)
+	}
+}
+
+func TestReconcileServiceAccount_DoesNotStripIRSAAnnotationOnSubsequentReconcile(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Provider: forgev1alpha1.ProviderAWSS3, Bucket: testBucket}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	// First reconcile: no role ARN known yet, matching a brand-new
+	// Application. Mirrors reconcileServiceAccount running before storage
+	// reconciliation has ever computed a role ARN.
+	if err := r.reconcileServiceAccount(context.Background(), app); err != nil {
+		t.Fatalf("initial reconcileServiceAccount returned error: %v", err)
+	}
+
+	// annotateServiceAccountWithIRSA runs next in a real reconcile, once
+	// storage reconciliation computes the role ARN.
+	if err := r.annotateServiceAccountWithIRSA(context.Background(), app, testRoleARN); err != nil {
+		t.Fatalf("annotateServiceAccountWithIRSA returned error: %v", err)
+	}
+
+	// Persist the role ARN the same way storage reconciliation does, so the
+	// *next* reconcile's desiredServiceAccount call has it available.
+	app.Status.Storage = &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		AWS:      &forgev1alpha1.AWSStorageStatus{RoleARN: testRoleARN},
+	}
+
+	// Second reconcile: this is the call that must NOT strip the annotation
+	// this time, since the role ARN is now known via Status.
+	if err := r.reconcileServiceAccount(context.Background(), app); err != nil {
+		t.Fatalf("second reconcileServiceAccount returned error: %v", err)
+	}
+
+	sa := &corev1.ServiceAccount{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testSAName, Namespace: testNamespace}, sa); err != nil {
+		t.Fatalf("failed to get ServiceAccount: %v", err)
+	}
+	if got := sa.Annotations["eks.amazonaws.com/role-arn"]; got != testRoleARN {
+		t.Fatalf("expected IRSA annotation %q to survive the second reconcileServiceAccount call, got %q (annotations: %#v)", testRoleARN, got, sa.Annotations)
+	}
+}
+
 func TestReconcileServiceAccount_CreatesServiceAccount(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)

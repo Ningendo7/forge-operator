@@ -268,7 +268,7 @@ func main() {
 		OIDCProviderARN:     oidcProviderARN,
 		OIDCProviderURL:     oidcProviderURL,
 		DefaultAkamaiRegion: defaultAkamaiRegion,
-		StatusManager:       statusmanager.NewStatusManager(mgr.GetClient()),
+		StatusManager:       statusmanager.NewStatusManager(mgr.GetClient(), mgr.GetAPIReader()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "application")
 		os.Exit(1)

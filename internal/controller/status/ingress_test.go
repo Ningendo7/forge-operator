@@ -18,7 +18,7 @@ func newIngressTestClient(objs ...runtime.Object) *fake.ClientBuilder {
 
 func TestIsIngressReady_NotFound(t *testing.T) {
 	fakeClient := newIngressTestClient().Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.IsIngressReady(context.Background(), testNamespace, testAppName)
 	if err != nil {
@@ -37,7 +37,7 @@ func TestIsIngressReady_PendingWhenLoadBalancerNil(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
 	}
 	fakeClient := newIngressTestClient(ing).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, _, err := s.IsIngressReady(context.Background(), testNamespace, testAppName)
 	if err != nil {
@@ -58,7 +58,7 @@ func TestIsIngressReady_ReadyWithIP(t *testing.T) {
 		},
 	}
 	fakeClient := newIngressTestClient(ing).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.IsIngressReady(context.Background(), testNamespace, testAppName)
 	if err != nil {
@@ -79,7 +79,7 @@ func TestIsIngressReady_ReadyWithHostname(t *testing.T) {
 		},
 	}
 	fakeClient := newIngressTestClient(ing).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.IsIngressReady(context.Background(), testNamespace, testAppName)
 	if err != nil {

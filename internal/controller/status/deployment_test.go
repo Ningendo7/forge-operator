@@ -20,7 +20,7 @@ func newDeploymentTestClient(objs ...runtime.Object) *fake.ClientBuilder {
 
 func TestIsDeploymentReady_NotFound(t *testing.T) {
 	fakeClient := newDeploymentTestClient().Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
@@ -42,7 +42,7 @@ func TestIsDeploymentReady_ObservedGenerationLagsSpec(t *testing.T) {
 		Status:     appsv1.DeploymentStatus{ObservedGeneration: 1},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, _, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
@@ -65,7 +65,7 @@ func TestIsDeploymentReady_ProgressingConditionFalse(t *testing.T) {
 		},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
@@ -91,7 +91,7 @@ func TestIsDeploymentReady_ReplicaFailureConditionTrue(t *testing.T) {
 		},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, _, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
@@ -110,7 +110,7 @@ func TestIsDeploymentReady_UpdatedReplicasBelowDesired(t *testing.T) {
 		Status:     appsv1.DeploymentStatus{UpdatedReplicas: 1},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, _, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
@@ -129,7 +129,7 @@ func TestIsDeploymentReady_AvailableReplicasBelowDesired(t *testing.T) {
 		Status:     appsv1.DeploymentStatus{UpdatedReplicas: 3, AvailableReplicas: 1},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, _, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
@@ -148,7 +148,7 @@ func TestIsDeploymentReady_ReadyReplicasBelowDesired(t *testing.T) {
 		Status:     appsv1.DeploymentStatus{UpdatedReplicas: 3, AvailableReplicas: 3, ReadyReplicas: 1},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, _, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
@@ -167,7 +167,7 @@ func TestIsDeploymentReady_FullyReady(t *testing.T) {
 		Status:     appsv1.DeploymentStatus{UpdatedReplicas: 3, AvailableReplicas: 3, ReadyReplicas: 3},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, msg, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {
@@ -184,7 +184,7 @@ func TestIsDeploymentReady_DefaultsDesiredReplicasToOneWhenUnset(t *testing.T) {
 		Status:     appsv1.DeploymentStatus{UpdatedReplicas: 1, AvailableReplicas: 1, ReadyReplicas: 1},
 	}
 	fakeClient := newDeploymentTestClient(dep).Build()
-	s := NewStatusManager(fakeClient)
+	s := NewStatusManager(fakeClient, fakeClient)
 
 	ready, _, err := s.IsDeploymentReady(context.Background(), testNamespace, testDeploymentName)
 	if err != nil {

@@ -62,7 +62,7 @@ func (r *ApplicationReconciler) desiredServiceAccount(
 	labels := map[string]string{appLabelKey: application.Name}
 	name := serviceAccountNameFor(application)
 
-	return &corev1.ServiceAccount{
+	sa := &corev1.ServiceAccount{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "ServiceAccount",
 			APIVersion: "v1",
@@ -73,6 +73,32 @@ func (r *ApplicationReconciler) desiredServiceAccount(
 			Labels:    labels,
 		},
 	}
+
+	// Carry forward the IRSA role-arn annotation from a prior reconcile's
+	// Status, if already known -- annotateServiceAccountWithIRSA (called
+	// later, from storage reconciliation) is the source of truth and always
+	// re-applies the current value regardless, but both calls Server-Side
+	// Apply under the same field manager ("forge-operator"), and SSA
+	// replaces that manager's *entire* claimed field set on every call. If
+	// this apply omitted the annotation, it would strip out whatever
+	// annotateServiceAccountWithIRSA set moments earlier in the *previous*
+	// reconcile -- and since that call always runs after this one, every
+	// single reconcile would strip the annotation here and re-add it later,
+	// a real (not just bookkeeping-only) content change each time that
+	// self-perpetuates an unbounded reconcile loop once anything is watching
+	// this object (confirmed live: exactly this ping-pong, sustained,
+	// zero errors, ~1-2 reconciles/sec indefinitely). Only ever an
+	// AWS-specific concern -- Akamai has no IRSA equivalent.
+	if application.Status.Storage != nil &&
+		application.Status.Storage.Provider == forgev1alpha1.ProviderAWSS3 &&
+		application.Status.Storage.AWS != nil &&
+		application.Status.Storage.AWS.RoleARN != "" {
+		sa.Annotations = map[string]string{
+			"eks.amazonaws.com/role-arn": application.Status.Storage.AWS.RoleARN,
+		}
+	}
+
+	return sa
 }
 
 // deleteStaleServiceAccounts deletes ServiceAccounts owned by application other than

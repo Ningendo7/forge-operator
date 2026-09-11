@@ -14,8 +14,11 @@ import (
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithy "github.com/aws/smithy-go"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
@@ -107,10 +110,35 @@ func (m *Manager) recordBucketCreated(ctx context.Context) error {
 		Created:   true,
 		CreatedAt: metav1.Now(),
 	}
-	if err := m.k8sClient.Status().Update(ctx, m.app); err != nil {
+	if err := retryStatusUpdate(ctx, m.k8sClient, m.app); err != nil {
 		return fmt.Errorf("failed to record bucket creation for %s: %w", m.bucket, err)
 	}
 	return nil
+}
+
+// retryStatusUpdate persists app.Status via Status().Update(), retrying with
+// a freshly-fetched copy on a resourceVersion conflict rather than
+// surfacing it as a hard error. See the identical helper (and its full doc
+// comment) in internal/controller/storage.go -- this is the same fix,
+// duplicated here since this package has no dependency on that one and pulls
+// its own client.Client in via NewManager rather than sharing the
+// controller's.
+func retryStatusUpdate(ctx context.Context, c client.Client, app *forgev1alpha1.Application) error {
+	desiredStatus := app.Status
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		app.Status = desiredStatus
+		updateErr := c.Status().Update(ctx, app)
+		if updateErr == nil {
+			return nil
+		}
+		if !apierrors.IsConflict(updateErr) {
+			return updateErr
+		}
+		if getErr := c.Get(ctx, client.ObjectKeyFromObject(app), app); getErr != nil {
+			return getErr
+		}
+		return updateErr
+	})
 }
 
 // previouslyCreatedByUs reports whether Application.Status durably records
@@ -182,13 +210,25 @@ func (m *Manager) ensureBucketExists(
 	return err
 }
 
-func (m *Manager) tagAsOwned(ctx context.Context) error {
+// tagAsOwned sets the ownership tag on the bucket. otherTags is every tag
+// the bucket already carries, excluding any prior ownership tag -- callers
+// are responsible for that exclusion (see tagsExcludingOwner), since
+// PutBucketTagging replaces a bucket's *entire* tag set rather than merging
+// into it. Without preserving otherTags here, claiming or re-claiming a
+// bucket would silently wipe out anything else already on it -- Terraform's
+// own default_tags, cost-allocation tags, compliance tags, whatever a human
+// or another tool put there -- every time ownership is (re-)established,
+// not just once.
+func (m *Manager) tagAsOwned(ctx context.Context, otherTags []s3types.Tag) error {
+	tagSet := append(otherTags, s3types.Tag{
+		Key:   aws.String(ownerTagKey),
+		Value: aws.String(string(m.app.UID)),
+	})
+
 	_, err := m.s3client.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
 		Bucket: aws.String(m.bucket),
 		Tagging: &s3types.Tagging{
-			TagSet: []s3types.Tag{
-				{Key: aws.String(ownerTagKey), Value: aws.String(string(m.app.UID))},
-			},
+			TagSet: tagSet,
 		},
 	})
 
@@ -197,6 +237,19 @@ func (m *Manager) tagAsOwned(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// tagsExcludingOwner returns tagSet with any existing ownership tag
+// filtered out, so a caller about to write a new (or unchanged) ownership
+// tag via tagAsOwned doesn't end up with two entries for the same key.
+func tagsExcludingOwner(tagSet []s3types.Tag) []s3types.Tag {
+	otherTags := make([]s3types.Tag, 0, len(tagSet))
+	for _, tag := range tagSet {
+		if aws.ToString(tag.Key) != ownerTagKey {
+			otherTags = append(otherTags, tag)
+		}
+	}
+	return otherTags
 }
 
 // claimOrVerifyOwnership handles a bucket HeadBucket found to already exist
@@ -213,12 +266,14 @@ func (m *Manager) claimOrVerifyOwnership(ctx context.Context) error {
 	if err != nil {
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == noSuchTagSetErrorCode {
+			// NoSuchTagSet means the bucket has no tags at all -- nothing to
+			// preserve.
 			if m.previouslyCreatedByUs() {
-				return m.tagAsOwned(ctx)
+				return m.tagAsOwned(ctx, nil)
 			}
 			if m.adoptBucketRequested() {
 				forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3)).Inc()
-				return m.tagAsOwned(ctx)
+				return m.tagAsOwned(ctx, nil)
 			}
 			return ErrBucketNotOwned
 		}
@@ -248,19 +303,20 @@ func (m *Manager) claimOrVerifyOwnership(ctx context.Context) error {
 
 				forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3)).Inc()
 				log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s owned by a different Application, adopting per %s annotation", m.bucket, naming.AdoptBucketAnnotation))
-				return m.tagAsOwned(ctx)
+				return m.tagAsOwned(ctx, tagsExcludingOwner(out.TagSet))
 			}
 			return ErrBucketNotOwned
 		}
 	}
 
-	// Tag set exists (so no NoSuchTagSet error) but carries no ownership tag.
+	// Tag set exists (so no NoSuchTagSet error) but carries no ownership tag
+	// -- every tag in it is something other than ours, and must be preserved.
 	if m.previouslyCreatedByUs() {
-		return m.tagAsOwned(ctx)
+		return m.tagAsOwned(ctx, out.TagSet)
 	}
 	if m.adoptBucketRequested() {
 		forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3)).Inc()
-		return m.tagAsOwned(ctx)
+		return m.tagAsOwned(ctx, out.TagSet)
 	}
 
 	return ErrBucketNotOwned

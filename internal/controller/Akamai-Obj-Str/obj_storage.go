@@ -13,8 +13,11 @@ import (
 	s3sdktypes "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/linode/linodego"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
@@ -164,10 +167,35 @@ func (m *Manager) recordBucketCreated(ctx context.Context) error {
 		Created:   true,
 		CreatedAt: metav1.Now(),
 	}
-	if err := m.k8sClient.Status().Update(ctx, m.app); err != nil {
+	if err := retryStatusUpdate(ctx, m.k8sClient, m.app); err != nil {
 		return fmt.Errorf("failed to record bucket creation for %s: %w", m.bucket, err)
 	}
 	return nil
+}
+
+// retryStatusUpdate persists app.Status via Status().Update(), retrying with
+// a freshly-fetched copy on a resourceVersion conflict rather than
+// surfacing it as a hard error. See the identical helper (and its full doc
+// comment) in internal/controller/storage.go -- this is the same fix,
+// duplicated here since this package has no dependency on that one and pulls
+// its own client.Client in via NewManager rather than sharing the
+// controller's.
+func retryStatusUpdate(ctx context.Context, c client.Client, app *forgev1alpha1.Application) error {
+	desiredStatus := app.Status
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		app.Status = desiredStatus
+		updateErr := c.Status().Update(ctx, app)
+		if updateErr == nil {
+			return nil
+		}
+		if !apierrors.IsConflict(updateErr) {
+			return updateErr
+		}
+		if getErr := c.Get(ctx, client.ObjectKeyFromObject(app), app); getErr != nil {
+			return getErr
+		}
+		return updateErr
+	})
 }
 
 // previouslyCreatedByUs reports whether Application.Status durably records

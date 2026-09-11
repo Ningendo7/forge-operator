@@ -216,12 +216,32 @@ func (m *Manager) abortMultipartUploads(
 		return fmt.Errorf("failed to list multipart uploads in bucket %s: %w", m.bucket, err)
 	}
 
+	var failed int
+	var firstErr error
 	for _, upload := range uploads.Uploads {
-		_, _ = m.s3client.AbortMultipartUpload(ctx, &s3sdk.AbortMultipartUploadInput{
+		_, err := m.s3client.AbortMultipartUpload(ctx, &s3sdk.AbortMultipartUploadInput{
 			Bucket:   aws.String(m.bucket),
 			Key:      upload.Key,
 			UploadId: upload.UploadId,
 		})
+		// A given upload having already been aborted/completed by the time
+		// we get to it (e.g. a concurrent retry) is fine, not a failure --
+		// same "already gone" treatment as isNotFoundError gets everywhere
+		// else in this file. A genuine failure (permission denied, network
+		// error, ...) must not be silently dropped: without surfacing it
+		// here, this returns nil as if every upload were actually aborted,
+		// and the real cause only resurfaces several steps later as an
+		// opaque BucketNotEmpty from deleteBucket, with no indication which
+		// upload or why.
+		if err != nil && !isNotFoundError(err) {
+			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("failed to abort %d multipart upload(s) in bucket %s (first error: %w)", failed, m.bucket, firstErr)
 	}
 	return nil
 }
