@@ -23,7 +23,7 @@ func TestApplicationChangePredicate_ReactsToGenerationChange(t *testing.T) {
 func TestApplicationChangePredicate_IgnoresStatusOnlyChange(t *testing.T) {
 	oldObj := &forgev1alpha1.Application{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
 	newObj := &forgev1alpha1.Application{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
-	newObj.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: "True"}}
+	newObj.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
 
 	if applicationChangePredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
 		t.Fatalf("expected a status-only write (same generation) to be filtered out")
@@ -54,7 +54,7 @@ func TestApplicationChangePredicate_IgnoresRepeatedUpdatesWhileAlreadyDeleting(t
 	now := metav1.Now()
 	oldObj := &forgev1alpha1.Application{ObjectMeta: metav1.ObjectMeta{Generation: 1, DeletionTimestamp: &now, Finalizers: []string{"f"}}}
 	newObj := &forgev1alpha1.Application{ObjectMeta: metav1.ObjectMeta{Generation: 1, DeletionTimestamp: &now, Finalizers: []string{"f"}}}
-	newObj.Status.Conditions = []metav1.Condition{{Type: "Degraded", Status: "True", Reason: "ReconcileFailed"}}
+	newObj.Status.Conditions = []metav1.Condition{{Type: "Degraded", Status: metav1.ConditionTrue, Reason: "ReconcileFailed"}}
 
 	if applicationChangePredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
 		t.Fatalf("expected a repeated status-only update on an already-deleting Application to be filtered out")

@@ -109,7 +109,7 @@ var _ = Describe("Application integration", func() {
 				}
 			}
 			return ""
-		}, eventualTimeout, pollInterval).Should(Equal("True"))
+		}, eventualTimeout, pollInterval).Should(Equal(string(metav1.ConditionTrue)))
 	})
 
 	It("creates an HPA when autoscaling is enabled and removes it when disabled", func() {

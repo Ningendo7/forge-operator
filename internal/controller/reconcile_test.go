@@ -77,7 +77,7 @@ func TestReconcile_SetsFailedStatusWhenEnsureDesiredStateFails(t *testing.T) {
 	}
 
 	degraded := findAppCondition(got, statusmanager.TypeDegraded)
-	if degraded == nil || degraded.Status != "True" {
+	if degraded == nil || degraded.Status != metav1.ConditionTrue {
 		t.Fatalf("expected Degraded=True after ensureDesiredState failure, got %#v", degraded)
 	}
 	if got := testutil.ToFloat64(forgemetrics.ApplicationReady.WithLabelValues(testNamespace, testAppName)); got != 0 {
@@ -171,7 +171,7 @@ func TestReconcile_SetsReadyWhenComputeIsHealthy(t *testing.T) {
 		t.Fatalf("failed to get Application: %v", err)
 	}
 	ready := findAppCondition(got, statusmanager.TypeReady)
-	if ready == nil || ready.Status != "True" {
+	if ready == nil || ready.Status != metav1.ConditionTrue {
 		t.Fatalf("expected Ready=True once compute is healthy, got %#v", ready)
 	}
 	if got := testutil.ToFloat64(forgemetrics.ApplicationReady.WithLabelValues(testNamespace, testAppName)); got != 1 {
