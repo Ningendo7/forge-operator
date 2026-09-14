@@ -2,9 +2,14 @@ package s3storage
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
+	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
+	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -19,7 +24,7 @@ func TestNewManager_ReturnsErrorWhenStorageSpecIsNil(t *testing.T) {
 	app := newTestApp()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com")
+	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", testLimiter(), testLimiter())
 	if err == nil {
 		t.Fatalf("expected error when storage spec is nil, got nil")
 	}
@@ -34,7 +39,7 @@ func TestNewManager_DefaultsRegionWhenUnset(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com")
+	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", testLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -55,7 +60,7 @@ func TestNewManager_UsesConfiguredRegion(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testEUWestRegion}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com")
+	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", testLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -76,7 +81,7 @@ func TestNewManager_ReturnsErrorWhenCredentialsSecretMissing(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com")
+	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", testLimiter(), testLimiter())
 	if err == nil {
 		t.Fatalf("expected error when credentials secret is missing, got nil")
 	}
@@ -98,7 +103,7 @@ func TestNewManager_ReturnsErrorWhenCredentialsKeysMissing(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com")
+	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", testLimiter(), testLimiter())
 	if err == nil {
 		t.Fatalf("expected error when AWS_SECRET_ACCESS_KEY is missing from secret, got nil")
 	}
@@ -123,7 +128,7 @@ func TestNewManager_SucceedsWithCredentialsSecret(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com")
+	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", testLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -141,7 +146,7 @@ func TestNewManager_PropagatesServiceAccountAndOIDCFields(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app, "custom-sa", "arn:oidc:role", "oidc.example.com/id/XYZ")
+	manager, err := NewManager(context.Background(), fakeClient, app, "custom-sa", "arn:oidc:role", "oidc.example.com/id/XYZ", testLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -153,5 +158,75 @@ func TestNewManager_PropagatesServiceAccountAndOIDCFields(t *testing.T) {
 	}
 	if manager.OIDCProviderURL != "oidc.example.com/id/XYZ" {
 		t.Errorf("expected OIDCProviderURL oidc.example.com/id/XYZ, got %q", manager.OIDCProviderURL)
+	}
+}
+
+// blockedLimiter never has a token to give (burst 0), so
+// rate.Limiter.Wait fails immediately -- deterministically, with no actual
+// waiting or network activity -- rather than proceeding. Used below to
+// prove which of s3client/iamclient a given limiter was actually attached
+// to, without needing a reachable AWS endpoint.
+func blockedLimiter() *rate.Limiter {
+	return rate.NewLimiter(rate.Limit(1), 0)
+}
+
+// TestNewManager_S3LimiterAppliesToS3ClientNotIAMClient guards against the
+// s3Limiter/iamLimiter constructor arguments being swapped (or both
+// accidentally wired to the same client): with s3Limiter blocked and
+// iamLimiter wide open, an S3 call must fail fast with the rate-limit
+// error. Because AWSMiddleware runs in the Finalize step (before the
+// request is ever sent, see ratelimit.go), this never touches the
+// network -- it fails on the same wait rejection whether or not a real
+// AWS endpoint is reachable.
+func TestNewManager_S3LimiterAppliesToS3ClientNotIAMClient(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApp()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", blockedLimiter(), rate.NewLimiter(rate.Inf, 1))
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+
+	_, err = manager.s3client.HeadBucket(context.Background(), &s3sdk.HeadBucketInput{Bucket: aws.String(testBucket)})
+	if err == nil {
+		t.Fatalf("expected the blocked s3Limiter to reject this call, got nil error")
+	}
+	if !strings.Contains(err.Error(), "rate limit wait") {
+		t.Fatalf("expected a rate-limit-wait error, got: %v", err)
+	}
+}
+
+// TestNewManager_IAMLimiterAppliesToIAMClientNotS3Client is the mirror of
+// the test above: s3Limiter wide open, iamLimiter blocked, so an IAM call
+// must fail fast on the rate limiter -- proving iamLimiter reached
+// iamclient specifically.
+func TestNewManager_IAMLimiterAppliesToIAMClientNotS3Client(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApp()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", rate.NewLimiter(rate.Inf, 1), blockedLimiter())
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+
+	_, err = manager.iamclient.CreateRole(context.Background(), &iam.CreateRoleInput{
+		RoleName:                 aws.String("demo-role"),
+		AssumeRolePolicyDocument: aws.String("{}"),
+	})
+	if err == nil {
+		t.Fatalf("expected the blocked iamLimiter to reject this call, got nil error")
+	}
+	if !strings.Contains(err.Error(), "rate limit wait") {
+		t.Fatalf("expected a rate-limit-wait error, got: %v", err)
 	}
 }

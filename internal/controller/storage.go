@@ -14,15 +14,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
+
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
 	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // storageReconcileTimeout bounds each storage provisioning attempt (bucket,
@@ -93,8 +95,19 @@ var newS3StorageManager = func(
 	serviceAccountName string,
 	oidcProviderARN string,
 	oidcProviderURL string,
+	s3Limiter *rate.Limiter,
+	iamLimiter *rate.Limiter,
 ) (s3StorageManager, error) {
-	return s3storage.NewManager(ctx, c, application, serviceAccountName, oidcProviderARN, oidcProviderURL)
+	return s3storage.NewManager(
+		ctx,
+		c,
+		application,
+		serviceAccountName,
+		oidcProviderARN,
+		oidcProviderURL,
+		s3Limiter,
+		iamLimiter,
+	)
 }
 
 var newAkamaiStorageManager = func(
@@ -102,8 +115,17 @@ var newAkamaiStorageManager = func(
 	c client.Client,
 	application *forgev1alpha1.Application,
 	defaultRegion string,
+	accountLimiter *rate.Limiter,
+	objectLimiter *rate.Limiter,
 ) (akamaiStorageManager, error) {
-	return akamaiobjstr.NewManager(ctx, c, application, defaultRegion)
+	return akamaiobjstr.NewManager(
+		ctx,
+		c,
+		application,
+		defaultRegion,
+		accountLimiter,
+		objectLimiter,
+	)
 }
 
 func (r *ApplicationReconciler) reconcileStorage(
@@ -215,12 +237,14 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 		serviceAccountNameFor(application),
 		r.OIDCProviderARN,
 		r.OIDCProviderURL,
+		r.S3RateLimiter,
+		r.IAMRateLimiter,
 	)
 
 	if err != nil {
 		storagestatus.SetNotReady(application, err)
 		logStorageStatusUpdateError(ctx, retryStatusUpdate(ctx, r.Client, application))
-		forgemetrics.StorageReconcileTotal.WithLabelValues(provider, classifyAWSStorageError(err, outcomeNotOwned)).Inc()
+		forgemetrics.StorageReconcileTotal.WithLabelValues(provider, classifyAWSStorageError(err)).Inc()
 		forgemetrics.StorageReady.WithLabelValues(application.Namespace, application.Name, provider).Set(0)
 		return fmt.Errorf("failed to create S3 storage manager: %w", err)
 	}
@@ -228,7 +252,7 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 	// Reconcile Bucket and IRSA
 	result, err := storageManager.ReconcileBucket(cloudCtx)
 	if err != nil {
-		outcome := classifyAWSStorageError(err, outcomeNotOwned)
+		outcome := classifyAWSStorageError(err)
 		if outcome == outcomeNotOwned {
 			storagestatus.SetNotOwned(application, err)
 		} else {
@@ -322,11 +346,13 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 		r.Client,
 		application,
 		r.DefaultAkamaiRegion,
+		r.AkamaiAccountRateLimiter,
+		r.AkamaiObjectRateLimiter,
 	)
 	if err != nil {
 		storagestatus.SetNotReady(application, err)
 		logStorageStatusUpdateError(ctx, retryStatusUpdate(ctx, r.Client, application))
-		forgemetrics.StorageReconcileTotal.WithLabelValues(provider, classifyAkamaiStorageError(err, outcomeNotOwned)).Inc()
+		forgemetrics.StorageReconcileTotal.WithLabelValues(provider, classifyAkamaiStorageError(err)).Inc()
 		forgemetrics.StorageReady.WithLabelValues(application.Namespace, application.Name, provider).Set(0)
 		return nil, fmt.Errorf("failed to create Akamai storage manager: %w", err)
 	}
@@ -334,7 +360,7 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	// Reconcile Bucket and Access Key
 	result, err = storageManager.ReconcileBucket(cloudCtx)
 	if err != nil {
-		outcome := classifyAkamaiStorageError(err, outcomeNotOwned)
+		outcome := classifyAkamaiStorageError(err)
 		if outcome == outcomeNotOwned {
 			storagestatus.SetNotOwned(application, err)
 		} else {
@@ -365,6 +391,19 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	if application.Status.Storage != nil && !application.Status.Storage.CreatedAt.IsZero() {
 		createdAt = application.Status.Storage.CreatedAt
 	}
+	// accessKeySecretRef is recorded onto Status.Storage.Akamai (not just
+	// read from Spec here) so cleanup can still resolve the right input
+	// token Secret after spec.storage has been removed -- see
+	// storageSpecFromStatus and AkamaiStorageStatus.AccessKeySecretRef's own
+	// doc comment for the bug this closes. Normally always non-empty by
+	// this point (the defaulting webhook resolves it at admission time for
+	// every Akamai Application), but guarded defensively in case the
+	// webhook is disabled or this is exercised directly, as in tests.
+	accessKeySecretRef := ""
+	if application.Spec.Storage.Akamai != nil {
+		accessKeySecretRef = application.Spec.Storage.Akamai.AccessKeySecretRef
+	}
+
 	storageStatus := &forgev1alpha1.StorageStatus{
 		Provider:       forgev1alpha1.ProviderAkamaiObjectStorage,
 		Bucket:         application.Spec.Storage.Bucket,
@@ -373,7 +412,10 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 		CreatedAt:      createdAt,
 		SecretName:     application.Spec.Storage.SecretName,
 		DeletionPolicy: application.Spec.Storage.DeletionPolicy,
-		Akamai:         &forgev1alpha1.AkamaiStorageStatus{Endpoint: result.Endpoint},
+		Akamai: &forgev1alpha1.AkamaiStorageStatus{
+			Endpoint:           result.Endpoint,
+			AccessKeySecretRef: accessKeySecretRef,
+		},
 	}
 
 	storagestatus.SetReady(application, storageStatus, "Akamai bucket and access key provisioned")

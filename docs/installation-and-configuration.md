@@ -86,6 +86,42 @@ manager:
 
 If deploying via kustomize instead of Helm, there's no built-in mechanism for this — add your own patch targeting `spec.template.spec.containers[0].env` (see [`config/default/manager_webhook_patch.yaml`](../config/default/manager_webhook_patch.yaml) for the JSON-patch style already used there).
 
+### Rate limiting
+
+The operator paces its own outgoing AWS/Akamai calls independent of `MaxConcurrentReconciles` — that bounds how many reconciles run in parallel, not how many external API calls they collectively make per second. At fleet scale (a mass resync after a restart, a cluster-wide spec change touching every `Application` at once), several concurrent reconciles each making a handful of sequential AWS/Akamai calls can genuinely burst past a provider's real rate limits, especially AWS IAM's, which are far tighter than S3's.
+
+S3, IAM, Akamai's account API, and Akamai's S3-compatible object endpoint each get their own independent token-bucket limiter (see [internal/controller/ratelimit](../internal/controller/ratelimit/ratelimit.go)) rather than one shared budget — sharing one across any of them would mean the tightest one throttles the others down to its own ceiling for no reason tied to their actual capacity. All four have built-in defaults and don't require any configuration to use; the env vars below only need setting to tune them for a specific AWS/Linode account's real limits:
+
+```yaml
+manager:
+  env:
+    - name: AWS_S3_RATE_LIMIT_QPS
+      value: "20"
+    - name: AWS_S3_RATE_LIMIT_BURST
+      value: "40"
+    - name: AWS_IAM_RATE_LIMIT_QPS
+      value: "8"
+    - name: AWS_IAM_RATE_LIMIT_BURST
+      value: "16"
+    - name: AKAMAI_ACCOUNT_RATE_LIMIT_QPS
+      value: "5"
+    - name: AKAMAI_ACCOUNT_RATE_LIMIT_BURST
+      value: "10"
+    - name: AKAMAI_OBJECT_RATE_LIMIT_QPS
+      value: "20"
+    - name: AKAMAI_OBJECT_RATE_LIMIT_BURST
+      value: "40"
+```
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AWS_S3_RATE_LIMIT_QPS` / `AWS_S3_RATE_LIMIT_BURST` | 20 / 40 | S3 bucket calls (create, head, versioning, lifecycle, tagging, deletion) |
+| `AWS_IAM_RATE_LIMIT_QPS` / `AWS_IAM_RATE_LIMIT_BURST` | 8 / 16 | IAM role/policy calls for IRSA — deliberately tighter than S3, matching AWS IAM's own lower real-world limits |
+| `AKAMAI_ACCOUNT_RATE_LIMIT_QPS` / `AKAMAI_ACCOUNT_RATE_LIMIT_BURST` | 5 / 10 | Akamai/Linode's account-level v4 REST API (bucket/key CRUD) |
+| `AKAMAI_OBJECT_RATE_LIMIT_QPS` / `AKAMAI_OBJECT_RATE_LIMIT_BURST` | 20 / 40 | Akamai's S3-compatible object endpoint (ownership marker reads/writes) |
+
+Values are deliberately conservative starting points, not verified figures for any specific account tier. An unset or unparseable value falls back to its default rather than failing startup; a value `<= 0` falls back further still to an absolute floor of 1 QPS / burst 1, never to "unlimited" or "blocks forever." Watch `forge_rate_limit_wait_duration_seconds` (see [Observability](observability.md#metrics)) to see whether a given surface's defaults have headroom before tuning them.
+
 ## Leader election
 
 Enabled by default in the Helm chart's `manager.args` (`--leader-elect`), so multiple replicas run active/standby safely. Runtime wiring is in [cmd/main.go](../cmd/main.go).

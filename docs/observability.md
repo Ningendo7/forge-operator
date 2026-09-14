@@ -12,9 +12,10 @@ Domain-specific metrics (distinct from controller-runtime's own built-in reconci
 | `forge_storage_reconcile_duration_seconds` | Histogram | `provider` | Time spent in the cloud-call-bound part of a storage reconcile, bucketed out to 90s (`storageReconcileTimeout`) |
 | `forge_storage_ready` | Gauge | `namespace`, `name`, `provider` | 1/0 per `Application` with `spec.storage` set — its current `StorageReady` condition |
 | `forge_storage_bucket_adopted_total` | Counter | `provider` | Incremented every time the adopt-bucket annotation actually results in a claim — an audit signal, not an incident (see [Ownership verification](authentication-and-storage.md#ownership-verification)) |
-| `forge_finalizer_cleanup_total` | Counter | `provider`, `outcome` | Every storage cleanup attempt during `Application` deletion, same outcome set as above minus `not_owned` (cleanup doesn't re-verify ownership) |
+| `forge_finalizer_cleanup_total` | Counter | `provider`, `outcome` | Every storage cleanup attempt during `Application` deletion, same outcome set as above including `not_owned` — cleanup re-verifies ownership before touching the bucket and refuses (leaving the `Application`'s finalizer stuck for a human to resolve) rather than deleting something it doesn't own, see [Deletion](authentication-and-storage.md#deletion) |
 | `forge_finalizer_cleanup_duration_seconds` | Histogram | `provider` | Time spent in cleanup during finalization |
 | `forge_application_ready` | Gauge | `namespace`, `name` | 1/0 per `Application` — its overall `Ready` condition, independent of storage |
+| `forge_rate_limit_wait_duration_seconds` | Histogram | `limiter` | Time a single outgoing AWS/Akamai call actually waited on this operator's own rate limiter before proceeding (see [Rate limiting](installation-and-configuration.md#rate-limiting)), by limiter (`s3`, `iam`, `akamai_account`, `akamai_object`) — near-zero across the board means current `_RATE_LIMIT_QPS`/`_BURST` defaults have headroom; a distribution creeping up on one limiter specifically is the tuning signal to raise that surface's env vars, not the others |
 
 ## Prometheus: ServiceMonitor and alerts
 

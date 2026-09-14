@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+	"golang.org/x/time/rate"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -32,6 +33,13 @@ func newTestApp() *forgev1alpha1.Application {
 	return &forgev1alpha1.Application{
 		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace, UID: testAppUID},
 	}
+}
+
+// testLimiter returns a rate.Limiter with effectively no limit, so
+// NewManager tests exercise the real constructor wiring without ever
+// blocking on Wait.
+func testLimiter() *rate.Limiter {
+	return rate.NewLimiter(rate.Inf, 1)
 }
 
 // newHTTPStatusError builds an error that unwraps to an awshttp.ResponseError

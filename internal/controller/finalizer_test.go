@@ -2,12 +2,14 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -205,6 +207,83 @@ func TestFinalizeApplication_UsesStatusStorageWhenSpecStorageIsNil(t *testing.T)
 
 	if err := r.finalizeApplication(context.Background(), app); err == nil {
 		t.Fatalf("expected error: cleanup should have been attempted using Status.Storage, got nil")
+	}
+}
+
+// --- storageSpecFromStatus ---
+
+func TestStorageSpecFromStatus_OmitsAkamaiWhenNotRecorded(t *testing.T) {
+	status := &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
+		Bucket:   testBucket,
+	}
+
+	spec := storageSpecFromStatus(status)
+
+	if spec.Akamai != nil {
+		t.Fatalf("expected a nil Akamai block when status never recorded one, got %#v", spec.Akamai)
+	}
+}
+
+func TestStorageSpecFromStatus_PreservesCustomAkamaiAccessKeySecretRef(t *testing.T) {
+	// The actual bug: akamaiobjstr.NewManager resolves the input token
+	// Secret via naming.AkamaiTokenSecret(app), which falls back to a
+	// default name whenever Spec.Storage.Akamai is nil -- exactly what a
+	// naively-reconstructed StorageSpec (missing this field) would produce.
+	// A customized accessKeySecretRef must survive the Status round-trip
+	// intact, not fall back to the default.
+	const customTokenSecret = "my-custom-akamai-token"
+	status := &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
+		Bucket:   testBucket,
+		Akamai:   &forgev1alpha1.AkamaiStorageStatus{AccessKeySecretRef: customTokenSecret},
+	}
+
+	spec := storageSpecFromStatus(status)
+
+	if spec.Akamai == nil || spec.Akamai.AccessKeySecretRef != customTokenSecret {
+		t.Fatalf("expected AccessKeySecretRef %q to be carried forward, got %#v", customTokenSecret, spec.Akamai)
+	}
+}
+
+func TestFinalizeApplication_UsesCustomAkamaiAccessKeySecretRefFromStatus(t *testing.T) {
+	// End-to-end version of the same bug, at the level a real deletion
+	// actually exercises: spec.storage already removed, Status.Storage is
+	// the only remaining record, and the token Secret only exists under the
+	// application's own *customized* name -- never the default
+	// "<app>-akamai-token" naming.AkamaiTokenSecret would fall back to.
+	// Before this fix, cleanup looked for the wrong (default) name here and
+	// failed to find a Secret that genuinely existed.
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	const customTokenSecret = "my-custom-akamai-token"
+	app := newTestApplication()
+	app.Status.Storage = &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
+		Bucket:   testBucket,
+		Akamai:   &forgev1alpha1.AkamaiStorageStatus{AccessKeySecretRef: customTokenSecret},
+	}
+
+	tokenSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: customTokenSecret, Namespace: testNamespace},
+		Data:       map[string][]byte{"apiToken": []byte("token-value")},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tokenSecret).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	// akamaiobjstr.NewManager makes a real API call once it successfully
+	// finds the token Secret, so this is expected to fail past that point --
+	// the assertion is specifically that it does NOT fail trying to find
+	// "<app>-akamai-token" (the default name), which is what the pre-fix
+	// behavior did.
+	err := r.finalizeApplication(context.Background(), app)
+	if err == nil {
+		t.Fatalf("expected an error (no real Akamai account reachable in this test), got nil")
+	}
+	if defaultName := app.Name + "-akamai-token"; strings.Contains(err.Error(), defaultName) {
+		t.Fatalf("expected cleanup to look for the token Secret under its custom name %q, but it looked for the default name %q instead: %v", customTokenSecret, defaultName, err)
 	}
 }
 

@@ -225,6 +225,22 @@ type AkamaiStorageStatus struct {
 	// Endpoint is the active S3-compatible host endpoint generated for the bucket.
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
+
+	// AccessKeySecretRef is spec.storage.akamai.accessKeySecretRef as it
+	// stood when this bucket was last successfully reconciled, if any.
+	// Recorded for the same reason StorageStatus.SecretName is: once
+	// spec.storage is removed, this is the only remaining record of which
+	// Secret holds the Akamai API token cleanup needs to authenticate with.
+	// Only a Secret *name* is recorded here, never its contents -- the same
+	// non-sensitivity naming.StorageSecret's own recorded name already has.
+	// Without this, a customized (non-default) accessKeySecretRef was
+	// silently lost on spec.storage removal: cleanup fell back to
+	// naming.AkamaiTokenSecret's default name instead of the one actually
+	// configured, failed to find the token Secret under that wrong name,
+	// and got stuck -- even though the real credentials existed all along,
+	// just under a different name.
+	// +optional
+	AccessKeySecretRef string `json:"accessKeySecretRef,omitempty"`
 }
 
 // ContainerSpec defines container settings.
