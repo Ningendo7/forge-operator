@@ -104,7 +104,7 @@ func (f *fakeFinalizeHandler) HandleFinalize(ctx context.Context, in smithymiddl
 // tests can invoke it directly without standing up a real AWS client.
 func awsRateLimitMiddleware(t *testing.T, limiter *rate.Limiter, name string) smithymiddleware.FinalizeMiddleware {
 	t.Helper()
-	stack := smithymiddleware.NewStack("test", func() interface{} { return struct{}{} })
+	stack := smithymiddleware.NewStack("test", func() any { return struct{}{} })
 	if err := AWSMiddleware(limiter, name)(stack); err != nil {
 		t.Fatalf("AWSMiddleware returned error: %v", err)
 	}
