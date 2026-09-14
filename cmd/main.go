@@ -298,19 +298,19 @@ func main() {
 	// verified figures for any specific AWS/Linode account tier -- tune
 	// via these env vars once you know your account's real limits.
 	s3RateLimiter := ratelimit.NewLimiter(
-		envFloat("AWS_S3_RATE_LIMIT_QPS", 20), 
+		envFloat("AWS_S3_RATE_LIMIT_QPS", 20),
 		envInt("AWS_S3_RATE_LIMIT_BURST", 40),
 	)
 	iamRateLimiter := ratelimit.NewLimiter(
-		envFloat("AWS_IAM_RATE_LIMIT_QPS", 8), 
+		envFloat("AWS_IAM_RATE_LIMIT_QPS", 8),
 		envInt("AWS_IAM_RATE_LIMIT_BURST", 16),
 	)
 	akamaiAccountRateLimiter := ratelimit.NewLimiter(
-		envFloat("AKAMAI_ACCOUNT_RATE_LIMIT_QPS", 5), 
+		envFloat("AKAMAI_ACCOUNT_RATE_LIMIT_QPS", 5),
 		envInt("AKAMAI_ACCOUNT_RATE_LIMIT_BURST", 10),
 	)
 	akamaiObjectRateLimiter := ratelimit.NewLimiter(
-		envFloat("AKAMAI_OBJECT_RATE_LIMIT_QPS", 20), 
+		envFloat("AKAMAI_OBJECT_RATE_LIMIT_QPS", 20),
 		envInt("AKAMAI_OBJECT_RATE_LIMIT_BURST", 40),
 	)
 
