@@ -15,8 +15,10 @@ import (
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+	"golang.org/x/time/rate"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/ratelimit"
 )
 
 const defaultRegion = "us-east-1"
@@ -76,6 +78,8 @@ func NewManager(
 	serviceAccountName string,
 	oidcProviderARN string,
 	oidcProviderURL string,
+	s3Limiter *rate.Limiter,
+	iamLimiter *rate.Limiter,
 ) (*Manager, error) {
 
 	storage := app.Spec.Storage
@@ -130,13 +134,21 @@ func NewManager(
 	otelaws.AppendMiddlewares(&awsCfg.APIOptions)
 
 	s3client := s3sdk.NewFromConfig(awsCfg, func(o *s3sdk.Options) {
+		o.APIOptions = append(o.APIOptions, ratelimit.AWSMiddleware(s3Limiter, "s3"))
 		if storage.Endpoint != "" {
 			o.BaseEndpoint = aws.String(storage.Endpoint)
 			o.UsePathStyle = true // Use path-style addressing for custom endpoints
 		}
 	})
 
-	iamclient := iam.NewFromConfig(awsCfg)
+	// A separate limiter from s3client's, not the shared awsCfg.APIOptions
+	// both clients would otherwise inherit -- IAM's real rate limits are
+	// far tighter than S3's, and sharing one budget would throttle S3's
+	// much larger share of the traffic down to IAM's ceiling for no
+	// reason tied to S3's own capacity.
+	iamclient := iam.NewFromConfig(awsCfg, func(o *iam.Options) {
+		o.APIOptions = append(o.APIOptions, ratelimit.AWSMiddleware(iamLimiter, "iam"))
+	})
 
 	return &Manager{
 		k8sClient:          k8sClient,

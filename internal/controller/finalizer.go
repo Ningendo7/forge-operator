@@ -74,14 +74,26 @@ func (r *ApplicationReconciler) handleFinalizer(
 // this: once spec.storage is gone, they're the only remaining record of
 // which credentials to use and whether the bucket should actually be
 // deleted.
+//
+// Akamai.AccessKeySecretRef must be carried forward too, not just the
+// top-level fields -- akamaiobjstr.NewManager resolves the input token
+// Secret via naming.AkamaiTokenSecret(app), which falls back to a default
+// name whenever Spec.Storage.Akamai is nil. Omitting it here silently broke
+// cleanup for any Akamai Application using a customized (non-default)
+// accessKeySecretRef: the token Secret genuinely exists, cleanup just looks
+// for it under the wrong (default) name and fails to find it.
 func storageSpecFromStatus(status *forgev1alpha1.StorageStatus) *forgev1alpha1.StorageSpec {
-	return &forgev1alpha1.StorageSpec{
+	spec := &forgev1alpha1.StorageSpec{
 		Provider:       status.Provider,
 		Bucket:         status.Bucket,
 		Region:         status.Region,
 		SecretName:     status.SecretName,
 		DeletionPolicy: status.DeletionPolicy,
 	}
+	if status.Akamai != nil && status.Akamai.AccessKeySecretRef != "" {
+		spec.Akamai = &forgev1alpha1.AkamaiStorageSpec{AccessKeySecretRef: status.Akamai.AccessKeySecretRef}
+	}
+	return spec
 }
 
 func (r *ApplicationReconciler) finalizeApplication(
@@ -153,18 +165,20 @@ func (r *ApplicationReconciler) finalizeApplication(
 			serviceAccountNameFor(application),
 			r.OIDCProviderARN,
 			r.OIDCProviderURL,
+			r.S3RateLimiter,
+			r.IAMRateLimiter,
 		)
 
 		if mgrErr != nil {
 			forgemetrics.FinalizerCleanupDuration.WithLabelValues(providerStr).Observe(time.Since(start).Seconds())
-			forgemetrics.FinalizerCleanupTotal.WithLabelValues(providerStr, classifyAWSStorageError(mgrErr, outcomeNotOwned)).Inc()
+			forgemetrics.FinalizerCleanupTotal.WithLabelValues(providerStr, classifyAWSStorageError(mgrErr)).Inc()
 			return r.failStorageCleanup(ctx, application, fmt.Errorf("failed to create storage manager for cleanup: %w", mgrErr))
 		}
 
 		irsaErr, cleanupErr := storageManager.CleanupBucket(cloudCtx)
 		if cleanupErr != nil {
 			forgemetrics.FinalizerCleanupDuration.WithLabelValues(providerStr).Observe(time.Since(start).Seconds())
-			forgemetrics.FinalizerCleanupTotal.WithLabelValues(providerStr, classifyAWSStorageError(cleanupErr, outcomeNotOwned)).Inc()
+			forgemetrics.FinalizerCleanupTotal.WithLabelValues(providerStr, classifyAWSStorageError(cleanupErr)).Inc()
 			return r.failStorageCleanup(ctx, application, fmt.Errorf("failed to delete S3 bucket during cleanup: %w", cleanupErr))
 		}
 
@@ -189,18 +203,20 @@ func (r *ApplicationReconciler) finalizeApplication(
 			r.Client,
 			cleanupApp,
 			r.DefaultAkamaiRegion,
+			r.AkamaiAccountRateLimiter,
+			r.AkamaiObjectRateLimiter,
 		)
 
 		if mgrErr != nil {
 			forgemetrics.FinalizerCleanupDuration.WithLabelValues(providerStr).Observe(time.Since(start).Seconds())
-			forgemetrics.FinalizerCleanupTotal.WithLabelValues(providerStr, classifyAkamaiStorageError(mgrErr, outcomeNotOwned)).Inc()
+			forgemetrics.FinalizerCleanupTotal.WithLabelValues(providerStr, classifyAkamaiStorageError(mgrErr)).Inc()
 			return r.failStorageCleanup(ctx, application, fmt.Errorf("failed to create Akamai storage manager for cleanup: %w", mgrErr))
 		}
 
 		accessKeyErr, cleanupErr := storageManager.DeleteBucket(cloudCtx)
 		if cleanupErr != nil {
 			forgemetrics.FinalizerCleanupDuration.WithLabelValues(providerStr).Observe(time.Since(start).Seconds())
-			forgemetrics.FinalizerCleanupTotal.WithLabelValues(providerStr, classifyAkamaiStorageError(cleanupErr, outcomeNotOwned)).Inc()
+			forgemetrics.FinalizerCleanupTotal.WithLabelValues(providerStr, classifyAkamaiStorageError(cleanupErr)).Inc()
 			return r.failStorageCleanup(ctx, application, fmt.Errorf("failed to delete Akamai bucket during cleanup: %w", cleanupErr))
 		}
 

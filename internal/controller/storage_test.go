@@ -11,6 +11,7 @@ import (
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -569,6 +570,8 @@ func withS3StorageManager(t *testing.T, m *mockS3StorageManager) {
 		serviceAccountName string,
 		oidcProviderARN string,
 		oidcProviderURL string,
+		s3Limiter *rate.Limiter,
+		iamLimiter *rate.Limiter,
 	) (s3StorageManager, error) {
 		return m, nil
 	}
@@ -585,6 +588,8 @@ func withFailingS3StorageManagerConstruction(t *testing.T, constructErr error) {
 		serviceAccountName string,
 		oidcProviderARN string,
 		oidcProviderURL string,
+		s3Limiter *rate.Limiter,
+		iamLimiter *rate.Limiter,
 	) (s3StorageManager, error) {
 		return nil, constructErr
 	}
@@ -857,6 +862,8 @@ func withAkamaiStorageManager(t *testing.T, m *mockAkamaiStorageManager) {
 		c client.Client,
 		application *forgev1alpha1.Application,
 		defaultRegion string,
+		accountLimiter *rate.Limiter,
+		objectLimiter *rate.Limiter,
 	) (akamaiStorageManager, error) {
 		return m, nil
 	}
@@ -871,6 +878,8 @@ func withFailingAkamaiStorageManagerConstruction(t *testing.T, constructErr erro
 		c client.Client,
 		application *forgev1alpha1.Application,
 		defaultRegion string,
+		accountLimiter *rate.Limiter,
+		objectLimiter *rate.Limiter,
 	) (akamaiStorageManager, error) {
 		return nil, constructErr
 	}

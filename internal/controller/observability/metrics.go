@@ -122,6 +122,28 @@ var (
 		},
 		[]string{"namespace", "name"},
 	)
+
+	// RateLimitWaitDuration times how long a single outgoing AWS/Akamai
+	// call actually waited on this operator's own rate limiter (see
+	// internal/controller/ratelimit) before proceeding, by limiter (s3,
+	// iam, akamai_account, akamai_object -- the same four independent
+	// surfaces ratelimit's package doc explains). Near-zero across the
+	// board means the current QPS/burst defaults have headroom; a
+	// distribution creeping up on one limiter specifically is the signal
+	// to raise that surface's *_RATE_LIMIT_QPS/_BURST env var, not the
+	// others. Buckets top out at 30s since storageReconcileTimeout (90s)
+	// and finalizerCleanupTimeout (5m) both allow multiple sequential
+	// calls per reconcile -- a single wait anywhere near those ceilings
+	// is already a problem worth seeing well before the reconcile itself
+	// times out.
+	RateLimitWaitDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "forge_rate_limit_wait_duration_seconds",
+			Help:    "Time spent waiting on this operator's own outgoing rate limiter, by limiter (s3, iam, akamai_account, akamai_object).",
+			Buckets: []float64{0, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+		},
+		[]string{"limiter"},
+	)
 )
 
 func init() {
@@ -133,5 +155,6 @@ func init() {
 		FinalizerCleanupTotal,
 		FinalizerCleanupDuration,
 		ApplicationReady,
+		RateLimitWaitDuration,
 	)
 }

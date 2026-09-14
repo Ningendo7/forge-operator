@@ -31,6 +31,13 @@ import (
 // and doubles as the OTel service name resource attribute.
 const tracerName = "forge-operator"
 
+// serviceAccountNamespaceFile is a var (not an inline literal in
+// buildResourceOptions) so tests can point it at a temp file and exercise
+// both the present and missing cases deterministically, rather than
+// depending on whether the machine running `go test` happens to be a real
+// Kubernetes pod.
+var serviceAccountNamespaceFile = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
 // Tracer returns this operator's tracer. Safe to call at any point,
 // including before Init or when Init is never called at all -- see the
 // package doc comment.
@@ -57,6 +64,33 @@ func Init(ctx context.Context) (shutdown func(context.Context) error, err error)
 		return nil, fmt.Errorf("failed to create OTLP trace exporter: %w", err)
 	}
 
+	res, err := resource.New(ctx, buildResourceOptions()...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build OpenTelemetry resource: %w", err)
+	}
+
+	// AlwaysSample is the SDK's own default (see sdktrace.NewTracerProvider's
+	// doc comment) and is fine to leave as-is: this operator's trace volume
+	// -- one per Application reconcile, not per incoming web request -- is
+	// nowhere near what sampling knobs exist to protect against. Revisit if
+	// that stops being true.
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(res),
+	)
+
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+
+	return tp.Shutdown, nil
+}
+
+// buildResourceOptions returns the resource.Option list Init builds its
+// TracerProvider's resource from -- factored out of Init so its one piece
+// of real conditional logic (the best-effort namespace file read) is
+// directly unit-testable without needing a real OTLP exporter or mutating
+// global tracer state.
+func buildResourceOptions() []resource.Option {
 	resourceOpts := []resource.Option{
 		// Distinguishes this operator's own deployment(s) from any other
 		// service sharing the same Jaeger/Tempo/etc. backend.
@@ -83,29 +117,11 @@ func Init(ctx context.Context) (shutdown func(context.Context) error, err error)
 	// Helm chart. Best-effort: outside a real cluster (e.g. running the
 	// binary locally) this file won't exist, which is fine -- the resource
 	// is simply missing this one attribute, not an error.
-	if data, readErr := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); readErr == nil {
+	if data, readErr := os.ReadFile(serviceAccountNamespaceFile); readErr == nil {
 		if ns := strings.TrimSpace(string(data)); ns != "" {
 			resourceOpts = append(resourceOpts, resource.WithAttributes(semconv.K8SNamespaceName(ns)))
 		}
 	}
 
-	res, err := resource.New(ctx, resourceOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to build OpenTelemetry resource: %w", err)
-	}
-
-	// AlwaysSample is the SDK's own default (see sdktrace.NewTracerProvider's
-	// doc comment) and is fine to leave as-is: this operator's trace volume
-	// -- one per Application reconcile, not per incoming web request -- is
-	// nowhere near what sampling knobs exist to protect against. Revisit if
-	// that stops being true.
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
-		sdktrace.WithResource(res),
-	)
-
-	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.TraceContext{})
-
-	return tp.Shutdown, nil
+	return resourceOpts
 }

@@ -28,13 +28,15 @@ const (
 
 // classifyAWSStorageError maps a non-nil error returned from the s3
 // package's ReconcileBucket/CleanupBucket into one of the outcome*
-// constants above. notOwnedOutcome lets callers choose the label used for
-// ErrBucketNotOwned (outcomeNotOwned during reconcile) or opt out of it
-// entirely (pass "" during cleanup, which never re-verifies ownership, so
-// that check is skipped rather than silently never matching).
-func classifyAWSStorageError(err error, notOwnedOutcome string) string {
+// constants above. Every call site -- both the reconcile and the finalizer
+// cleanup paths -- wants ErrBucketNotOwned classified as outcomeNotOwned;
+// CleanupBucket genuinely does re-verify ownership before touching the
+// bucket (see verifyOwnership in the s3 package, and
+// docs/authentication-and-storage.md's Deletion section), so there's no
+// case here where that classification should be skipped.
+func classifyAWSStorageError(err error) string {
 	switch {
-	case notOwnedOutcome != "" && errors.Is(err, s3storage.ErrBucketNotOwned):
+	case errors.Is(err, s3storage.ErrBucketNotOwned):
 		return outcomeNotOwned
 	case errors.Is(err, context.DeadlineExceeded):
 		return outcomeTimeout
@@ -68,12 +70,13 @@ func isAWSAccessDenied(err error) bool {
 }
 
 // classifyAkamaiStorageError is classifyAWSStorageError's Akamai
-// equivalent. linodego surfaces HTTP status directly on *linodego.Error,
-// unlike AWS's split between transport-level and modeled API errors, so
-// this is simpler.
-func classifyAkamaiStorageError(err error, notOwnedOutcome string) string {
+// equivalent (see its doc comment for why there's no opt-out for
+// ErrBucketNotOwned). linodego surfaces HTTP status directly on
+// *linodego.Error, unlike AWS's split between transport-level and modeled
+// API errors, so this is simpler.
+func classifyAkamaiStorageError(err error) string {
 	switch {
-	case notOwnedOutcome != "" && errors.Is(err, akamaiobjstr.ErrBucketNotOwned):
+	case errors.Is(err, akamaiobjstr.ErrBucketNotOwned):
 		return outcomeNotOwned
 	case errors.Is(err, context.DeadlineExceeded):
 		return outcomeTimeout

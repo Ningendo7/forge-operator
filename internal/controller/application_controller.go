@@ -37,12 +37,15 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
-	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
-	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/time/rate"
+
+	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
+	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
+	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
 )
 
 // readinessRequeueInterval is how soon Reconcile re-checks readiness when not yet ready.
@@ -66,6 +69,16 @@ type ApplicationReconciler struct {
 	// further built-in fallback, since a value baked into the binary would
 	// only ever be correct for one specific deployment.
 	DefaultAkamaiRegion string
+
+	// Rate limiters for this operator's own outgoing AWS/Akamai calls --
+	// independent of MaxConcurrentReconciles, which bounds reconcile
+	// parallelism, not external call rate. See
+	// internal/controller/ratelimit's package doc for why each surface
+	// gets its own limiter instead of sharing one budget.
+	S3RateLimiter            *rate.Limiter
+	IAMRateLimiter           *rate.Limiter
+	AkamaiAccountRateLimiter *rate.Limiter
+	AkamaiObjectRateLimiter  *rate.Limiter
 
 	StatusManager *statusmanager.StatusManager
 }
@@ -178,9 +191,10 @@ func (r *ApplicationReconciler) Reconcile(
 }
 
 // applicationChangePredicate re-reconciles on a real spec change (generation
-// bump) or the one true transition into being marked for deletion, but
-// ignores pure status/metadata-only updates otherwise. Without the
-// generation check, every status write Reconcile makes to the Application
+// bump), the one true transition into being marked for deletion, or a
+// change to the adopt-bucket annotation's value, but ignores pure
+// status/other-metadata-only updates otherwise. Without the generation
+// check, every status write Reconcile makes to the Application
 // (SetReconciling/SetReady/SetFailed) would itself be an update the primary
 // watch below sees and re-triggers on, causing the controller to reconcile
 // itself in an unbounded loop even once fully settled -- deletionTimestamp
@@ -210,12 +224,37 @@ func (r *ApplicationReconciler) Reconcile(
 // driving further attempts, with real backoff. A controller restart while a
 // deletion is stuck loses nothing: the informer's initial List always
 // delivers a Create event, and Create is unconditionally let through by
-// both predicates below regardless of this Update-only logic.
+// every predicate below regardless of this Update-only logic.
+//
+// The adopt-bucket branch closes a real usability gap, not a storm risk:
+// naming.AdoptBucketAnnotation is metadata, not spec, so setting or
+// clearing it -- the documented way to opt into reclaiming a bucket left
+// behind by a Application that's genuinely gone -- never bumped generation
+// either, and was silently swallowed by this predicate exactly like any
+// other annotation-only change. In practice this is most often reached by a
+// user reacting to a live BucketNotOwned failure by annotating the
+// already-existing Application, not by setting it at creation (Create
+// events always pass regardless of this Update-only logic, so a brand-new
+// Application created with the annotation already set was never affected).
+// That failing Application is typically sitting on the workqueue's own
+// exponential backoff from the ownership failure itself; without this
+// branch, the annotation is only ever picked up whenever that backoff next
+// happens to fire, with no visible signal that anything happened in the
+// meantime -- easily misread as "adopt-bucket doesn't work" rather than
+// "adopt-bucket hasn't been retried yet." Scoped to only this one
+// annotation key, not annotations generally, to avoid reopening the same
+// class of self-triggering risk the rest of this predicate exists to
+// prevent.
 var applicationChangePredicate = predicate.Or(
 	predicate.GenerationChangedPredicate{},
 	predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			return e.ObjectOld.GetDeletionTimestamp() == nil && e.ObjectNew.GetDeletionTimestamp() != nil
+		},
+	},
+	predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return e.ObjectOld.GetAnnotations()[naming.AdoptBucketAnnotation] != e.ObjectNew.GetAnnotations()[naming.AdoptBucketAnnotation]
 		},
 	},
 )

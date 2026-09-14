@@ -5,20 +5,23 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/credentials"
-	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/linode/linodego"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"golang.org/x/oauth2"
-
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/linode/linodego"
+
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"golang.org/x/oauth2"
+	"golang.org/x/time/rate"
+
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	"github.com/Ningendo7/forge-operator/internal/controller/naming"
+	"github.com/Ningendo7/forge-operator/internal/controller/ratelimit"
 )
 
 // AKAMAIAPI defines the interface for interacting with Linode Object Storage.
@@ -43,6 +46,13 @@ type Manager struct {
 
 	bucket string
 	region string
+
+	// objectLimiter paces calls to this bucket's own S3-compatible
+	// endpoint (marker GetObject/PutObject) -- stored on Manager rather
+	// than applied once at construction like s3client/iamclient in the
+	// s3 package, because that client is built lazily in s3ClientFor,
+	// only once the bucket's real hostname is known.
+	objectLimiter *rate.Limiter
 }
 
 type StorageResult struct {
@@ -74,7 +84,7 @@ type s3ObjectAPI interface {
 // can return a bucket hostname on a different numbered sub-cluster than the
 // account's nominal region cluster (observed live: cluster "us-iad-1"
 // registered, but the bucket's actual hostname was on "us-iad-10").
-var newS3ObjectClient = func(region, clusterEndpoint, accessKey, secretKey string) s3ObjectAPI {
+var newS3ObjectClient = func(region, clusterEndpoint, accessKey, secretKey string, objectLimiter *rate.Limiter) s3ObjectAPI {
 	cfg := aws.Config{
 		Region:      region,
 		Credentials: credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
@@ -87,6 +97,7 @@ var newS3ObjectClient = func(region, clusterEndpoint, accessKey, secretKey strin
 	otelaws.AppendMiddlewares(&cfg.APIOptions)
 
 	return s3sdk.NewFromConfig(cfg, func(o *s3sdk.Options) {
+		o.APIOptions = append(o.APIOptions, ratelimit.AWSMiddleware(objectLimiter, "akamai_object"))
 		o.BaseEndpoint = aws.String("https://" + clusterEndpoint)
 		o.UsePathStyle = true
 
@@ -113,7 +124,7 @@ var newS3ObjectClient = func(region, clusterEndpoint, accessKey, secretKey strin
 // key.
 func (m *Manager) s3ClientFor(bucketHostname, accessKey, secretKey string) s3ObjectAPI {
 	clusterEndpoint := strings.TrimPrefix(bucketHostname, m.bucket+".")
-	return newS3ObjectClient(m.region, clusterEndpoint, accessKey, secretKey)
+	return newS3ObjectClient(m.region, clusterEndpoint, accessKey, secretKey, m.objectLimiter)
 }
 
 // NewManager creates a new Manager instance for managing Akamai interactions.
@@ -131,6 +142,8 @@ func NewManager(
 	k8sClient client.Client,
 	app *forgev1alpha1.Application,
 	defaultRegion string,
+	accountLimiter *rate.Limiter,
+	objectLimiter *rate.Limiter,
 ) (*Manager, error) {
 
 	storage := app.Spec.Storage
@@ -174,17 +187,24 @@ func NewManager(
 	// *http.Client -- wrapping its Transport with otelhttp.NewTransport
 	// auto-instruments every linodego call (bucket/key management) the same
 	// "free," no-per-call-code way otelaws covers AWS.
+	// Same reasoning as s3/client.go's split between s3client and
+	// iamclient: Akamai's account API (bucket/key CRUD, this client) and
+	// its S3-compatible object endpoint (the marker writes s3ClientFor
+	// builds separately) are different infrastructure with different real
+	// capacities -- sharing one budget would throttle whichever has more
+	// headroom down to the other's ceiling.
 	tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: string(tokenBytes)})
 	oauthClient := oauth2.NewClient(ctx, tokenSource)
-	oauthClient.Transport = otelhttp.NewTransport(oauthClient.Transport)
+	oauthClient.Transport = otelhttp.NewTransport(ratelimit.NewRoundTripper(accountLimiter, oauthClient.Transport, "akamai_account"))
 	linodeClient := linodego.NewClient(oauthClient)
 
 	return &Manager{
-		k8sClient:    k8sClient,
-		akamaiClient: &linodeClient,
-		app:          app,
-		storage:      storage,
-		bucket:       bucket,
-		region:       region,
+		k8sClient:     k8sClient,
+		akamaiClient:  &linodeClient,
+		app:           app,
+		storage:       storage,
+		bucket:        bucket,
+		region:        region,
+		objectLimiter: objectLimiter,
 	}, nil
 }

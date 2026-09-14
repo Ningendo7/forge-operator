@@ -7,6 +7,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 )
 
 // --- applicationChangePredicate ---
@@ -58,6 +59,45 @@ func TestApplicationChangePredicate_IgnoresRepeatedUpdatesWhileAlreadyDeleting(t
 
 	if applicationChangePredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
 		t.Fatalf("expected a repeated status-only update on an already-deleting Application to be filtered out")
+	}
+}
+
+func TestApplicationChangePredicate_ReactsToAdoptBucketAnnotationChange(t *testing.T) {
+	// Real usability gap, not a storm risk: the annotation is metadata, not
+	// spec, so setting/clearing it never bumped generation and was silently
+	// swallowed like any other annotation-only change -- most commonly
+	// reached by a user reacting to a live BucketNotOwned failure by
+	// annotating the already-existing (and already backed-off) Application,
+	// which then had no way to notice the annotation until its own
+	// unrelated backoff next happened to fire.
+	oldObj := &forgev1alpha1.Application{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+	newObj := &forgev1alpha1.Application{ObjectMeta: metav1.ObjectMeta{
+		Generation:  1,
+		Annotations: map[string]string{naming.AdoptBucketAnnotation: "true"},
+	}}
+
+	if !applicationChangePredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
+		t.Fatalf("expected adding the adopt-bucket annotation to pass the predicate")
+	}
+
+	// Clearing it must also pass, symmetrically.
+	if !applicationChangePredicate.Update(event.UpdateEvent{ObjectOld: newObj, ObjectNew: oldObj}) {
+		t.Fatalf("expected removing the adopt-bucket annotation to pass the predicate")
+	}
+}
+
+func TestApplicationChangePredicate_IgnoresUnrelatedAnnotationChange(t *testing.T) {
+	// Scoped to only the adopt-bucket annotation, not annotations
+	// generally -- an unrelated annotation change must still be filtered
+	// out, same as before this fix.
+	oldObj := &forgev1alpha1.Application{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+	newObj := &forgev1alpha1.Application{ObjectMeta: metav1.ObjectMeta{
+		Generation:  1,
+		Annotations: map[string]string{"some-other-key": "value"},
+	}}
+
+	if applicationChangePredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
+		t.Fatalf("expected an unrelated annotation change to still be filtered out")
 	}
 }
 

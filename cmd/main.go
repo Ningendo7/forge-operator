@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strconv"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -45,6 +46,7 @@ import (
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	"github.com/Ningendo7/forge-operator/internal/controller"
 	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
+	"github.com/Ningendo7/forge-operator/internal/controller/ratelimit"
 	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
 	webhookv1alpha1 "github.com/Ningendo7/forge-operator/internal/webhook/v1alpha1"
 	// +kubebuilder:scaffold:imports
@@ -60,6 +62,33 @@ func init() {
 
 	utilruntime.Must(forgev1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+// envFloat reads name as a float64, returning fallback if unset or
+// unparseable -- a typo'd or missing rate-limit env var should degrade to
+// a conservative default, not crash the manager at startup.
+func envFloat(name string, fallback float64) float64 {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
+}
+
+func envInt(name string, fallback int) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback
+	}
+	i, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return i
 }
 
 // nolint:gocyclo
@@ -261,14 +290,42 @@ func main() {
 	oidcProviderARN := os.Getenv("OIDC_PROVIDER_ARN")
 	oidcProviderURL := os.Getenv("OIDC_PROVIDER_URL")
 	defaultAkamaiRegion := os.Getenv("DEFAULT_AKAMAI_REGION")
+
+	// Rate limiting for this operator's own outgoing AWS/Akamai calls --
+	// independent of MaxConcurrentReconciles. Each surface gets its own
+	// limiter (see internal/controller/ratelimit's package doc for why).
+	// Defaults here are deliberately conservative starting points, not
+	// verified figures for any specific AWS/Linode account tier -- tune
+	// via these env vars once you know your account's real limits.
+	s3RateLimiter := ratelimit.NewLimiter(
+		envFloat("AWS_S3_RATE_LIMIT_QPS", 20),
+		envInt("AWS_S3_RATE_LIMIT_BURST", 40),
+	)
+	iamRateLimiter := ratelimit.NewLimiter(
+		envFloat("AWS_IAM_RATE_LIMIT_QPS", 8),
+		envInt("AWS_IAM_RATE_LIMIT_BURST", 16),
+	)
+	akamaiAccountRateLimiter := ratelimit.NewLimiter(
+		envFloat("AKAMAI_ACCOUNT_RATE_LIMIT_QPS", 5),
+		envInt("AKAMAI_ACCOUNT_RATE_LIMIT_BURST", 10),
+	)
+	akamaiObjectRateLimiter := ratelimit.NewLimiter(
+		envFloat("AKAMAI_OBJECT_RATE_LIMIT_QPS", 20),
+		envInt("AKAMAI_OBJECT_RATE_LIMIT_BURST", 40),
+	)
+
 	if err := (&controller.ApplicationReconciler{
-		Client:              mgr.GetClient(),
-		Scheme:              mgr.GetScheme(),
-		Recorder:            mgr.GetEventRecorder("forge-operator"),
-		OIDCProviderARN:     oidcProviderARN,
-		OIDCProviderURL:     oidcProviderURL,
-		DefaultAkamaiRegion: defaultAkamaiRegion,
-		StatusManager:       statusmanager.NewStatusManager(mgr.GetClient(), mgr.GetAPIReader()),
+		Client:                   mgr.GetClient(),
+		Scheme:                   mgr.GetScheme(),
+		Recorder:                 mgr.GetEventRecorder("forge-operator"),
+		OIDCProviderARN:          oidcProviderARN,
+		OIDCProviderURL:          oidcProviderURL,
+		DefaultAkamaiRegion:      defaultAkamaiRegion,
+		S3RateLimiter:            s3RateLimiter,
+		IAMRateLimiter:           iamRateLimiter,
+		AkamaiAccountRateLimiter: akamaiAccountRateLimiter,
+		AkamaiObjectRateLimiter:  akamaiObjectRateLimiter,
+		StatusManager:            statusmanager.NewStatusManager(mgr.GetClient(), mgr.GetAPIReader()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "application")
 		os.Exit(1)
