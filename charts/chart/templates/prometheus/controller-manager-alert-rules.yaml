@@ -46,17 +46,26 @@ spec:
 
         # Errors: an Application literally cannot be deleted. Fires on a
         # single occurrence, not a rate -- this is a stuck finalizer, not
-        # something to wait out.
+        # something to wait out. Covers both outcomes that leave a finalizer
+        # stuck on purpose: "timeout" (finalizerCleanupTimeout hit) and
+        # "not_owned" (cleanup correctly refused to delete a bucket it can't
+        # verify ownership of, see docs/authentication-and-storage.md's
+        # Deletion section) -- both need the exact same human action, and
+        # before this rule covered "not_owned" too, that second case had no
+        # alert coverage at all: an Application could sit permanently stuck
+        # with nothing ever paging anyone.
         - alert: ForgeFinalizerCleanupStuck
-          expr: increase(forge_finalizer_cleanup_total{outcome="timeout"}[15m]) > 0
+          expr: increase(forge_finalizer_cleanup_total{outcome=~"timeout|not_owned"}[15m]) > 0
           labels:
             severity: critical
           annotations:
-            summary: "forge-operator storage cleanup timed out during finalization ({{ "{{" }} $labels.provider {{ "}}" }})"
+            summary: "forge-operator storage cleanup is stuck during finalization ({{ "{{" }} $labels.provider {{ "}}" }})"
             description: >-
-              A storage cleanup attempt hit finalizerCleanupTimeout (5m) for provider
-              {{ "{{" }} $labels.provider {{ "}}" }}. The affected Application's finalizer is
-              still attached and deletion is blocked until this is resolved manually.
+              A storage cleanup attempt for provider {{ "{{" }} $labels.provider {{ "}}" }} either
+              hit finalizerCleanupTimeout (5m) or refused to delete a bucket it couldn't verify
+              ownership of. The affected Application's finalizer is still attached and deletion
+              is blocked until this is resolved manually -- see the Deletion section of
+              docs/authentication-and-storage.md.
 
         # Errors, but distinct runbook from the generic rule above: this is
         # specifically IAM/credentials, not a hang or a naming conflict --

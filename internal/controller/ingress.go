@@ -52,6 +52,7 @@ func (r *ApplicationReconciler) desiredIngress(
 		Spec: networkingv1.IngressSpec{
 			IngressClassName: ingressSpec.ClassName,
 			Rules:            []networkingv1.IngressRule{rule},
+			TLS:              ingressSpec.TLS,
 		},
 	}
 }

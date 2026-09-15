@@ -411,10 +411,17 @@ type StorageSpec struct {
 	Bucket string `json:"bucket"`
 
 	// DeletionPolicy controls what happens to the bucket when this
-	// Application is deleted. Defaults to "Delete" when unset, matching
-	// this operator's previous, only-ever behavior.
+	// Application is deleted. Defaults to "Retain" when unset: object
+	// storage most often holds real data, so losing a bucket because an
+	// Application was deleted (intentionally or by mistake) is a worse
+	// failure mode than a retained bucket costing a few cents until someone
+	// notices. Set this explicitly to "Delete" for ephemeral/throwaway
+	// Applications (dev sandboxes, PR preview environments) where automatic
+	// cleanup is actually wanted -- at fleet scale, forgetting to do so
+	// under this default means a retained bucket per deleted Application,
+	// not a one-off.
 	// +optional
-	// +kubebuilder:default=Delete
+	// +kubebuilder:default=Retain
 	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
 
 	// Cloud region. For AWS, a standard AWS region (e.g. "us-east-1"). For

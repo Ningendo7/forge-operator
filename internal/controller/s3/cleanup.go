@@ -84,6 +84,20 @@ func (m *Manager) CleanupBucket(
 	return irsaErr, nil
 }
 
+// CleanupCredentialsOnly deletes only this Application's IRSA role, leaving
+// the bucket untouched -- used when deletionPolicy is Retain, so the bucket
+// survives but its no-longer-tracked IAM role doesn't linger indefinitely.
+// A later Application adopting the retained bucket mints its own fresh
+// role/credentials regardless (nothing can recover this one's), so it
+// serves no purpose once this Application is gone. Safe to call
+// unconditionally, independent of bucket ownership, for the same reason
+// CleanupBucket's own IRSA cleanup already runs before its ownership check
+// above: the role's identity is entirely deterministic, never ambiguous the
+// way a bucket's ownership can be.
+func (m *Manager) CleanupCredentialsOnly(ctx context.Context) error {
+	return m.cleanupAppIRSA(ctx)
+}
+
 // verifyOwnership re-checks the bucket's ownership tag, reusing exactly
 // noSuchTagSetErrorCode/ownerTagKey/previouslyCreatedByUs/
 // adoptBucketRequested from desireds3.go (same package). A bucket that's

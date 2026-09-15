@@ -113,6 +113,22 @@ func (v *ApplicationCustomValidator) ValidateCreate(ctx context.Context, obj *fo
 func (v *ApplicationCustomValidator) ValidateUpdate(ctx context.Context, oldObj, newObj *forgev1alpha1.Application) (admission.Warnings, error) {
 	applicationlog.Info("Validation for Application upon update", "name", newObj.GetName())
 
+	// Once deletion has started, the only legitimate change left is
+	// finalizers being removed one by one as cleanup completes -- re-running
+	// live-Secret-existence checks (validateAkamai/validateAWS below) against
+	// possibly-already-deleted external state serves no purpose at that
+	// point and can permanently deadlock deletion. Confirmed live via chaos
+	// testing: ordinary namespace teardown deletes a Secret this webhook
+	// depends on before the stuck Application it belongs to, and every
+	// subsequent attempt to remove that Application's own finalizer -- the
+	// only way to unstick it, since a namespace already Terminating also
+	// refuses to let the missing Secret be recreated -- was rejected because
+	// the now-gone Secret failed re-validation. Immutability/orphan checks
+	// below are similarly pointless once the object is being torn down.
+	if newObj.GetDeletionTimestamp() != nil {
+		return nil, nil
+	}
+
 	if err := validateStorageIdentityImmutable(oldObj, newObj); err != nil {
 		return nil, err
 	}

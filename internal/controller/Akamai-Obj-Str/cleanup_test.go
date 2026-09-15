@@ -155,6 +155,55 @@ func TestDeleteApplicationAccessKey_PropagatesDeleteError(t *testing.T) {
 	}
 }
 
+// --- CleanupCredentialsOnly ---
+
+func TestCleanupCredentialsOnly_DeletesKeyWithoutTouchingBucket(t *testing.T) {
+	bucketDeleteCalled := false
+	keyDeleted := false
+	m := newTestManager(&mockAkamaiClient{
+		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
+			return []linodego.ObjectStorageKey{{Label: testAccessKeyLabel, ID: 42}}, nil
+		},
+		deleteObjectStorageKeyFunc: func(ctx context.Context, keyID int) error {
+			keyDeleted = true
+			return nil
+		},
+		deleteObjectStorageBucketFunc: func(ctx context.Context, clusterID, bucket string) error {
+			bucketDeleteCalled = true
+			return nil
+		},
+		getObjectStorageBucketFunc: func(ctx context.Context, clusterID, bucket string) (*linodego.ObjectStorageBucket, error) {
+			t.Fatalf("expected no bucket lookup at all -- CleanupCredentialsOnly must never touch the bucket (used for deletionPolicy: Retain)")
+			return nil, nil
+		},
+	})
+
+	if err := m.CleanupCredentialsOnly(context.Background()); err != nil {
+		t.Fatalf("CleanupCredentialsOnly returned error: %v", err)
+	}
+	if !keyDeleted {
+		t.Fatalf("expected the access key to be deleted")
+	}
+	if bucketDeleteCalled {
+		t.Fatalf("expected DeleteObjectStorageBucket not to be called")
+	}
+}
+
+func TestCleanupCredentialsOnly_PropagatesError(t *testing.T) {
+	m := newTestManager(&mockAkamaiClient{
+		listObjectStorageKeysFunc: func(ctx context.Context, opts *linodego.ListOptions) ([]linodego.ObjectStorageKey, error) {
+			return []linodego.ObjectStorageKey{{Label: testAccessKeyLabel, ID: 42}}, nil
+		},
+		deleteObjectStorageKeyFunc: func(ctx context.Context, keyID int) error {
+			return errors.New("delete failed")
+		},
+	})
+
+	if err := m.CleanupCredentialsOnly(context.Background()); err == nil {
+		t.Fatalf("expected error from CleanupCredentialsOnly, got nil")
+	}
+}
+
 // --- deleteStorageBucket ---
 
 func TestDeleteStorageBucket_Success(t *testing.T) {

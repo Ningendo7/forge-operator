@@ -432,6 +432,103 @@ func TestReconcileStorage_SpecRemovalWithRetainPolicySkipsCleanupAndClearsStatus
 	}
 }
 
+func TestReconcileStorage_BucketIdentityMismatchCleansUpOldBucketFirst(t *testing.T) {
+	// The orphan-race fix: Status.Storage still remembers bucket X, but
+	// Spec.Storage now names a different bucket Y -- reachable live via a
+	// rapid nil -> different-identity sequence the workqueue coalesces into
+	// one reconcile (see reconcileStorage's own comment on this check for
+	// the full mechanism). Before this fix, reconcileStorage had no way to
+	// notice X needed cleaning up at all here: it would reconcile Y
+	// directly and overwrite Status.Storage, silently orphaning X forever.
+	//
+	// X's missing credentials Secret proves cleanup of X was actually
+	// attempted (manager construction fails) before Y is ever touched --
+	// same technique as the nil-transition tests above.
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Status.Storage = &forgev1alpha1.StorageStatus{
+		Provider:   forgev1alpha1.ProviderAWSS3,
+		Bucket:     "bucket-x-old",
+		SecretName: testMissingCredsSecret,
+	}
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   "bucket-y-new",
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	err := r.reconcileStorage(context.Background(), app)
+	if err == nil {
+		t.Fatalf("expected an error: cleanup of the old bucket (X) should have been attempted and failed on its missing credentials Secret, before Y was ever reconciled")
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+	// Status.Storage must still show the OLD bucket (X): cleanup failed, so
+	// it must not have been silently cleared or overwritten with Y.
+	if got.Status.Storage == nil || got.Status.Storage.Bucket != "bucket-x-old" {
+		t.Fatalf("expected Status.Storage to still reference the old bucket after a failed cleanup, got %#v", got.Status.Storage)
+	}
+}
+
+func TestReconcileStorage_MatchingBucketIdentityDoesNotTriggerCleanup(t *testing.T) {
+	// The negative case: Status.Storage and Spec.Storage already agree, so
+	// this must be an ordinary reconcile of an already-Ready bucket, not a
+	// changed identity -- no cleanup should be attempted at all.
+	//
+	// Made airtight by mocking newS3StorageManager (only reconcileAWSStorage's
+	// normal path uses that var-bound constructor -- cleanupPreviousStorage
+	// calls s3storage.NewManager directly, unmocked, via finalizeApplication).
+	// If a mismatch were spuriously detected here, cleanup would attempt a
+	// *real* manager construction with no valid credentials and fail the
+	// whole reconcile despite the mocked reconcile path being ready to
+	// succeed -- so a clean, error-free, Ready result is only possible if
+	// cleanup was correctly never triggered.
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Status.Storage = &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		Region:   testWestRegion,
+	}
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		Region:   testWestRegion,
+	}
+
+	withS3StorageManager(t, &mockS3StorageManager{
+		reconcileBucketFunc: func(ctx context.Context) (*s3storage.StorageResult, error) {
+			return &s3storage.StorageResult{}, nil
+		},
+	})
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileStorage(context.Background(), app); err != nil {
+		t.Fatalf("expected no error -- a spurious cleanup attempt would have failed on missing real credentials: %v", err)
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+	if got.Status.Storage == nil || got.Status.Storage.Bucket != testBucket {
+		t.Fatalf("expected Status.Storage to remain %q, got %#v", testBucket, got.Status.Storage)
+	}
+}
+
 func TestReconcileStorage_ReturnsErrorAndSetsStatusForUnsupportedProvider(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)

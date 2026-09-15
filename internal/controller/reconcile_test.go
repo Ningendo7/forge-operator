@@ -32,6 +32,23 @@ func newReconcileScheme() *runtime.Scheme {
 	return scheme
 }
 
+// --- resolveMaxConcurrentReconciles ---
+
+func TestResolveMaxConcurrentReconciles_FloorsNonPositiveValues(t *testing.T) {
+	if got := resolveMaxConcurrentReconciles(0); got != defaultMaxConcurrentReconciles {
+		t.Fatalf("expected zero to floor to %d, got %d", defaultMaxConcurrentReconciles, got)
+	}
+	if got := resolveMaxConcurrentReconciles(-3); got != defaultMaxConcurrentReconciles {
+		t.Fatalf("expected a negative value to floor to %d, got %d", defaultMaxConcurrentReconciles, got)
+	}
+}
+
+func TestResolveMaxConcurrentReconciles_UsesConfiguredValue(t *testing.T) {
+	if got := resolveMaxConcurrentReconciles(12); got != 12 {
+		t.Fatalf("expected the configured value 12 to pass through, got %d", got)
+	}
+}
+
 func TestReconcile_ReturnsNilWhenApplicationNotFound(t *testing.T) {
 	scheme := newReconcileScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()

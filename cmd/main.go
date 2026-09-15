@@ -314,6 +314,12 @@ func main() {
 		envInt("AKAMAI_OBJECT_RATE_LIMIT_BURST", 40),
 	)
 
+	// How many Applications this controller reconciles in parallel --
+	// independent of the rate limiters above, which bound external call
+	// *rate*, not reconcile *parallelism*. 5 matches this controller's
+	// original, only-ever value from before this was configurable.
+	maxConcurrentReconciles := envInt("MAX_CONCURRENT_RECONCILES", 5)
+
 	if err := (&controller.ApplicationReconciler{
 		Client:                   mgr.GetClient(),
 		Scheme:                   mgr.GetScheme(),
@@ -325,6 +331,7 @@ func main() {
 		IAMRateLimiter:           iamRateLimiter,
 		AkamaiAccountRateLimiter: akamaiAccountRateLimiter,
 		AkamaiObjectRateLimiter:  akamaiObjectRateLimiter,
+		MaxConcurrentReconciles:  maxConcurrentReconciles,
 		StatusManager:            statusmanager.NewStatusManager(mgr.GetClient(), mgr.GetAPIReader()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "application")

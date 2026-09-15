@@ -25,17 +25,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -43,7 +40,6 @@ import (
 	"golang.org/x/time/rate"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
-	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
 )
@@ -79,6 +75,14 @@ type ApplicationReconciler struct {
 	IAMRateLimiter           *rate.Limiter
 	AkamaiAccountRateLimiter *rate.Limiter
 	AkamaiObjectRateLimiter  *rate.Limiter
+
+	// MaxConcurrentReconciles bounds how many Applications this controller
+	// reconciles in parallel -- independent of the rate limiters above,
+	// which bound external call *rate*, not reconcile *parallelism*. Set
+	// via MAX_CONCURRENT_RECONCILES (see cmd/main.go); SetupWithManager
+	// falls back to 5 for a zero value, so tests and any caller that
+	// doesn't set this field explicitly keep today's behavior.
+	MaxConcurrentReconciles int
 
 	StatusManager *statusmanager.StatusManager
 }
@@ -190,190 +194,32 @@ func (r *ApplicationReconciler) Reconcile(
 	return ctrl.Result{}, nil
 }
 
-// applicationChangePredicate re-reconciles on a real spec change (generation
-// bump), the one true transition into being marked for deletion, or a
-// change to the adopt-bucket annotation's value, but ignores pure
-// status/other-metadata-only updates otherwise. Without the generation
-// check, every status write Reconcile makes to the Application
-// (SetReconciling/SetReady/SetFailed) would itself be an update the primary
-// watch below sees and re-triggers on, causing the controller to reconcile
-// itself in an unbounded loop even once fully settled -- deletionTimestamp
-// going from unset to set is included explicitly because that transition
-// doesn't bump generation either, and finalizer cleanup depends on seeing
-// it.
-//
-// Deliberately checks the *transition* (old nil, new non-nil), not just
-// "new is non-nil" -- an earlier version checked only the latter, which
-// matches every subsequent update to an already-deleting object too,
-// including the object's own status writes from a failed/stuck cleanup
-// attempt. Confirmed live: an Application whose finalizer cleanup keeps
-// failing (e.g. bucket ownership verification failing before deletion) has
-// its own SetCleanupInProgress/SetFailed writes each independently pass
-// this predicate, re-triggering Reconcile via this watch immediately --
-// completely bypassing the workqueue's own exponential backoff on the
-// error, since a fresh watch-triggered Add() isn't rate-limited the way
-// AddRateLimited's error-driven retry is. The result was a sustained,
-// non-decaying reconcile storm for the entire time a deletion stayed stuck,
-// not just a brief burst -- worse than the Owns()-predicate storms fixed
-// elsewhere in this file, since it can happen to any Application whose
-// deletion is stuck for any reason. Once only the true transition passes,
-// every later reconcile of an already-deleting Application (including ones
-// its own failed attempts write) correctly falls through to
-// GenerationChangedPredicate, which returns false for a status-only change
-// -- leaving the workqueue's own rate-limited retry as the only thing
-// driving further attempts, with real backoff. A controller restart while a
-// deletion is stuck loses nothing: the informer's initial List always
-// delivers a Create event, and Create is unconditionally let through by
-// every predicate below regardless of this Update-only logic.
-//
-// The adopt-bucket branch closes a real usability gap, not a storm risk:
-// naming.AdoptBucketAnnotation is metadata, not spec, so setting or
-// clearing it -- the documented way to opt into reclaiming a bucket left
-// behind by a Application that's genuinely gone -- never bumped generation
-// either, and was silently swallowed by this predicate exactly like any
-// other annotation-only change. In practice this is most often reached by a
-// user reacting to a live BucketNotOwned failure by annotating the
-// already-existing Application, not by setting it at creation (Create
-// events always pass regardless of this Update-only logic, so a brand-new
-// Application created with the annotation already set was never affected).
-// That failing Application is typically sitting on the workqueue's own
-// exponential backoff from the ownership failure itself; without this
-// branch, the annotation is only ever picked up whenever that backoff next
-// happens to fire, with no visible signal that anything happened in the
-// meantime -- easily misread as "adopt-bucket doesn't work" rather than
-// "adopt-bucket hasn't been retried yet." Scoped to only this one
-// annotation key, not annotations generally, to avoid reopening the same
-// class of self-triggering risk the rest of this predicate exists to
-// prevent.
-var applicationChangePredicate = predicate.Or(
-	predicate.GenerationChangedPredicate{},
-	predicate.Funcs{
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			return e.ObjectOld.GetDeletionTimestamp() == nil && e.ObjectNew.GetDeletionTimestamp() != nil
-		},
-	},
-	predicate.Funcs{
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			return e.ObjectOld.GetAnnotations()[naming.AdoptBucketAnnotation] != e.ObjectNew.GetAnnotations()[naming.AdoptBucketAnnotation]
-		},
-	},
-)
+// defaultMaxConcurrentReconciles is resolveMaxConcurrentReconciles's
+// fallback when MaxConcurrentReconciles is left at its zero value --
+// preserves this controller's original, only-ever concurrency (a plain
+// literal here before MAX_CONCURRENT_RECONCILES existed) for any caller
+// that doesn't set the field explicitly, tests included.
+const defaultMaxConcurrentReconciles = 5
 
-// ownedGenerationChangedPredicate filters Owns() watch events for an owned
-// resource whose STATUS this operator never reads: only Service qualifies
-// here (EvaluateComputeReadiness Get()s it just to confirm it exists, never
-// inspects .status). Service has its own spec/status split, so Kubernetes
-// only bumps .metadata.generation on a genuine .spec change. Without this,
-// every Server-Side Apply this controller makes to it -- even a fully
-// idempotent one -- updates .metadata.managedFields[].time, which bumps
-// resourceVersion and fires an Update event; an unfiltered Owns() watch
-// turns that straight back into a new Reconcile call, which applies the
-// same content again, which bumps managedFields again -- an unbounded,
-// self-sustaining storm with no external trigger at all. Mirrors
-// applicationChangePredicate's own reasoning above, extended to the owned
-// resources it was never applied to.
-//
-// Deliberately NOT used for Deployment/Ingress/HorizontalPodAutoscaler/
-// PodDisruptionBudget even though they have the same generation semantics
-// -- see ownedStatusOrGenerationChangedPredicate below for why those four
-// need a different predicate instead.
-var ownedGenerationChangedPredicate = predicate.GenerationChangedPredicate{}
-
-// ownedStatusOrGenerationChangedPredicate is for owned resources whose
-// STATUS this operator's own readiness evaluation actually depends on --
-// Deployment (.status.readyReplicas et al, via IsDeploymentReady), Ingress
-// (.status.loadBalancer, via IsIngressReady), HorizontalPodAutoscaler (via
-// IsHPAReady), and PodDisruptionBudget (via IsPDBReady) -- see
-// StatusManager.EvaluateComputeReadiness. Using plain
-// ownedGenerationChangedPredicate here was tried first and was wrong: a
-// status subresource write never bumps .metadata.generation, so it filtered
-// out 100% of status updates to these four types -- but every status write
-// to any of them comes from a controller other than this one
-// (kube-controller-manager/kubelet for Deployment, the ingress controller,
-// the HPA controller, the disruption controller), never from this
-// operator's own SSA re-apply of their .spec. So status-only updates here
-// were never the self-inflicted no-op churn ownedGenerationChangedPredicate
-// exists to filter out in the first place -- dropping them broke readiness
-// tracking entirely instead: a real, healthy rollout landing in .status was
-// never noticed, and Ready got stuck flapping. This reacts to a genuine
-// .spec change (generation differs) OR a genuine .status change (content
-// differs); a pure metadata/managedFields/resourceVersion-only churn from
-// this operator's own repeated SSA apply of unchanged .spec is still
-// filtered out, same as ownedGenerationChangedPredicate's own reasoning.
-var ownedStatusOrGenerationChangedPredicate = predicate.Funcs{
-	UpdateFunc: func(e event.UpdateEvent) bool {
-		if e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration() {
-			return true
-		}
-		switch oldObj := e.ObjectOld.(type) {
-		case *appsv1.Deployment:
-			newObj, ok := e.ObjectNew.(*appsv1.Deployment)
-			return !ok || !apiequality.Semantic.DeepEqual(oldObj.Status, newObj.Status)
-		case *networkingv1.Ingress:
-			newObj, ok := e.ObjectNew.(*networkingv1.Ingress)
-			return !ok || !apiequality.Semantic.DeepEqual(oldObj.Status, newObj.Status)
-		case *autoscalingv2.HorizontalPodAutoscaler:
-			newObj, ok := e.ObjectNew.(*autoscalingv2.HorizontalPodAutoscaler)
-			return !ok || !apiequality.Semantic.DeepEqual(oldObj.Status, newObj.Status)
-		case *policyv1.PodDisruptionBudget:
-			newObj, ok := e.ObjectNew.(*policyv1.PodDisruptionBudget)
-			return !ok || !apiequality.Semantic.DeepEqual(oldObj.Status, newObj.Status)
-		default:
-			// An unrecognized type reaching here would be a real bug (this
-			// predicate is only ever attached to the Owns() calls below for
-			// the four types above) -- fail open rather than silently
-			// swallowing an update we don't know how to evaluate.
-			return true
-		}
-	},
-}
-
-// ownedContentChangedPredicate is the equivalent protection for owned
-// resources with no generation semantics at all (ConfigMap, Secret,
-// ServiceAccount are flat data, not spec/status types -- Kubernetes never
-// increments their .metadata.generation, so ownedGenerationChangedPredicate
-// can't distinguish a real content change from an SSA no-op here). Compares
-// only the fields this controller's own desired-state builders ever
-// populate (see desiredConfigMap, desiredStorage, desiredServiceAccount +
-// the IRSA role-arn annotation in serviceaccount.go) -- an update that
-// changes only bookkeeping metadata (managedFields, resourceVersion,
-// ownerReferences) is filtered out. Also used on the Secret Watches() below,
-// which is the second amplifier for this same storm on the storage Secret
-// specifically.
-var ownedContentChangedPredicate = predicate.Funcs{
-	UpdateFunc: func(e event.UpdateEvent) bool {
-		switch oldObj := e.ObjectOld.(type) {
-		case *corev1.ConfigMap:
-			newObj, ok := e.ObjectNew.(*corev1.ConfigMap)
-			return !ok ||
-				!apiequality.Semantic.DeepEqual(oldObj.Data, newObj.Data) ||
-				!apiequality.Semantic.DeepEqual(oldObj.BinaryData, newObj.BinaryData)
-		case *corev1.Secret:
-			newObj, ok := e.ObjectNew.(*corev1.Secret)
-			return !ok || !apiequality.Semantic.DeepEqual(oldObj.Data, newObj.Data)
-		case *corev1.ServiceAccount:
-			newObj, ok := e.ObjectNew.(*corev1.ServiceAccount)
-			return !ok ||
-				!apiequality.Semantic.DeepEqual(oldObj.Annotations, newObj.Annotations) ||
-				!apiequality.Semantic.DeepEqual(oldObj.Secrets, newObj.Secrets) ||
-				!apiequality.Semantic.DeepEqual(oldObj.ImagePullSecrets, newObj.ImagePullSecrets) ||
-				!apiequality.Semantic.DeepEqual(oldObj.AutomountServiceAccountToken, newObj.AutomountServiceAccountToken)
-		default:
-			// An unrecognized type reaching here would be a real bug (this
-			// predicate is only ever attached to the Owns()/Watches() calls
-			// below for the three types above) -- fail open rather than
-			// silently swallowing an update we don't know how to evaluate.
-			return true
-		}
-	},
+// resolveMaxConcurrentReconciles applies defaultMaxConcurrentReconciles's
+// floor to a configured value -- a plain function so the fallback itself is
+// unit-testable without needing a real Manager, the same reasoning
+// ratelimit.NewLimiter's own <=0 floor is tested in isolation.
+func resolveMaxConcurrentReconciles(configured int) int {
+	if configured <= 0 {
+		return defaultMaxConcurrentReconciles
+	}
+	return configured
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ApplicationReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	maxConcurrentReconciles := resolveMaxConcurrentReconciles(r.MaxConcurrentReconciles)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&forgev1alpha1.Application{}, builder.WithPredicates(applicationChangePredicate)).
 		Owns(&appsv1.Deployment{}, builder.WithPredicates(ownedStatusOrGenerationChangedPredicate)).
-		Owns(&corev1.Service{}, builder.WithPredicates(ownedGenerationChangedPredicate)).
+		Owns(&corev1.Service{}, builder.WithPredicates(ownedContentChangedPredicate)).
 		Owns(&corev1.ConfigMap{}, builder.WithPredicates(ownedContentChangedPredicate)).
 		Owns(&corev1.Secret{}, builder.WithPredicates(ownedContentChangedPredicate)).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(ownedStatusOrGenerationChangedPredicate)).
@@ -385,7 +231,7 @@ func (r *ApplicationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.findApplicationsForSecret),
 			builder.WithPredicates(ownedContentChangedPredicate),
 		).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 5}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentReconciles}).
 		Named("application").
 		Complete(r)
 }
