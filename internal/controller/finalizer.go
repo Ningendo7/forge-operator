@@ -140,6 +140,7 @@ func (r *ApplicationReconciler) finalizeApplication(
 	}()
 
 	if storage.DeletionPolicy == forgev1alpha1.DeletionPolicyRetain {
+		r.cleanupRetainedStorageCredentials(ctx, application, storage)
 		r.retainStorage(ctx, application, storage.Bucket)
 		return nil
 	}
@@ -230,9 +231,87 @@ func (r *ApplicationReconciler) finalizeApplication(
 	return nil
 }
 
-// retainStorage skips cloud deletion entirely when spec.storage.deletionPolicy
-// is Retain: the bucket (and its ownership tag/marker) is left exactly as-is,
-// only the Kubernetes Application object and its finalizer are removed.
+// cleanupRetainedStorageCredentials deletes this Application's IAM
+// role/access key even though deletionPolicy is Retain -- the bucket itself
+// is left alone (see retainStorage below), but there's no reason to also
+// leave behind a credential nothing tracks anymore: a later Application
+// that adopts the retained bucket mints its own fresh credential regardless
+// (ensureAccessKey/IRSA role creation can't recover the old one -- its
+// secret was only ever exposed once, in this operator's own output Secret,
+// which is deleted along with the rest of this Application's Kubernetes
+// resources), so the old one serves no purpose and is just an untracked,
+// still-valid credential sitting in the cloud account indefinitely.
+//
+// Best-effort and never fails the Application's own deletion -- same
+// reasoning as retainStorage itself: a transient failure here shouldn't
+// block the Application from actually going away. Surfaced instead as a
+// Warning Event for later manual cleanup, the same visibility non-Retain
+// credential-cleanup failures already get (IRSACleanupFailed/
+// AccessKeyCleanupFailed below).
+func (r *ApplicationReconciler) cleanupRetainedStorageCredentials(
+	ctx context.Context,
+	application *forgev1alpha1.Application,
+	storage *forgev1alpha1.StorageSpec,
+) {
+	logger := logf.FromContext(ctx)
+	cleanupApp := application.DeepCopy()
+	cleanupApp.Spec.Storage = storage
+
+	cloudCtx, cancel := context.WithTimeout(ctx, finalizerCleanupTimeout)
+	defer cancel()
+
+	switch storage.Provider {
+	case forgev1alpha1.ProviderAWSS3:
+		storageManager, mgrErr := s3storage.NewManager(
+			cloudCtx,
+			r.Client,
+			cleanupApp,
+			serviceAccountNameFor(application),
+			r.OIDCProviderARN,
+			r.OIDCProviderURL,
+			r.S3RateLimiter,
+			r.IAMRateLimiter,
+		)
+		if mgrErr != nil {
+			logger.Error(mgrErr, "Failed to build S3 manager to clean up retained bucket's IRSA role")
+			return
+		}
+		if err := storageManager.CleanupCredentialsOnly(cloudCtx); err != nil {
+			logger.Error(err, "Failed to clean up IRSA role for retained bucket", "bucket", storage.Bucket)
+			if r.Recorder != nil {
+				r.Recorder.Eventf(application, nil, corev1.EventTypeWarning, "IRSACleanupFailed", "Cleanup",
+					"Bucket was retained, but its IAM role/policy could not be cleaned up: %v", err)
+			}
+		}
+	case forgev1alpha1.ProviderAkamaiObjectStorage:
+		storageManager, mgrErr := akamaiobjstr.NewManager(
+			cloudCtx,
+			r.Client,
+			cleanupApp,
+			r.DefaultAkamaiRegion,
+			r.AkamaiAccountRateLimiter,
+			r.AkamaiObjectRateLimiter,
+		)
+		if mgrErr != nil {
+			logger.Error(mgrErr, "Failed to build Akamai manager to clean up retained bucket's access key")
+			return
+		}
+		if err := storageManager.CleanupCredentialsOnly(cloudCtx); err != nil {
+			logger.Error(err, "Failed to clean up access key for retained bucket", "bucket", storage.Bucket)
+			if r.Recorder != nil {
+				r.Recorder.Eventf(application, nil, corev1.EventTypeWarning, "AccessKeyCleanupFailed", "Cleanup",
+					"Bucket was retained, but its Akamai Object Storage access key could not be cleaned up: %v", err)
+			}
+		}
+	}
+}
+
+// retainStorage skips *bucket* deletion when spec.storage.deletionPolicy is
+// Retain: the bucket (and its ownership tag/marker) is left exactly as-is,
+// only the Kubernetes Application object and its finalizer are removed. Its
+// IAM role/access key still gets a separate best-effort cleanup attempt
+// first (see cleanupRetainedStorageCredentials above) -- Retain protects the
+// data, not the no-longer-tracked credential that happened to reach it.
 // Emits an Event so this is visible and auditable, not silent. bucket is
 // passed in explicitly rather than read from application.Spec.Storage since
 // the caller may be cleaning up a bucket described only by Status.Storage

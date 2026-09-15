@@ -14,6 +14,10 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// servicePortName names this Application's single generated ServicePort --
+// only one port is ever generated per Service, so a fixed name is fine.
+const servicePortName = "http"
+
 func (r *ApplicationReconciler) desiredService(
 	application *forgev1alpha1.Application,
 ) *corev1.Service {
@@ -55,7 +59,7 @@ func (r *ApplicationReconciler) desiredService(
 			Type:     serviceType,
 			Selector: labels,
 			Ports: []corev1.ServicePort{{
-				Name:       "http",
+				Name:       servicePortName,
 				Port:       servicePort,
 				TargetPort: intstr.FromInt(int(targetPort)),
 			}},

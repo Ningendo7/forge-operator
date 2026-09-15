@@ -136,29 +136,43 @@ func (r *ApplicationReconciler) reconcileStorage(
 	// If storage spec is nil, clean up any previously-provisioned cloud
 	// resource (not just the credentials Secret) before returning --
 	// otherwise removing spec.storage from an Application would silently
-	// orphan its bucket. finalizeApplication does exactly the cleanup (or
-	// deliberate Retain-skip) this needs, sourcing what to clean up from
-	// Status.Storage since Spec.Storage is nil here.
+	// orphan its bucket.
 	if application.Spec.Storage == nil {
 		if application.Status.Storage != nil {
-			if err := r.finalizeApplication(ctx, application); err != nil {
-				return fmt.Errorf("failed to clean up previously provisioned storage: %w", err)
-			}
-			// finalizeApplication only ever leaves the StorageReady condition
-			// at "cleanup in progress" (or a terminal failure) -- on the real
-			// deletion path that's harmless since the whole Application is
-			// gone moments later, but here the Application lives on, so a
-			// stuck, misleading condition would be left behind permanently.
-			// Removing it entirely (rather than setting some other reason)
-			// matches the condition an Application that never had storage
-			// configured shows: none at all.
-			application.Status.Storage = nil
-			apimeta.RemoveStatusCondition(&application.Status.Conditions, storagestatus.StorageReady)
-			if err := retryStatusUpdate(ctx, r.Client, application); err != nil {
-				return fmt.Errorf("failed to clear storage status after cleanup: %w", err)
+			if err := r.cleanupPreviousStorage(ctx, application, application.Status.Storage); err != nil {
+				return err
 			}
 		}
 		return r.reconcileStorageSecret(ctx, application, nil)
+	}
+
+	// Defense against a race the immutability webhook can't fully close on
+	// its own: each individual spec.storage update is validated against
+	// only its own immediate predecessor (validateStorageIdentityImmutable
+	// in the webhook), so a rapid nil -> different-identity sequence --
+	// spec.storage removed, then set again to a new provider/bucket/region,
+	// as two separate updates -- can pass admission cleanly even though the
+	// *overall* change is exactly what that check exists to block. If the
+	// workqueue coalesces those two updates into a single reconcile (an
+	// ordinary controller-runtime behavior: rapid Add()s for the same
+	// object dedupe to one pending item, and Get() when it's finally
+	// processed returns whatever's current, not either historical state),
+	// this method would never observe the nil state in between at all --
+	// jumping straight from the old identity to the new one, with nothing
+	// to trigger cleanup of whatever Status.Storage still remembers, so it
+	// would be silently overwritten and orphaned once the new bucket's own
+	// reconcile records over it. Detected here by comparing the identity
+	// Status.Storage last recorded against what Spec.Storage names now;
+	// a mismatch means the target changed out from under this reconcile,
+	// so the old one is cleaned up first, the same way an explicit nil
+	// transition already would be.
+	if oldStorage := application.Status.Storage; oldStorage != nil &&
+		(oldStorage.Provider != application.Spec.Storage.Provider ||
+			oldStorage.Bucket != application.Spec.Storage.Bucket ||
+			oldStorage.Region != application.Spec.Storage.Region) {
+		if err := r.cleanupPreviousStorage(ctx, application, oldStorage); err != nil {
+			return err
+		}
 	}
 
 	// Provision Backend Cloud Storage Resources. akamaiCreds is only ever a
@@ -191,6 +205,46 @@ func (r *ApplicationReconciler) reconcileStorage(
 		return fmt.Errorf("failed to reconcile storage secret: %w", err)
 	}
 
+	return nil
+}
+
+// cleanupPreviousStorage deletes (or retains, per its own recorded
+// DeletionPolicy) the cloud resource oldStorage describes, then clears
+// Status.Storage and the StorageReady condition. Shared by
+// reconcileStorage's two call sites: spec.storage removed outright, and
+// spec.storage replaced with a different identity underneath an in-flight
+// reconcile (see the comment above that second call site).
+//
+// oldStorage, not application.Spec.Storage, is what actually gets cleaned
+// up here -- via a throwaway DeepCopy with Spec.Storage overwritten to
+// match oldStorage's identity. This matters specifically for the
+// replaced-identity case: application.Spec.Storage already names the *new*
+// target there, and finalizeApplication has no way to know a target it's
+// handed is stale rather than exactly what should be cleaned up.
+//
+// finalizeApplication only ever leaves the StorageReady condition at
+// "cleanup in progress" (or a terminal failure) -- on the real deletion
+// path that's harmless since the whole Application is gone moments later,
+// but here the Application lives on, so a stuck, misleading condition
+// would be left behind permanently. Removing it entirely (rather than
+// setting some other reason) matches the condition an Application that
+// never had storage configured shows: none at all.
+func (r *ApplicationReconciler) cleanupPreviousStorage(
+	ctx context.Context,
+	application *forgev1alpha1.Application,
+	oldStorage *forgev1alpha1.StorageStatus,
+) error {
+	cleanupSnapshot := application.DeepCopy()
+	cleanupSnapshot.Spec.Storage = storageSpecFromStatus(oldStorage)
+	if err := r.finalizeApplication(ctx, cleanupSnapshot); err != nil {
+		return fmt.Errorf("failed to clean up previously provisioned storage: %w", err)
+	}
+
+	application.Status.Storage = nil
+	apimeta.RemoveStatusCondition(&application.Status.Conditions, storagestatus.StorageReady)
+	if err := retryStatusUpdate(ctx, r.Client, application); err != nil {
+		return fmt.Errorf("failed to clear storage status after cleanup: %w", err)
+	}
 	return nil
 }
 

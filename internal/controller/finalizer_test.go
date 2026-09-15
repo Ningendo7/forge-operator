@@ -385,11 +385,25 @@ func TestFinalizeApplication_RetainSkipsCloudCleanupForAWS(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
 		Provider:       forgev1alpha1.ProviderAWSS3,
 		Bucket:         testBucket,
+		SecretName:     testMissingCredsSecret,
 		DeletionPolicy: forgev1alpha1.DeletionPolicyRetain,
-		// A real AWS manager would fail to construct (no credentials Secret
-		// configured) -- if retention actually skips the provider switch as
-		// intended, that failure is never reached, so this deliberately
-		// invalid config alone proves the cloud path wasn't taken.
+		// A real AWS manager fails to construct on this missing Secret --
+		// deliberately deterministic, unlike an empty SecretName: that
+		// falls through to config.LoadDefaultConfig, which succeeds
+		// regardless of environment (no error until a real API call), so
+		// whether the *subsequent* cleanupAppIRSA call inside
+		// cleanupRetainedStorageCredentials succeeds or fails would depend
+		// on whatever ambient AWS credentials happen to be sitting around
+		// wherever this test runs -- confirmed the hard way: it silently
+		// passed against a real logged-in AWS CLI session locally, then
+		// failed in CI (no ambient credentials there) with an extra
+		// IRSACleanupFailed Event neither environment could agree on. A
+		// missing Secret fails at the fake client lookup instead, the same
+		// in any environment, so this test only proves what it says: no
+		// cloud call is ever reached because manager construction itself
+		// fails. See TestFinalizeApplication_RetainStillAttemptsCredentialCleanup
+		// below for proof that credential cleanup is actually attempted
+		// (and tolerates failure) when construction *does* succeed.
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	rec := &fakeEventRecorder{}
@@ -450,10 +464,51 @@ func TestFinalizeApplication_RetainSkipsCloudCleanupForAkamai(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
 
-	// An Akamai manager would also fail to construct here (no token Secret)
-	// -- same reasoning as the AWS case above.
+	// An Akamai manager also fails to construct here (no token Secret) --
+	// same reasoning as the AWS case above: proves that failure is
+	// tolerated silently, not that no cloud-related attempt was made at
+	// all.
 	if err := r.finalizeApplication(context.Background(), app); err != nil {
 		t.Fatalf("expected nil error when retaining storage, got %v", err)
+	}
+}
+
+func TestFinalizeApplication_RetainStillAttemptsCredentialCleanup(t *testing.T) {
+	// The actual behavior cleanupRetainedStorageCredentials adds: Retain
+	// protects the bucket, not the credential that happened to reach it.
+	// Confirmed here with a token Secret present (so manager construction
+	// succeeds, unlike the two tests above) -- finalization must still
+	// succeed even though the subsequent real network call (no live Akamai
+	// account reachable in this test) fails, proving credential cleanup is
+	// best-effort and never blocks the Application's own deletion.
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider:       forgev1alpha1.ProviderAkamaiObjectStorage,
+		Bucket:         testBucket,
+		DeletionPolicy: forgev1alpha1.DeletionPolicyRetain,
+	}
+	tokenSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: app.Name + "-akamai-token", Namespace: testNamespace},
+		Data:       map[string][]byte{"apiToken": []byte("token-value")},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app, tokenSecret).WithStatusSubresource(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.finalizeApplication(context.Background(), app); err != nil {
+		t.Fatalf("expected nil error even when the real credential-cleanup network call fails, got %v", err)
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+	cond := findAppCondition(got, "StorageReady")
+	if cond == nil || cond.Reason != storagestatus.ReasonBucketRetained {
+		t.Fatalf("expected StorageReady reason %q despite the credential cleanup failure, got %#v", storagestatus.ReasonBucketRetained, cond)
 	}
 }
 

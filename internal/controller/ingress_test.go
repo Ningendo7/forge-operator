@@ -50,6 +50,48 @@ func TestDesiredIngress_UsesConfiguredValues(t *testing.T) {
 	}
 }
 
+func TestDesiredIngress_PropagatesTLS(t *testing.T) {
+	// Guards against the TLS field being silently dropped: it's accepted
+	// by the CRD but was never read by desiredIngress, so the generated
+	// Ingress never carried a spec.tls block -- cert-manager's
+	// ingress-shim needs tls[].secretName to know where to write an
+	// issued certificate, so this meant TLS silently never provisioned
+	// no matter what a user configured, with no error anywhere.
+	app := newTestApplication()
+	app.Spec.Ingress = &forgev1alpha1.IngressSpec{
+		Host: testExampleHost,
+		TLS: []networkingv1.IngressTLS{{
+			Hosts:      []string{testExampleHost},
+			SecretName: "example-tls",
+		}},
+	}
+
+	r := &ApplicationReconciler{}
+	ing := r.desiredIngress(app)
+
+	if len(ing.Spec.TLS) != 1 {
+		t.Fatalf("expected 1 TLS entry, got %d", len(ing.Spec.TLS))
+	}
+	if ing.Spec.TLS[0].SecretName != "example-tls" {
+		t.Fatalf("expected TLS secretName %q, got %q", "example-tls", ing.Spec.TLS[0].SecretName)
+	}
+	if len(ing.Spec.TLS[0].Hosts) != 1 || ing.Spec.TLS[0].Hosts[0] != testExampleHost {
+		t.Fatalf("expected TLS hosts %v, got %v", []string{testExampleHost}, ing.Spec.TLS[0].Hosts)
+	}
+}
+
+func TestDesiredIngress_OmitsTLSWhenUnset(t *testing.T) {
+	app := newTestApplication()
+	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: testExampleHost}
+
+	r := &ApplicationReconciler{}
+	ing := r.desiredIngress(app)
+
+	if len(ing.Spec.TLS) != 0 {
+		t.Fatalf("expected no TLS entries when spec.ingress.tls is unset, got %v", ing.Spec.TLS)
+	}
+}
+
 func TestDesiredIngress_SetsLabels(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: testExampleHost}

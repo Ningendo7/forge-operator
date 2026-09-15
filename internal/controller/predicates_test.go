@@ -3,6 +3,7 @@ package controller
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
@@ -108,5 +109,79 @@ func TestApplicationChangePredicate_CreateAndDeleteAlwaysPass(t *testing.T) {
 	}
 	if !applicationChangePredicate.Delete(event.DeleteEvent{Object: obj}) {
 		t.Fatalf("expected Delete events to always pass")
+	}
+}
+
+// --- ownedContentChangedPredicate ---
+
+func TestOwnedContentChangedPredicate_ReactsToServiceSelectorChange(t *testing.T) {
+	// The actual bug: Service, like ConfigMap/Secret/ServiceAccount, never
+	// gets .metadata.generation bumped by Kubernetes -- it was wired to
+	// ownedGenerationChangedPredicate anyway, so a direct edit to
+	// spec.selector (breaking pod routing) was silently never corrected.
+	// Confirmed live before this fix.
+	oldObj := &corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{appLabelKey: "demo"}}}
+	newObj := &corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{appLabelKey: "wrong-selector"}}}
+
+	if !ownedContentChangedPredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
+		t.Fatalf("expected a Service selector change to pass the predicate")
+	}
+}
+
+func TestOwnedContentChangedPredicate_ReactsToServicePortsChange(t *testing.T) {
+	oldObj := &corev1.Service{Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: servicePortName, Port: 80}}}}
+	newObj := &corev1.Service{Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: servicePortName, Port: 8080}}}}
+
+	if !ownedContentChangedPredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
+		t.Fatalf("expected a Service ports change to pass the predicate")
+	}
+}
+
+func TestOwnedContentChangedPredicate_ReactsToServiceTypeChange(t *testing.T) {
+	oldObj := &corev1.Service{Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP}}
+	newObj := &corev1.Service{Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeNodePort}}
+
+	if !ownedContentChangedPredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
+		t.Fatalf("expected a Service type change to pass the predicate")
+	}
+}
+
+func TestOwnedContentChangedPredicate_IgnoresServiceMetadataOnlyChange(t *testing.T) {
+	spec := corev1.ServiceSpec{Selector: map[string]string{appLabelKey: "demo"}, Type: corev1.ServiceTypeClusterIP}
+	oldObj := &corev1.Service{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "1"}, Spec: spec}
+	newObj := &corev1.Service{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2"}, Spec: spec}
+
+	if ownedContentChangedPredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
+		t.Fatalf("expected a resourceVersion-only Service change (e.g. this operator's own repeated SSA apply) to be filtered out")
+	}
+}
+
+func TestOwnedContentChangedPredicate_ReactsToConfigMapDataChange(t *testing.T) {
+	oldObj := &corev1.ConfigMap{Data: map[string]string{"greeting": "howdy"}}
+	newObj := &corev1.ConfigMap{Data: map[string]string{"greeting": "goodbye"}}
+
+	if !ownedContentChangedPredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
+		t.Fatalf("expected a ConfigMap data change to pass the predicate")
+	}
+}
+
+func TestOwnedContentChangedPredicate_ReactsToSecretDataChange(t *testing.T) {
+	oldObj := &corev1.Secret{Data: map[string][]byte{"apikey": []byte("old")}}
+	newObj := &corev1.Secret{Data: map[string][]byte{"apikey": []byte("new")}}
+
+	if !ownedContentChangedPredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
+		t.Fatalf("expected a Secret data change to pass the predicate")
+	}
+}
+
+func TestOwnedContentChangedPredicate_ReactsToServiceAccountAnnotationChange(t *testing.T) {
+	// The IRSA role-arn annotation specifically -- see serviceaccount.go.
+	oldObj := &corev1.ServiceAccount{}
+	newObj := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{
+		Annotations: map[string]string{"eks.amazonaws.com/role-arn": "arn:aws:iam::123456789012:role/demo"},
+	}}
+
+	if !ownedContentChangedPredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
+		t.Fatalf("expected a ServiceAccount annotation change to pass the predicate")
 	}
 }

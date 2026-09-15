@@ -146,15 +146,15 @@ Kubernetes has no native way to observe a cloud resource changing outside its co
 
 ## Deletion policy
 
-`spec.storage.deletionPolicy` controls what happens to the bucket when the `Application` is deleted — `Delete` (default) or `Retain`, mirroring the same concept as a Kubernetes PersistentVolume's `reclaimPolicy`:
+`spec.storage.deletionPolicy` controls what happens to the bucket when the `Application` is deleted — `Retain` (default) or `Delete`, mirroring the same concept as a Kubernetes PersistentVolume's `reclaimPolicy`. It defaults to `Retain` because object storage most often holds real data: losing a bucket because an `Application` was deleted, intentionally or by mistake, is a worse failure mode than a retained bucket costing a few cents until someone notices. Set it explicitly to `Delete` for ephemeral/throwaway `Application`s (dev sandboxes, PR preview environments) where automatic cleanup is actually wanted — at fleet scale, forgetting to do so under this default means a retained bucket per deleted `Application`, not a one-off:
 
 ```yaml
 spec:
   storage:
-    deletionPolicy: Retain
+    deletionPolicy: Delete
 ```
 
-`Retain` skips cloud deletion entirely: the bucket and its ownership tag/marker are left exactly as-is. The Kubernetes `Application` object and its finalizer are still removed normally — only the cloud resource is kept. This is surfaced as a `Normal` `StorageRetained` Event (`kubectl get events`) and a `StorageReady` condition with reason `BucketRetained`, so it's visible and auditable rather than silent. See [Ownership verification](#ownership-verification) above for how to later reclaim a retained bucket with a new `Application`.
+`Retain` skips *bucket* deletion: the bucket and its ownership tag/marker are left exactly as-is. Its IAM role/access key still gets a best-effort cleanup attempt, though — Retain protects the data, not a no-longer-tracked credential that happened to reach it, and a later `Application` adopting the retained bucket mints its own fresh credential regardless (nothing can recover the old one's secret, which this operator only ever exposed once). That credential cleanup never blocks the `Application`'s own deletion if it fails; a failure is surfaced the same way a `Delete`-path credential cleanup failure is (`IRSACleanupFailed`/`AccessKeyCleanupFailed` Warning Events). The Kubernetes `Application` object and its finalizer are still removed normally either way. Retaining the bucket itself is surfaced as a `Normal` `StorageRetained` Event (`kubectl get events`) and a `StorageReady` condition with reason `BucketRetained`, so it's visible and auditable rather than silent. See [Ownership verification](#ownership-verification) above for how to later reclaim a retained bucket with a new `Application`.
 
 ## Deletion
 

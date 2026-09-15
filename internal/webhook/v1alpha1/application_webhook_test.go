@@ -239,6 +239,33 @@ var _ = Describe("Application Webhook", func() {
 			Expect(err.Error()).To(ContainSubstring("immutable"))
 		})
 
+		It("skips validation entirely once deletion has started, even with a missing referenced Secret", func() {
+			// Guards against a real deadlock found via chaos testing: ordinary
+			// namespace teardown can delete the Akamai token Secret before a
+			// stuck-finalizer Application inside it, and every subsequent
+			// attempt to remove that Application's own finalizer -- the only
+			// way to unstick it -- was rejected by this same validation
+			// re-running against the now-gone Secret. A namespace already
+			// Terminating also refuses to let the missing Secret be
+			// recreated, so there was no way out short of removing the whole
+			// ValidatingWebhookConfiguration.
+			now := metav1.Now()
+			oldObj.Name = "deleting-app"
+			oldObj.Namespace = namespace
+			oldObj.DeletionTimestamp = &now
+			oldObj.Finalizers = []string{"forge.ningendo7.github.io/finalizer"}
+			oldObj.Spec.Storage = &forgev1alpha1.StorageSpec{
+				Provider: forgev1alpha1.ProviderAkamaiObjectStorage,
+				Bucket:   testBucket,
+				Akamai:   &forgev1alpha1.AkamaiStorageSpec{AccessKeySecretRef: "does-not-exist-secret"},
+			}
+			newObj := oldObj.DeepCopy()
+			newObj.Finalizers = nil
+
+			_, err := validator.ValidateUpdate(ctx, oldObj, newObj)
+			Expect(err).NotTo(HaveOccurred())
+		})
+
 		It("rejects removing spec.config while spec.container.configMapName still references it", func() {
 			oldObj.Name = orphanConfigAppName
 			oldObj.Spec.ConfigMap = &forgev1alpha1.ConfigSpec{Name: orphanConfigMapName}

@@ -631,6 +631,52 @@ func TestCleanupBucket_StillCleansUpOwnIRSARoleWhenBucketNotOwned(t *testing.T) 
 	}
 }
 
+// --- CleanupCredentialsOnly ---
+
+func TestCleanupCredentialsOnly_DeletesIRSARoleWithoutTouchingBucket(t *testing.T) {
+	s3Called := false
+	roleDeleted := false
+	m := newTestManager(&mockS3Client{
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			s3Called = true
+			return matchingBucketTag(ctx, params, optFns...)
+		},
+	}, &mockIAMClient{
+		deleteRolePolicyFunc: func(ctx context.Context, params *iam.DeleteRolePolicyInput, optFns ...func(*iam.Options)) (*iam.DeleteRolePolicyOutput, error) {
+			return &iam.DeleteRolePolicyOutput{}, nil
+		},
+		deleteRoleFunc: func(ctx context.Context, params *iam.DeleteRoleInput, optFns ...func(*iam.Options)) (*iam.DeleteRoleOutput, error) {
+			roleDeleted = true
+			return &iam.DeleteRoleOutput{}, nil
+		},
+	})
+
+	if err := m.CleanupCredentialsOnly(context.Background()); err != nil {
+		t.Fatalf("CleanupCredentialsOnly returned error: %v", err)
+	}
+	if !roleDeleted {
+		t.Fatalf("expected the IRSA role to be deleted")
+	}
+	if s3Called {
+		t.Fatalf("expected no S3 calls at all -- CleanupCredentialsOnly must never touch the bucket (used for deletionPolicy: Retain)")
+	}
+}
+
+func TestCleanupCredentialsOnly_PropagatesError(t *testing.T) {
+	m := newTestManager(nil, &mockIAMClient{
+		deleteRolePolicyFunc: func(ctx context.Context, params *iam.DeleteRolePolicyInput, optFns ...func(*iam.Options)) (*iam.DeleteRolePolicyOutput, error) {
+			return &iam.DeleteRolePolicyOutput{}, nil
+		},
+		deleteRoleFunc: func(ctx context.Context, params *iam.DeleteRoleInput, optFns ...func(*iam.Options)) (*iam.DeleteRoleOutput, error) {
+			return nil, errors.New("delete role failed")
+		},
+	})
+
+	if err := m.CleanupCredentialsOnly(context.Background()); err == nil {
+		t.Fatalf("expected error from CleanupCredentialsOnly, got nil")
+	}
+}
+
 // --- isNotFoundError ---
 
 func TestIsNotFoundError(t *testing.T) {
