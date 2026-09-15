@@ -385,15 +385,25 @@ func TestFinalizeApplication_RetainSkipsCloudCleanupForAWS(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
 		Provider:       forgev1alpha1.ProviderAWSS3,
 		Bucket:         testBucket,
+		SecretName:     testMissingCredsSecret,
 		DeletionPolicy: forgev1alpha1.DeletionPolicyRetain,
-		// No credentials Secret configured: cleanupRetainedStorageCredentials
-		// still attempts to build a real AWS manager for best-effort IRSA
-		// cleanup even under Retain (see
-		// TestFinalizeApplication_RetainStillAttemptsCredentialCleanup below),
-		// and that attempt fails here -- proving retention tolerates that
-		// failure silently (never blocks finalization) is the point of this
-		// deliberately invalid config, not that the cloud path was skipped
-		// entirely.
+		// A real AWS manager fails to construct on this missing Secret --
+		// deliberately deterministic, unlike an empty SecretName: that
+		// falls through to config.LoadDefaultConfig, which succeeds
+		// regardless of environment (no error until a real API call), so
+		// whether the *subsequent* cleanupAppIRSA call inside
+		// cleanupRetainedStorageCredentials succeeds or fails would depend
+		// on whatever ambient AWS credentials happen to be sitting around
+		// wherever this test runs -- confirmed the hard way: it silently
+		// passed against a real logged-in AWS CLI session locally, then
+		// failed in CI (no ambient credentials there) with an extra
+		// IRSACleanupFailed Event neither environment could agree on. A
+		// missing Secret fails at the fake client lookup instead, the same
+		// in any environment, so this test only proves what it says: no
+		// cloud call is ever reached because manager construction itself
+		// fails. See TestFinalizeApplication_RetainStillAttemptsCredentialCleanup
+		// below for proof that credential cleanup is actually attempted
+		// (and tolerates failure) when construction *does* succeed.
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	rec := &fakeEventRecorder{}

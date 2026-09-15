@@ -120,8 +120,8 @@ func TestOwnedContentChangedPredicate_ReactsToServiceSelectorChange(t *testing.T
 	// ownedGenerationChangedPredicate anyway, so a direct edit to
 	// spec.selector (breaking pod routing) was silently never corrected.
 	// Confirmed live before this fix.
-	oldObj := &corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "demo"}}}
-	newObj := &corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{"app": "wrong-selector"}}}
+	oldObj := &corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{appLabelKey: "demo"}}}
+	newObj := &corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{appLabelKey: "wrong-selector"}}}
 
 	if !ownedContentChangedPredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
 		t.Fatalf("expected a Service selector change to pass the predicate")
@@ -129,8 +129,8 @@ func TestOwnedContentChangedPredicate_ReactsToServiceSelectorChange(t *testing.T
 }
 
 func TestOwnedContentChangedPredicate_ReactsToServicePortsChange(t *testing.T) {
-	oldObj := &corev1.Service{Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "http", Port: 80}}}}
-	newObj := &corev1.Service{Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: "http", Port: 8080}}}}
+	oldObj := &corev1.Service{Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: servicePortName, Port: 80}}}}
+	newObj := &corev1.Service{Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Name: servicePortName, Port: 8080}}}}
 
 	if !ownedContentChangedPredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
 		t.Fatalf("expected a Service ports change to pass the predicate")
@@ -147,7 +147,7 @@ func TestOwnedContentChangedPredicate_ReactsToServiceTypeChange(t *testing.T) {
 }
 
 func TestOwnedContentChangedPredicate_IgnoresServiceMetadataOnlyChange(t *testing.T) {
-	spec := corev1.ServiceSpec{Selector: map[string]string{"app": "demo"}, Type: corev1.ServiceTypeClusterIP}
+	spec := corev1.ServiceSpec{Selector: map[string]string{appLabelKey: "demo"}, Type: corev1.ServiceTypeClusterIP}
 	oldObj := &corev1.Service{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "1"}, Spec: spec}
 	newObj := &corev1.Service{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "2"}, Spec: spec}
 
@@ -157,7 +157,7 @@ func TestOwnedContentChangedPredicate_IgnoresServiceMetadataOnlyChange(t *testin
 }
 
 func TestOwnedContentChangedPredicate_ReactsToConfigMapDataChange(t *testing.T) {
-	oldObj := &corev1.ConfigMap{Data: map[string]string{"greeting": "hello"}}
+	oldObj := &corev1.ConfigMap{Data: map[string]string{"greeting": "howdy"}}
 	newObj := &corev1.ConfigMap{Data: map[string]string{"greeting": "goodbye"}}
 
 	if !ownedContentChangedPredicate.Update(event.UpdateEvent{ObjectOld: oldObj, ObjectNew: newObj}) {
