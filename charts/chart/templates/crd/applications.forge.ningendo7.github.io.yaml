@@ -1284,21 +1284,6 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
-              secret:
-                description: Secret configuration.
-                properties:
-                  name:
-                    description: Name of the Secret to reconcile.
-                    type: string
-                  stringData:
-                    additionalProperties:
-                      type: string
-                    description: String data stored in the Secret.
-                    type: object
-                  type:
-                    description: Secret type.
-                    type: string
-                type: object
               service:
                 description: Kubernetes Service configuration.
                 properties:

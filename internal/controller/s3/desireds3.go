@@ -14,11 +14,7 @@ import (
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithy "github.com/aws/smithy-go"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
@@ -27,6 +23,8 @@ import (
 )
 
 const ownerTagKey = "forge-operator.ningendo7.github.io/owner-uid"
+const ownerNamespaceTagKey = "forge-operator.ningendo7.github.io/owner-namespace"
+const ownershipIDTagKey = "forge-operator.ningendo7.github.io/ownership-id"
 
 // noSuchTagSetErrorCode is the S3 API error code for a bucket with no tags
 // at all -- the one GetBucketTagging failure claimOrVerifyOwnership treats
@@ -41,14 +39,12 @@ const noSuchTagSetErrorCode = "NoSuchTagSet"
 const noSuchBucketErrorCode = "NoSuchBucket"
 
 // bucketCreationClaimWindow bounds how long Created (recorded by
-// recordBucketCreated) is trusted as ownership provenance for a bucket
-// found with no ownership tag. It exists to survive a transient failure in
-// the tag-write step right after creation -- a retry within minutes, not an
-// unconditional, permanent claim on this bucket name. S3 bucket names are
-// released back to AWS's global namespace on deletion, so without this
-// bound, a bucket we created, deleted, and later had its name reused by a
-// completely unrelated bucket -- same AWS account or a different one --
-// would be silently reclaimed the next time this untagged-bucket path runs.
+// recordBucketCreated) is trusted as ownership provenance for a bucket found
+// with no ownership tag -- long enough to survive a transient failure in the
+// tag-write step right after creation, but not an unconditional, permanent
+// claim on the name (S3 bucket names are released to AWS's global namespace
+// on deletion, so an unbounded claim would let a deleted-and-reused name be
+// silently reclaimed).
 const bucketCreationClaimWindow = time.Hour
 
 // awsIAMRoleNameMaxLen is AWS's own hard limit on IAM role name length.
@@ -104,50 +100,18 @@ func (m *Manager) ReconcileBucket(
 // CreateBucket succeeds, before ownership tagging is even attempted, so a
 // transient failure in that later step doesn't erase the record.
 func (m *Manager) recordBucketCreated(ctx context.Context) error {
-	m.app.Status.Storage = &forgev1alpha1.StorageStatus{
-		Provider:  forgev1alpha1.ProviderAWSS3,
-		Bucket:    m.bucket,
-		Created:   true,
-		CreatedAt: metav1.Now(),
+	if m.recordCreated == nil {
+		return fmt.Errorf("recordCreated callback not configured")
 	}
-	if err := retryStatusUpdate(ctx, m.k8sClient, m.app); err != nil {
+	if err := m.recordCreated(ctx); err != nil {
 		return fmt.Errorf("failed to record bucket creation for %s: %w", m.bucket, err)
 	}
 	return nil
 }
 
-// retryStatusUpdate persists app.Status via Status().Update(), retrying with
-// a freshly-fetched copy on a resourceVersion conflict rather than
-// surfacing it as a hard error. See the identical helper (and its full doc
-// comment) in internal/controller/storage.go -- this is the same fix,
-// duplicated here since this package has no dependency on that one and pulls
-// its own client.Client in via NewManager rather than sharing the
-// controller's.
-func retryStatusUpdate(ctx context.Context, c client.Client, app *forgev1alpha1.Application) error {
-	desiredStatus := app.Status
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		app.Status = desiredStatus
-		updateErr := c.Status().Update(ctx, app)
-		if updateErr == nil {
-			return nil
-		}
-		if !apierrors.IsConflict(updateErr) {
-			return updateErr
-		}
-		if getErr := c.Get(ctx, client.ObjectKeyFromObject(app), app); getErr != nil {
-			return getErr
-		}
-		return updateErr
-	})
-}
-
 // previouslyCreatedByUs reports whether Application.Status durably records
-// this operator having created this exact bucket in an earlier reconcile,
-// recently enough that CreatedAt still falls within
-// bucketCreationClaimWindow. Bounded so this can only ever recover from a
-// transient failure in the tag-write step shortly after creation, never
-// stand in as a permanent claim on the name -- which a bucket that was
-// deleted and later recreated by something else entirely would otherwise silently inherit.
+// this operator creating this exact bucket, within bucketCreationClaimWindow
+// (see its own doc comment for why bounded).
 func (m *Manager) previouslyCreatedByUs() bool {
 	status := m.app.Status.Storage
 	return status != nil &&
@@ -210,20 +174,19 @@ func (m *Manager) ensureBucketExists(
 	return err
 }
 
-// tagAsOwned sets the ownership tag on the bucket. otherTags is every tag
-// the bucket already carries, excluding any prior ownership tag -- callers
-// are responsible for that exclusion (see tagsExcludingOwner), since
-// PutBucketTagging replaces a bucket's *entire* tag set rather than merging
-// into it. Without preserving otherTags here, claiming or re-claiming a
-// bucket would silently wipe out anything else already on it -- Terraform's
-// own default_tags, cost-allocation tags, compliance tags, whatever a human
-// or another tool put there -- every time ownership is (re-)established,
-// not just once.
+// tagAsOwned sets the ownership tags on the bucket. otherTags is every tag
+// the bucket already carries, excluding any prior ownership tags (see
+// tagsExcludingOwner) -- callers must exclude them since PutBucketTagging
+// replaces a bucket's entire tag set rather than merging, so omitting
+// otherTags would silently wipe out any other tags already on the bucket.
 func (m *Manager) tagAsOwned(ctx context.Context, otherTags []s3types.Tag) error {
-	tagSet := append(otherTags, s3types.Tag{
-		Key:   aws.String(ownerTagKey),
-		Value: aws.String(string(m.app.UID)),
-	})
+	tagSet := append(otherTags,
+		s3types.Tag{Key: aws.String(ownerTagKey), Value: aws.String(string(m.app.UID))},
+		s3types.Tag{Key: aws.String(ownerNamespaceTagKey), Value: aws.String(m.app.Namespace)},
+	)
+	if ownershipID := m.app.Annotations[naming.StorageOwnershipIDAnnotation]; ownershipID != "" {
+		tagSet = append(tagSet, s3types.Tag{Key: aws.String(ownershipIDTagKey), Value: aws.String(ownershipID)})
+	}
 
 	_, err := m.s3client.PutBucketTagging(ctx, &s3sdk.PutBucketTaggingInput{
 		Bucket: aws.String(m.bucket),
@@ -239,26 +202,31 @@ func (m *Manager) tagAsOwned(ctx context.Context, otherTags []s3types.Tag) error
 	return nil
 }
 
-// tagsExcludingOwner returns tagSet with any existing ownership tag
-// filtered out, so a caller about to write a new (or unchanged) ownership
-// tag via tagAsOwned doesn't end up with two entries for the same key.
+// tagsExcludingOwner returns tagSet with any existing ownership tags
+// filtered out, so a caller about to write new (or unchanged) ownership
+// tags via tagAsOwned doesn't end up with duplicate entries for any of them.
 func tagsExcludingOwner(tagSet []s3types.Tag) []s3types.Tag {
 	otherTags := make([]s3types.Tag, 0, len(tagSet))
 	for _, tag := range tagSet {
-		if aws.ToString(tag.Key) != ownerTagKey {
+		key := aws.ToString(tag.Key)
+		if key != ownerTagKey && key != ownerNamespaceTagKey && key != ownershipIDTagKey {
 			otherTags = append(otherTags, tag)
 		}
 	}
 	return otherTags
 }
 
-// claimOrVerifyOwnership handles a bucket HeadBucket found to already exist
-// (whether it was already there, or we just created it a moment ago in this
-// same call): no ownership tag at all -> claim it only if we durably
-// recorded creating this bucket ourselves, or the adopt annotation is set;
-// a tag present but naming a different Application -> claim only if the
-// adopt annotation is set, otherwise ErrBucketNotOwned; a tag matching this
-// Application -> already ours, proceed.
+// claimOrVerifyOwnership handles a bucket HeadBucket found to already exist:
+// no ownership tag at all -> claim it only if we durably recorded creating
+// this bucket ourselves, or the adopt annotation is set; a tag present but
+// naming a different UID -> reclaimed automatically if the bucket's stable
+// ownership ID matches this Application's own (see
+// naming.StorageOwnershipIDAnnotation's doc comment -- this is what makes a
+// Velero restore or cluster migration self-heal without a human setting the
+// adopt annotation), otherwise naming.EvaluateBucketAdoption decides
+// (existence + namespace scoping, see its own doc comment); a tag matching
+// this Application -> already ours, backfilling the namespace/ownership-ID
+// tags if either predates this Application's own current record of them.
 func (m *Manager) claimOrVerifyOwnership(ctx context.Context) error {
 	out, err := m.s3client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{
 		Bucket: aws.String(m.bucket),
@@ -280,33 +248,58 @@ func (m *Manager) claimOrVerifyOwnership(ctx context.Context) error {
 		return fmt.Errorf("%w: could not verify ownership tag: %v", ErrBucketNotOwned, err)
 	}
 
+	var ownerUID, ownerNamespace, ownerOwnershipID string
+	var hasOwnerTag bool
 	for _, tag := range out.TagSet {
-		if aws.ToString(tag.Key) == ownerTagKey {
-			if aws.ToString(tag.Value) == string(m.app.UID) {
-				log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s already exists and is owned by this Application", m.bucket))
-				return nil
-			}
-			if m.adoptBucketRequested() {
-				// adopt-bucket is meant for reclaiming a bucket left behind
-				// by an Application that's genuinely gone (typically one
-				// retained via deletionPolicy: Retain) -- not for taking a
-				// bucket away from an Application that's still alive and
-				// using it right now. The tag only ever stores a bare UID,
-				// so this is the only way to tell those two cases apart.
-				exists, existsErr := naming.ApplicationExistsWithUID(ctx, m.k8sClient, types.UID(aws.ToString(tag.Value)))
-				if existsErr != nil {
-					return fmt.Errorf("%w: could not confirm the previous owner no longer exists: %v", ErrBucketNotOwned, existsErr)
-				}
-				if exists {
-					return fmt.Errorf("%w: adopt-bucket requested, but the Application that currently owns this bucket still exists", ErrBucketNotOwned)
-				}
+		switch aws.ToString(tag.Key) {
+		case ownerTagKey:
+			ownerUID = aws.ToString(tag.Value)
+			hasOwnerTag = true
+		case ownerNamespaceTagKey:
+			ownerNamespace = aws.ToString(tag.Value)
+		case ownershipIDTagKey:
+			ownerOwnershipID = aws.ToString(tag.Value)
+		}
+	}
 
-				forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3)).Inc()
-				log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s owned by a different Application, adopting per %s annotation", m.bucket, naming.AdoptBucketAnnotation))
+	myOwnershipID := m.app.Annotations[naming.StorageOwnershipIDAnnotation]
+
+	if hasOwnerTag {
+		if ownerUID == string(m.app.UID) {
+			log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s already exists and is owned by this Application", m.bucket))
+			if ownerNamespace != m.app.Namespace || ownerOwnershipID != myOwnershipID {
+				// Backfill the namespace/ownership-ID tags for a bucket
+				// tagged before either shipped -- safe, since the UID
+				// already confirms this Application owns it.
 				return m.tagAsOwned(ctx, tagsExcludingOwner(out.TagSet))
 			}
+			return nil
+		}
+
+		// A different UID recorded the tag, but this Application's own
+		// stable ownership ID matches it -- this isn't a different
+		// Application at all, just this same one recreated with a new UID
+		// (a Velero restore or cluster migration; see
+		// naming.StorageOwnershipIDAnnotation's doc comment). Reclaim
+		// automatically: no human adopt-bucket action needed, and no
+		// cross-Application ambiguity, since a genuinely different
+		// Application was never handed this ID.
+		if myOwnershipID != "" && ownerOwnershipID == myOwnershipID {
+			forgemetrics.StorageOwnershipReclaimedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3)).Inc()
+			log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s reclaimed after UID change (stable ownership ID matched)", m.bucket))
+			return m.tagAsOwned(ctx, tagsExcludingOwner(out.TagSet))
+		}
+
+		if !m.adoptBucketRequested() {
 			return ErrBucketNotOwned
 		}
+		if err := naming.EvaluateBucketAdoption(ctx, m.k8sClient, types.UID(ownerUID), ownerNamespace, m.app.Namespace); err != nil {
+			return fmt.Errorf("%w: %v", ErrBucketNotOwned, err)
+		}
+
+		forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3)).Inc()
+		log.FromContext(ctx).Info(fmt.Sprintf("Bucket %s owned by a different Application, adopting per %s annotation", m.bucket, naming.AdoptBucketAnnotation))
+		return m.tagAsOwned(ctx, tagsExcludingOwner(out.TagSet))
 	}
 
 	// Tag set exists (so no NoSuchTagSet error) but carries no ownership tag
@@ -509,9 +502,8 @@ func (m *Manager) ReconcileAppIRSA(
 
 	roleName := m.irsaRoleName()
 
-	// Clean up oidcUrl so it works safely in IAM Condition keys
 	oidcHost := strings.TrimPrefix(m.OIDCProviderURL, "https://")
-	oidcHost = strings.TrimSuffix(oidcHost, "/") // Remove trailing slash if present
+	oidcHost = strings.TrimSuffix(oidcHost, "/")
 
 	trustPolicy := fmt.Sprintf(`{
 	"Version": "2012-10-17",
@@ -531,7 +523,6 @@ func (m *Manager) ReconcileAppIRSA(
 		}]
 	}`, m.OIDCProviderARN, oidcHost, m.app.Namespace, m.serviceAccountName, oidcHost)
 
-	// Ensure the IAM role exists
 	var roleArn string
 	getRoleOut, err := m.iamclient.GetRole(ctx, &iam.GetRoleInput{
 		RoleName: aws.String(roleName),
@@ -539,10 +530,10 @@ func (m *Manager) ReconcileAppIRSA(
 	if err != nil {
 		var notFoundErr *iamtypes.NoSuchEntityException
 		if errors.As(err, &notFoundErr) {
-			// Assume the role does not exist and create it
 			createRoleOut, err := m.iamclient.CreateRole(ctx, &iam.CreateRoleInput{
 				RoleName:                 aws.String(roleName),
 				AssumeRolePolicyDocument: aws.String(trustPolicy),
+				PermissionsBoundary:      aws.String(m.PermissionsBoundaryARN),
 			})
 			if err != nil {
 				return "", fmt.Errorf("failed to create app IRSA role %s: %w", roleName, err)
@@ -553,7 +544,6 @@ func (m *Manager) ReconcileAppIRSA(
 		}
 	} else {
 		roleArn = aws.ToString(getRoleOut.Role.Arn)
-		// Update the existing trust policy if it has changed
 		_, err = m.iamclient.UpdateAssumeRolePolicy(ctx, &iam.UpdateAssumeRolePolicyInput{
 			RoleName:       aws.String(roleName),
 			PolicyDocument: aws.String(trustPolicy),
@@ -564,7 +554,6 @@ func (m *Manager) ReconcileAppIRSA(
 
 	}
 
-	// Attach Bucket Access Policy to the Role
 	s3Policy := fmt.Sprintf(`{
 	"Version": "2012-10-17",
 	"Statement": [

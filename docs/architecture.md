@@ -13,7 +13,7 @@ Each reconcile pass drives these child resources toward the CR's desired state, 
 
 - ServiceAccount
 - ConfigMap
-- Secret (application secret + storage credentials secret)
+- Secret (storage credentials secret)
 - Object storage (AWS S3 / Akamai Object Storage / no-op)
 - Service
 - Deployment
@@ -79,12 +79,12 @@ The `Application` CRD has an admission webhook (`internal/webhook/v1alpha1/appli
 
 **Defaulting** is scoped to Akamai only — when `spec.storage.provider: Akamai`, resolves and writes the effective `spec.storage.secretName` and `spec.storage.akamai.accessKeySecretRef` onto the object at admission time, so `kubectl get -o yaml` always shows the real Secret names instead of requiring you to know the operator's internal fallback logic. AWS's `spec.storage.secretName` is deliberately left alone here: it's dual-purpose (see [Authentication Flows](authentication-and-storage.md#authentication-flows) below), and defaulting it the same way would silently force every pure-IRSA AWS Application onto the static-credentials path.
 
-**Validation** covers both providers, rejecting at `kubectl apply` time rather than only surfacing later as a `Degraded` status:
+**Validation** covers both providers. Most checks reject at `kubectl apply` time rather than only surfacing later as a `Degraded` status:
 - an Akamai config where `secretName` (the operator's generated output Secret) collides with `accessKeySecretRef` (your input token Secret) — the operator owns and deletes the former, so this would corrupt or destroy your token Secret;
-- an Akamai config whose `accessKeySecretRef` Secret doesn't exist, or exists but is missing the `apiToken` key;
-- an AWS config whose `secretName` Secret (when set — it's optional, IRSA needs none) doesn't exist, or is missing `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`;
 - changing `spec.storage.provider`, `spec.storage.bucket`, or `spec.storage.region` on an existing `Application` — all three are treated as immutable once set, since each one names the identity of a real, already-provisioned cloud resource, not just descriptive state; nothing cleans up the old identity's bucket/credentials on a spec change alone, so changing any of them in place would silently orphan whatever was provisioned under the old identity while starting to treat an entirely different (and likely nonexistent) bucket as this `Application`'s storage. Delete and recreate the `Application` instead, which correctly triggers finalizer cleanup for the old identity first;
-- removing `spec.config` (or `spec.secret`) while `spec.container.configMapName` (or `secretName`) still names the exact operator-managed ConfigMap/Secret that removal would delete — without this, reconcile would delete that ConfigMap/Secret out from under a Deployment whose pod template still mounts it by name, silently, until the next pod restart hits a permanent `FailedMount`. Repointing or clearing `spec.container.configMapName`/`secretName` in the same update is still allowed, as is removing `spec.config`/`spec.secret` when the container never referenced the operator's own name in the first place.
+- removing `spec.config` while `spec.container.configMapName` still names the exact operator-managed ConfigMap that removal would delete — without this, reconcile would delete that ConfigMap out from under a Deployment whose pod template still mounts it by name, silently, until the next pod restart hits a permanent `FailedMount`. Repointing or clearing `spec.container.configMapName` in the same update is still allowed, as is removing `spec.config` when the container never referenced the operator's own name in the first place.
+
+Two checks are deliberately **warnings, not rejections**: an Akamai `accessKeySecretRef` Secret (or AWS `secretName` Secret, when set) that doesn't exist yet, or exists but is missing its required keys. Rejecting here would break GitOps tools that apply an `Application` before its Secret exists, and previously caused a real deadlock (a Secret deleted before the `Application` referencing it, permanently blocking the finalizer-removal update needed to un-stick the deletion). Reconciliation already surfaces a missing/malformed Secret as its own `Degraded` condition (`Reason: SecretNotFound` when the Secret specifically doesn't exist), so nothing is lost by not rejecting.
 
 These live cluster/live-object lookups are exactly what CEL/kubebuilder validation markers structurally can't do (CEL only ever sees the object being validated). One check that *doesn't* need that, and so is a CRD-level CEL rule instead of webhook code (meaning it's still enforced even with `webhook.enabled=false`): `spec.storage.akamai`/`spec.storage.aws` must not be set when the other provider is selected.
 

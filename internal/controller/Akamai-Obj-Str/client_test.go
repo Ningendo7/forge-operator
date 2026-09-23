@@ -2,6 +2,7 @@ package akamaiobjstr
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -28,7 +29,7 @@ func TestNewManager_ReturnsErrorWhenStorageSpecIsNil(t *testing.T) {
 	app := newTestApp()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app, testRegion, testLimiter(), testLimiter())
+	_, err := NewManager(context.Background(), fakeClient, app, testRegion, nil, testLimiter(), testLimiter())
 	if err == nil {
 		t.Fatalf("expected error when storage spec is nil, got nil")
 	}
@@ -43,9 +44,12 @@ func TestNewManager_ReturnsErrorWhenSecretMissing(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app, testRegion, testLimiter(), testLimiter())
+	_, err := NewManager(context.Background(), fakeClient, app, testRegion, nil, testLimiter(), testLimiter())
 	if err == nil {
 		t.Fatalf("expected error when credentials secret is missing, got nil")
+	}
+	if !errors.Is(err, ErrTokenSecretNotFound) {
+		t.Fatalf("expected ErrTokenSecretNotFound, got %v", err)
 	}
 }
 
@@ -62,7 +66,7 @@ func TestNewManager_ReturnsErrorWhenAPITokenMissing(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app, testRegion, testLimiter(), testLimiter())
+	_, err := NewManager(context.Background(), fakeClient, app, testRegion, nil, testLimiter(), testLimiter())
 	if err == nil {
 		t.Fatalf("expected error when apiToken key is missing from secret, got nil")
 	}
@@ -81,7 +85,7 @@ func TestNewManager_UsesDefaultSecretNameAndRegion(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app, testRegion, testLimiter(), testLimiter())
+	manager, err := NewManager(context.Background(), fakeClient, app, testRegion, nil, testLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -109,7 +113,7 @@ func TestNewManager_EmptyRegionWhenNeitherSpecNorDefaultIsSet(t *testing.T) {
 	// No spec.storage.region and no caller-supplied default: region must end
 	// up empty rather than silently falling back to some hardcoded guess
 	// that may not match wherever this operator is actually deployed.
-	manager, err := NewManager(context.Background(), fakeClient, app, "", testLimiter(), testLimiter())
+	manager, err := NewManager(context.Background(), fakeClient, app, "", nil, testLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -137,7 +141,7 @@ func TestNewManager_UsesConfiguredSecretNameAndRegion(t *testing.T) {
 
 	// A different value than the spec's "eu-central", to prove
 	// spec.storage.region takes precedence over the caller-supplied default.
-	manager, err := NewManager(context.Background(), fakeClient, app, "operator-default-region", testLimiter(), testLimiter())
+	manager, err := NewManager(context.Background(), fakeClient, app, "operator-default-region", nil, testLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -166,7 +170,7 @@ func TestNewManager_UsesDistinctDefaultFromOutputStorageSecret(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(outputSecret).Build()
 
-	if _, err := NewManager(context.Background(), fakeClient, app, testRegion, testLimiter(), testLimiter()); err == nil {
+	if _, err := NewManager(context.Background(), fakeClient, app, testRegion, nil, testLimiter(), testLimiter()); err == nil {
 		t.Fatalf("expected error: NewManager should not have found an apiToken in the output storage Secret")
 	}
 }
@@ -199,7 +203,7 @@ func TestNewManager_AccountLimiterAppliesToAccountClientNotObjectClient(t *testi
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app, testRegion, blockedLimiter(), testLimiter())
+	manager, err := NewManager(context.Background(), fakeClient, app, testRegion, nil, blockedLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}

@@ -75,20 +75,15 @@ func (r *ApplicationReconciler) desiredServiceAccount(
 	}
 
 	// Carry forward the IRSA role-arn annotation from a prior reconcile's
-	// Status, if already known -- annotateServiceAccountWithIRSA (called
-	// later, from storage reconciliation) is the source of truth and always
-	// re-applies the current value regardless, but both calls Server-Side
-	// Apply under the same field manager ("forge-operator"), and SSA
-	// replaces that manager's *entire* claimed field set on every call. If
-	// this apply omitted the annotation, it would strip out whatever
-	// annotateServiceAccountWithIRSA set moments earlier in the *previous*
-	// reconcile -- and since that call always runs after this one, every
-	// single reconcile would strip the annotation here and re-add it later,
-	// a real (not just bookkeeping-only) content change each time that
-	// self-perpetuates an unbounded reconcile loop once anything is watching
-	// this object (confirmed live: exactly this ping-pong, sustained,
-	// zero errors, ~1-2 reconciles/sec indefinitely). Only ever an
-	// AWS-specific concern -- Akamai has no IRSA equivalent.
+	// Status, if already known. Both this call and
+	// annotateServiceAccountWithIRSA (called later, from storage
+	// reconciliation) apply via SSA under the same field manager
+	// ("forge-operator"), and SSA replaces that manager's entire claimed
+	// field set each call -- omitting the annotation here would strip it,
+	// only for the later call to re-add it, a real content change every
+	// reconcile that self-perpetuates an unbounded reconcile loop once
+	// anything watches this object. AWS-specific -- Akamai has no IRSA
+	// equivalent.
 	if application.Status.Storage != nil &&
 		application.Status.Storage.Provider == forgev1alpha1.ProviderAWSS3 &&
 		application.Status.Storage.AWS != nil &&

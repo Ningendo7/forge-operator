@@ -43,16 +43,10 @@ func TestApplicationChangePredicate_ReactsToDeletionTransition(t *testing.T) {
 }
 
 func TestApplicationChangePredicate_IgnoresRepeatedUpdatesWhileAlreadyDeleting(t *testing.T) {
-	// This is the actual regression: an earlier version of this predicate
-	// checked only "new DeletionTimestamp is non-nil", which matches every
-	// subsequent update to an already-deleting object too -- including the
-	// object's own status writes from a failed/stuck finalizer cleanup
-	// attempt (e.g. bucket ownership verification refusing to delete).
-	// Confirmed live against a real EKS cluster: this produced a sustained,
-	// non-decaying reconcile storm for as long as the deletion stayed
-	// stuck, since each failed attempt's own status write immediately
-	// re-triggered another reconcile via this predicate, completely
-	// bypassing the workqueue's own exponential backoff on the error.
+	// Checking only "new DeletionTimestamp is non-nil" would match every
+	// subsequent update to an already-deleting object too, including its
+	// own status writes from a stuck finalizer cleanup attempt -- a
+	// sustained reconcile storm that bypasses the workqueue's backoff.
 	now := metav1.Now()
 	oldObj := &forgev1alpha1.Application{ObjectMeta: metav1.ObjectMeta{Generation: 1, DeletionTimestamp: &now, Finalizers: []string{"f"}}}
 	newObj := &forgev1alpha1.Application{ObjectMeta: metav1.ObjectMeta{Generation: 1, DeletionTimestamp: &now, Finalizers: []string{"f"}}}
@@ -64,13 +58,7 @@ func TestApplicationChangePredicate_IgnoresRepeatedUpdatesWhileAlreadyDeleting(t
 }
 
 func TestApplicationChangePredicate_ReactsToAdoptBucketAnnotationChange(t *testing.T) {
-	// Real usability gap, not a storm risk: the annotation is metadata, not
-	// spec, so setting/clearing it never bumped generation and was silently
-	// swallowed like any other annotation-only change -- most commonly
-	// reached by a user reacting to a live BucketNotOwned failure by
-	// annotating the already-existing (and already backed-off) Application,
-	// which then had no way to notice the annotation until its own
-	// unrelated backoff next happened to fire.
+	// The annotation is metadata, not spec, so it never bumps generation.
 	oldObj := &forgev1alpha1.Application{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
 	newObj := &forgev1alpha1.Application{ObjectMeta: metav1.ObjectMeta{
 		Generation:  1,
@@ -115,11 +103,8 @@ func TestApplicationChangePredicate_CreateAndDeleteAlwaysPass(t *testing.T) {
 // --- ownedContentChangedPredicate ---
 
 func TestOwnedContentChangedPredicate_ReactsToServiceSelectorChange(t *testing.T) {
-	// The actual bug: Service, like ConfigMap/Secret/ServiceAccount, never
-	// gets .metadata.generation bumped by Kubernetes -- it was wired to
-	// ownedGenerationChangedPredicate anyway, so a direct edit to
-	// spec.selector (breaking pod routing) was silently never corrected.
-	// Confirmed live before this fix.
+	// Service never gets .metadata.generation bumped by Kubernetes, unlike
+	// most resources -- a direct edit to spec.selector must still be caught.
 	oldObj := &corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{appLabelKey: "demo"}}}
 	newObj := &corev1.Service{Spec: corev1.ServiceSpec{Selector: map[string]string{appLabelKey: "wrong-selector"}}}
 

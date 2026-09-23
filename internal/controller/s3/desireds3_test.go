@@ -16,6 +16,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithy "github.com/aws/smithy-go"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -25,12 +26,14 @@ import (
 // --- ensureBucketExists ---
 
 // matchingTagging returns a GetBucketTaggingOutput carrying the ownership
-// tag for testAppUID, i.e. what verifyOwnership sees for a bucket this
-// operator created for this Application.
+// tag (and matching namespace tag) for testAppUID, i.e. what
+// claimOrVerifyOwnership sees for a bucket this operator created for this
+// Application, already fully tagged under namespace-scoped ownership.
 func matchingTagging() *s3sdk.GetBucketTaggingOutput {
 	return &s3sdk.GetBucketTaggingOutput{
 		TagSet: []s3types.Tag{
 			{Key: aws.String(ownerTagKey), Value: aws.String(string(testAppUID))},
+			{Key: aws.String(ownerNamespaceTagKey), Value: aws.String(testNamespace)},
 		},
 	}
 }
@@ -79,7 +82,7 @@ func TestEnsureBucketExists_ReturnsNotOwnedWhenFoundBucketTagMismatched(t *testi
 }
 
 func TestEnsureBucketExists_AdoptsMismatchedTagWhenAnnotationSet(t *testing.T) {
-	var taggedOwner string
+	var taggedOwner, taggedNamespace string
 	m := newTestManager(&mockS3Client{
 		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
 			return &s3sdk.HeadBucketOutput{}, nil
@@ -88,13 +91,17 @@ func TestEnsureBucketExists_AdoptsMismatchedTagWhenAnnotationSet(t *testing.T) {
 			return &s3sdk.GetBucketTaggingOutput{
 				TagSet: []s3types.Tag{
 					{Key: aws.String(ownerTagKey), Value: aws.String(string(testOtherUID))},
+					{Key: aws.String(ownerNamespaceTagKey), Value: aws.String(testNamespace)},
 				},
 			}, nil
 		},
 		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
 			for _, tag := range params.Tagging.TagSet {
-				if aws.ToString(tag.Key) == ownerTagKey {
+				switch aws.ToString(tag.Key) {
+				case ownerTagKey:
 					taggedOwner = aws.ToString(tag.Value)
+				case ownerNamespaceTagKey:
+					taggedNamespace = aws.ToString(tag.Value)
 				}
 			}
 			return &s3sdk.PutBucketTaggingOutput{}, nil
@@ -104,8 +111,9 @@ func TestEnsureBucketExists_AdoptsMismatchedTagWhenAnnotationSet(t *testing.T) {
 
 	forgemetrics.StorageBucketAdoptedTotal.Reset()
 
-	// A tag naming a *different* Application must still be adoptable via
-	// the explicit annotation -- this is the deliberate human-in-the-loop
+	// A tag naming a *different* Application must still be adoptable via the
+	// explicit annotation, within the same namespace as the previous owner
+	// (testNamespace here) -- this is the deliberate human-in-the-loop
 	// override, distinct from (and not gated by) previouslyCreatedByUs,
 	// which by definition can never be true for a bucket someone else made.
 	if err := m.ensureBucketExists(context.Background()); err != nil {
@@ -113,6 +121,9 @@ func TestEnsureBucketExists_AdoptsMismatchedTagWhenAnnotationSet(t *testing.T) {
 	}
 	if taggedOwner != string(testAppUID) {
 		t.Fatalf("expected the tag to be overwritten with this Application's own UID, got %q", taggedOwner)
+	}
+	if taggedNamespace != testNamespace {
+		t.Fatalf("expected the owner-namespace tag to be set to this Application's namespace, got %q", taggedNamespace)
 	}
 	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3))); got != 1 {
 		t.Fatalf("expected StorageBucketAdoptedTotal to be 1 after an actual adoption, got %v", got)
@@ -173,6 +184,350 @@ func TestEnsureBucketExists_RefusesToAdoptWhenPreviousOwnerStillExists(t *testin
 	}
 	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3))); got != 0 {
 		t.Fatalf("expected no adoption to be recorded, got %v", got)
+	}
+}
+
+func TestEnsureBucketExists_BackfillsNamespaceTagForBucketAlreadyOwned(t *testing.T) {
+	// A bucket tagged before namespace-scoped ownership shipped carries the
+	// owner tag but no owner-namespace tag. Since the UID already matches
+	// this Application, that's safe to self-heal by rewriting the tags --
+	// no adoption semantics involved, just catching the record up.
+	var putTagSet []s3types.Tag
+	m := newTestManager(&mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return &s3sdk.GetBucketTaggingOutput{
+				TagSet: []s3types.Tag{
+					{Key: aws.String(ownerTagKey), Value: aws.String(string(testAppUID))},
+				},
+			}, nil
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			putTagSet = params.Tagging.TagSet
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}, nil)
+
+	if err := m.ensureBucketExists(context.Background()); err != nil {
+		t.Fatalf("ensureBucketExists returned error: %v", err)
+	}
+
+	var gotNamespace string
+	for _, tag := range putTagSet {
+		if aws.ToString(tag.Key) == ownerNamespaceTagKey {
+			gotNamespace = aws.ToString(tag.Value)
+		}
+	}
+	if gotNamespace != testNamespace {
+		t.Fatalf("expected the owner-namespace tag to be backfilled to %q, got %q", testNamespace, gotNamespace)
+	}
+}
+
+func TestEnsureBucketExists_DoesNotRewriteTagsWhenAlreadyFullyTagged(t *testing.T) {
+	putTaggingCalled := false
+	m := newTestManager(&mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return matchingTagging(), nil
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			putTaggingCalled = true
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}, nil)
+
+	if err := m.ensureBucketExists(context.Background()); err != nil {
+		t.Fatalf("ensureBucketExists returned error: %v", err)
+	}
+	if putTaggingCalled {
+		t.Fatalf("expected no tag write when the bucket is already fully tagged for this Application")
+	}
+}
+
+func TestEnsureBucketExists_BackfillsOwnershipIDTagForBucketAlreadyOwned(t *testing.T) {
+	// Same backfill story as the namespace tag, for a bucket tagged before
+	// the ownership-ID tag existed at all.
+	var putTagSet []s3types.Tag
+	m := newTestManager(&mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return matchingTagging(), nil
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			putTagSet = params.Tagging.TagSet
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}, nil)
+	m.app.Annotations = map[string]string{naming.StorageOwnershipIDAnnotation: testOwnershipID}
+
+	if err := m.ensureBucketExists(context.Background()); err != nil {
+		t.Fatalf("ensureBucketExists returned error: %v", err)
+	}
+
+	var gotOwnershipID string
+	for _, tag := range putTagSet {
+		if aws.ToString(tag.Key) == ownershipIDTagKey {
+			gotOwnershipID = aws.ToString(tag.Value)
+		}
+	}
+	if gotOwnershipID != testOwnershipID {
+		t.Fatalf("expected the ownership-id tag to be backfilled to %q, got %q", testOwnershipID, gotOwnershipID)
+	}
+}
+
+func TestEnsureBucketExists_ReclaimsAfterUIDChangeWhenOwnershipIDMatches(t *testing.T) {
+	// The Velero-restore/cluster-migration case: a different UID owns the
+	// tag (this Application's own previous incarnation), but the stable
+	// ownership ID matches -- must reclaim automatically, no adopt-bucket
+	// annotation required.
+	var putTagSet []s3types.Tag
+	m := newTestManager(&mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return &s3sdk.GetBucketTaggingOutput{
+				TagSet: []s3types.Tag{
+					{Key: aws.String(ownerTagKey), Value: aws.String(string(testOtherUID))},
+					{Key: aws.String(ownerNamespaceTagKey), Value: aws.String(testNamespace)},
+					{Key: aws.String(ownershipIDTagKey), Value: aws.String(testOwnershipID)},
+				},
+			}, nil
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			putTagSet = params.Tagging.TagSet
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}, nil)
+	m.app.Annotations = map[string]string{naming.StorageOwnershipIDAnnotation: testOwnershipID}
+
+	forgemetrics.StorageOwnershipReclaimedTotal.Reset()
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
+	if err := m.ensureBucketExists(context.Background()); err != nil {
+		t.Fatalf("ensureBucketExists returned error: %v", err)
+	}
+
+	var gotUID string
+	for _, tag := range putTagSet {
+		if aws.ToString(tag.Key) == ownerTagKey {
+			gotUID = aws.ToString(tag.Value)
+		}
+	}
+	if gotUID != string(testAppUID) {
+		t.Fatalf("expected the owner tag to be rewritten to this Application's own UID %q, got %q", testAppUID, gotUID)
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageOwnershipReclaimedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3))); got != 1 {
+		t.Fatalf("expected StorageOwnershipReclaimedTotal to be 1 after an automatic reclaim, got %v", got)
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3))); got != 0 {
+		t.Fatalf("expected StorageBucketAdoptedTotal to stay 0 for an automatic reclaim, not a human-authorized adoption, got %v", got)
+	}
+}
+
+func TestEnsureBucketExists_RefusesReclaimWhenOwnershipIDMismatched(t *testing.T) {
+	// A different UID and a non-matching ownership ID: this is a genuinely
+	// different Application, not a restore of this one -- must still
+	// require the explicit adopt-bucket annotation, same as before this ID
+	// existed at all.
+	putTaggingCalled := false
+	m := newTestManager(&mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return &s3sdk.GetBucketTaggingOutput{
+				TagSet: []s3types.Tag{
+					{Key: aws.String(ownerTagKey), Value: aws.String(string(testOtherUID))},
+					{Key: aws.String(ownerNamespaceTagKey), Value: aws.String(testNamespace)},
+					{Key: aws.String(ownershipIDTagKey), Value: aws.String("some-other-ownership-id")},
+				},
+			}, nil
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			putTaggingCalled = true
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}, nil)
+	m.app.Annotations = map[string]string{naming.StorageOwnershipIDAnnotation: testOwnershipID}
+
+	forgemetrics.StorageOwnershipReclaimedTotal.Reset()
+
+	err := m.ensureBucketExists(context.Background())
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned when the ownership ID doesn't match, got %v", err)
+	}
+	if putTaggingCalled {
+		t.Fatalf("expected the tag to be left untouched when the ownership ID doesn't match")
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageOwnershipReclaimedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3))); got != 0 {
+		t.Fatalf("expected no reclaim to be recorded, got %v", got)
+	}
+}
+
+func TestEnsureBucketExists_RefusesCrossNamespaceAdoptionWithoutGrant(t *testing.T) {
+	putTaggingCalled := false
+	s3Client := &mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return &s3sdk.GetBucketTaggingOutput{
+				TagSet: []s3types.Tag{
+					{Key: aws.String(ownerTagKey), Value: aws.String(string(testOtherUID))},
+					{Key: aws.String(ownerNamespaceTagKey), Value: aws.String(testOwnerNamespace)},
+				},
+			}, nil
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			putTaggingCalled = true
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}
+
+	// The adopting Application lives in a different namespace than the one
+	// recorded as the bucket's previous owner, and that owner namespace
+	// carries no naming.AllowBucketAdoptionFromAnnotation grant.
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testAdopterNamespace, UID: testAppUID},
+	}
+	app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
+
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+
+	m := &Manager{
+		k8sClient: fakeClient,
+		s3client:  s3Client,
+		app:       app,
+		storage:   &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testRegion},
+		bucket:    testBucket,
+		region:    testRegion,
+	}
+
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
+	err := m.ensureBucketExists(context.Background())
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned for cross-namespace adoption without a grant, got %v", err)
+	}
+	if putTaggingCalled {
+		t.Fatalf("expected the tag to be left untouched without a cross-namespace grant")
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3))); got != 0 {
+		t.Fatalf("expected no adoption to be recorded, got %v", got)
+	}
+}
+
+func TestEnsureBucketExists_AllowsCrossNamespaceAdoptionWithGrant(t *testing.T) {
+	var taggedNamespace string
+	s3Client := &mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return &s3sdk.GetBucketTaggingOutput{
+				TagSet: []s3types.Tag{
+					{Key: aws.String(ownerTagKey), Value: aws.String(string(testOtherUID))},
+					{Key: aws.String(ownerNamespaceTagKey), Value: aws.String(testOwnerNamespace)},
+				},
+			}, nil
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			for _, tag := range params.Tagging.TagSet {
+				if aws.ToString(tag.Key) == ownerNamespaceTagKey {
+					taggedNamespace = aws.ToString(tag.Value)
+				}
+			}
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}
+
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testAdopterNamespace, UID: testAppUID},
+	}
+	app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
+
+	// The previous owner's namespace explicitly grants this adopting
+	// namespace permission via naming.AllowBucketAdoptionFromAnnotation --
+	// the "something a cluster admin grants" mechanism, since editing a
+	// Namespace object needs separate RBAC from editing an Application.
+	ownerNamespace := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        testOwnerNamespace,
+			Annotations: map[string]string{naming.AllowBucketAdoptionFromAnnotation: testAdopterNamespace},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app, ownerNamespace).WithStatusSubresource(app).Build()
+
+	m := &Manager{
+		k8sClient: fakeClient,
+		s3client:  s3Client,
+		app:       app,
+		storage:   &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testRegion},
+		bucket:    testBucket,
+		region:    testRegion,
+	}
+
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
+	if err := m.ensureBucketExists(context.Background()); err != nil {
+		t.Fatalf("ensureBucketExists returned error: %v", err)
+	}
+	if taggedNamespace != testAdopterNamespace {
+		t.Fatalf("expected the owner-namespace tag to be rewritten to the adopting namespace %q, got %q", testAdopterNamespace, taggedNamespace)
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAWSS3))); got != 1 {
+		t.Fatalf("expected StorageBucketAdoptedTotal to be 1 after a granted cross-namespace adoption, got %v", got)
+	}
+}
+
+func TestEnsureBucketExists_RefusesAdoptionOfLegacyUntaggedNamespaceBucket(t *testing.T) {
+	// A bucket adopted from a *different* Application, tagged before
+	// namespace-scoped ownership shipped, carries no owner-namespace tag at
+	// all. There's nothing to compare against, so this must fail closed
+	// rather than silently treat it as same-namespace.
+	putTaggingCalled := false
+	s3Client := &mockS3Client{
+		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
+			return &s3sdk.HeadBucketOutput{}, nil
+		},
+		getBucketTaggingFunc: func(ctx context.Context, params *s3sdk.GetBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetBucketTaggingOutput, error) {
+			return &s3sdk.GetBucketTaggingOutput{
+				TagSet: []s3types.Tag{
+					{Key: aws.String(ownerTagKey), Value: aws.String(string(testOtherUID))},
+				},
+			}, nil
+		},
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			putTaggingCalled = true
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}
+
+	m := newTestManager(s3Client, nil)
+	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
+
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
+	err := m.ensureBucketExists(context.Background())
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned for a legacy untagged-namespace bucket, got %v", err)
+	}
+	if putTaggingCalled {
+		t.Fatalf("expected the tag to be left untouched for a legacy bucket with no recorded owner namespace")
 	}
 }
 
@@ -274,6 +629,7 @@ func TestEnsureBucketExists_PreservesUnrelatedTagsWhenAdopting(t *testing.T) {
 				TagSet: []s3types.Tag{
 					unrelatedTag,
 					{Key: aws.String(ownerTagKey), Value: aws.String(string(testOtherUID))},
+					{Key: aws.String(ownerNamespaceTagKey), Value: aws.String(testNamespace)},
 				},
 			}, nil
 		},
@@ -549,6 +905,51 @@ func TestTagAsOwned_PropagatesError(t *testing.T) {
 	}
 }
 
+func TestTagAsOwned_IncludesOwnershipIDTagWhenSet(t *testing.T) {
+	var putTagSet []s3types.Tag
+	m := newTestManager(&mockS3Client{
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			putTagSet = params.Tagging.TagSet
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}, nil)
+	m.app.Annotations = map[string]string{naming.StorageOwnershipIDAnnotation: testOwnershipID}
+
+	if err := m.tagAsOwned(context.Background(), nil); err != nil {
+		t.Fatalf("tagAsOwned returned error: %v", err)
+	}
+
+	var gotOwnershipID string
+	for _, tag := range putTagSet {
+		if aws.ToString(tag.Key) == ownershipIDTagKey {
+			gotOwnershipID = aws.ToString(tag.Value)
+		}
+	}
+	if gotOwnershipID != testOwnershipID {
+		t.Fatalf("expected ownership-id tag %q, got %q", testOwnershipID, gotOwnershipID)
+	}
+}
+
+func TestTagAsOwned_OmitsOwnershipIDTagWhenUnset(t *testing.T) {
+	var putTagSet []s3types.Tag
+	m := newTestManager(&mockS3Client{
+		putBucketTaggingFunc: func(ctx context.Context, params *s3sdk.PutBucketTaggingInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutBucketTaggingOutput, error) {
+			putTagSet = params.Tagging.TagSet
+			return &s3sdk.PutBucketTaggingOutput{}, nil
+		},
+	}, nil)
+
+	if err := m.tagAsOwned(context.Background(), nil); err != nil {
+		t.Fatalf("tagAsOwned returned error: %v", err)
+	}
+
+	for _, tag := range putTagSet {
+		if aws.ToString(tag.Key) == ownershipIDTagKey {
+			t.Fatalf("expected no ownership-id tag when the Application carries none, got %q", aws.ToString(tag.Value))
+		}
+	}
+}
+
 func TestEnsureBucketExists_ReturnsErrorOn403(t *testing.T) {
 	m := newTestManager(&mockS3Client{
 		headBucketFunc: func(ctx context.Context, params *s3sdk.HeadBucketInput, optFns ...func(*s3sdk.Options)) (*s3sdk.HeadBucketOutput, error) {
@@ -735,6 +1136,35 @@ func TestReconcileAppIRSA_CreatesRoleWhenNotFound(t *testing.T) {
 	}
 	if roleArn != testIRSARoleARN {
 		t.Errorf("expected role arn to be returned, got %q", roleArn)
+	}
+}
+
+func TestReconcileAppIRSA_SetsPermissionsBoundaryOnCreate(t *testing.T) {
+	// Terraform's IAMRoleCreationForApps statement rejects any CreateRole
+	// call for an app-irsa-* role that omits this boundary or names a
+	// different one -- without it, ReconcileAppIRSA would fail at the AWS
+	// layer regardless of what this test's fake IAM client returns.
+	var gotBoundary string
+	m := newTestManager(nil, &mockIAMClient{
+		getRoleFunc: func(ctx context.Context, params *iam.GetRoleInput, optFns ...func(*iam.Options)) (*iam.GetRoleOutput, error) {
+			return nil, &iamtypes.NoSuchEntityException{}
+		},
+		createRoleFunc: func(ctx context.Context, params *iam.CreateRoleInput, optFns ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
+			gotBoundary = aws.ToString(params.PermissionsBoundary)
+			return &iam.CreateRoleOutput{
+				Role: &iamtypes.Role{Arn: aws.String(testIRSARoleARN)},
+			}, nil
+		},
+		putRolePolicyFunc: func(ctx context.Context, params *iam.PutRolePolicyInput, optFns ...func(*iam.Options)) (*iam.PutRolePolicyOutput, error) {
+			return &iam.PutRolePolicyOutput{}, nil
+		},
+	})
+
+	if _, err := m.ReconcileAppIRSA(context.Background()); err != nil {
+		t.Fatalf("ReconcileAppIRSA returned error: %v", err)
+	}
+	if gotBoundary != testPermissionsBoundary {
+		t.Fatalf("expected CreateRoleInput.PermissionsBoundary %q, got %q", testPermissionsBoundary, gotBoundary)
 	}
 }
 

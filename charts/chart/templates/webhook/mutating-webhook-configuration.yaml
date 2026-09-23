@@ -15,7 +15,7 @@ webhooks:
       name: {{ include "forge-operator.resourceName" (dict "suffix" "webhook-service" "context" $) }}
       namespace: {{ .Release.Namespace }}
       path: /mutate-forge-ningendo7-github-io-v1alpha1-application
-  failurePolicy: Fail
+  failurePolicy: Ignore
   name: mapplication-v1alpha1.kb.io
   rules:
   - apiGroups:

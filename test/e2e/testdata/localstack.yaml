@@ -1,0 +1,61 @@
+# LocalStack fixture for the e2e IRSA round-trip test (finding #8): stands
+# in for real AWS IAM/S3/STS so the test can drive a full CreateRole /
+# UpdateAssumeRolePolicy round-trip and read back the actual persisted trust
+# policy, without needing real AWS credentials or network access.
+#
+# Deliberately applied to its own namespace (see e2e_test.go, which creates
+# it un-labeled) rather than forge-operator-system: that namespace enforces
+# the "restricted" Pod Security Standard, and LocalStack's upstream image
+# isn't guaranteed to run as an arbitrary non-root UID -- fighting that on a
+# third-party test fixture isn't worth it. The product namespace itself
+# stays untouched.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localstack
+  labels:
+    app: localstack
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: localstack
+  template:
+    metadata:
+      labels:
+        app: localstack
+    spec:
+      containers:
+        - name: localstack
+          image: localstack/localstack:3.8
+          ports:
+            - containerPort: 4566
+          env:
+            # Only what the IRSA round-trip test needs -- narrower service
+            # set starts faster than LocalStack's full default catalog.
+            - name: SERVICES
+              value: "iam,sts,s3"
+          readinessProbe:
+            httpGet:
+              path: /_localstack/health
+              port: 4566
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /_localstack/health
+              port: 4566
+            initialDelaySeconds: 20
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: localstack
+spec:
+  selector:
+    app: localstack
+  ports:
+    - port: 4566
+      targetPort: 4566

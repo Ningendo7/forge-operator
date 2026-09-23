@@ -18,9 +18,10 @@ const (
 	TypeProgressing = "Progressing"
 	TypeDegraded    = "Degraded"
 
-	ReasonReconciling = "Reconciling"
-	ReasonAvailable   = "ReconcileSuccess"
-	ReasonFailed      = "ReconcileFailed"
+	ReasonReconciling    = "Reconciling"
+	ReasonAvailable      = "ReconcileSuccess"
+	ReasonFailed         = "ReconcileFailed"
+	ReasonSecretNotFound = "SecretNotFound"
 )
 
 type StatusManager struct {
@@ -121,16 +122,20 @@ func (s *StatusManager) SetReady(
 	return s.UpdateStatus(ctx, application)
 }
 
+// SetFailed records reason as both the Degraded and Ready conditions'
+// Reason -- callers pass a specific reason (e.g. ReasonSecretNotFound) when
+// they can classify err, or ReasonFailed otherwise.
 func (s *StatusManager) SetFailed(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
+	reason string,
 	err error,
 ) error {
 
 	degradedChanged := meta.SetStatusCondition(&application.Status.Conditions, metav1.Condition{
 		Type:               TypeDegraded,
 		Status:             metav1.ConditionTrue,
-		Reason:             ReasonFailed,
+		Reason:             reason,
 		Message:            err.Error(),
 		ObservedGeneration: application.Generation,
 	})
@@ -138,7 +143,7 @@ func (s *StatusManager) SetFailed(
 	readyChanged := meta.SetStatusCondition(&application.Status.Conditions, metav1.Condition{
 		Type:               TypeReady,
 		Status:             metav1.ConditionFalse,
-		Reason:             ReasonFailed,
+		Reason:             reason,
 		Message:            fmt.Sprintf("Reconciliation failed: %v", err),
 		ObservedGeneration: application.Generation,
 	})

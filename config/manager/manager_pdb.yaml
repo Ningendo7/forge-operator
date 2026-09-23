@@ -1,0 +1,21 @@
+# PodDisruptionBudget for the manager Deployment, so a voluntary disruption
+# (node drain, cluster upgrade) can't take every replica down at once. Only
+# meaningful paired with replicas > 1 in manager.yaml -- a PDB with
+# minAvailable >= the actual replica count would block all voluntary
+# eviction of the only pod forever, which is worse than having none. If you
+# scale replicas back down to 1, remove this resource too.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: controller-manager
+  namespace: system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: forge-operator
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      app.kubernetes.io/name: forge-operator

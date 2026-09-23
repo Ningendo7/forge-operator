@@ -11,6 +11,7 @@ import (
 	s3sdk "github.com/aws/aws-sdk-go-v2/service/s3"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"golang.org/x/time/rate"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -18,15 +19,19 @@ import (
 )
 
 const (
-	testNamespace    = "default"
-	testAppName      = "demo-app"
-	testBucket       = "demo-bucket"
-	testRegion       = "us-east-1"
-	testEUWestRegion = "eu-west-1"
-	testSecretName   = "aws-creds"
-	testIRSARoleARN  = "arn:aws:iam::123456789012:role/app-irsa-demo-app"
-	testAppUID       = types.UID("11111111-1111-1111-1111-111111111111")
-	testOtherUID     = types.UID("22222222-2222-2222-2222-222222222222")
+	testNamespace           = "default"
+	testAppName             = "demo-app"
+	testBucket              = "demo-bucket"
+	testRegion              = "us-east-1"
+	testEUWestRegion        = "eu-west-1"
+	testSecretName          = "aws-creds"
+	testIRSARoleARN         = "arn:aws:iam::123456789012:role/app-irsa-demo-app"
+	testAppUID              = types.UID("11111111-1111-1111-1111-111111111111")
+	testOtherUID            = types.UID("22222222-2222-2222-2222-222222222222")
+	testOwnerNamespace      = "team-a"
+	testAdopterNamespace    = "team-b"
+	testPermissionsBoundary = "arn:aws:iam::123456789012:policy/app-irsa-boundary"
+	testOwnershipID         = "11111111-2222-3333-4444-555555555555"
 )
 
 func newTestApp() *forgev1alpha1.Application {
@@ -70,6 +75,7 @@ func newTestManager(s3Client S3API, iamClient IAMAPI) *Manager {
 
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 
 	return &Manager{
@@ -81,8 +87,18 @@ func newTestManager(s3Client S3API, iamClient IAMAPI) *Manager {
 		bucket:             testBucket,
 		region:             testRegion,
 		serviceAccountName: "demo-app-sa",
-		OIDCProviderARN:    "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
-		OIDCProviderURL:    "https://oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
+		recordCreated: func(ctx context.Context) error {
+			app.Status.Storage = &forgev1alpha1.StorageStatus{
+				Provider:  forgev1alpha1.ProviderAWSS3,
+				Bucket:    testBucket,
+				Created:   true,
+				CreatedAt: metav1.Now(),
+			}
+			return fakeClient.Status().Update(ctx, app)
+		},
+		OIDCProviderARN:        "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
+		OIDCProviderURL:        "https://oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE",
+		PermissionsBoundaryARN: testPermissionsBoundary,
 	}
 }
 

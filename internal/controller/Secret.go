@@ -24,40 +24,7 @@ import (
 // options built around it there.
 const SecretRoleLabel = "forge.ningendo7.github.io/secret-role"
 
-const (
-	secretRoleApp     = "app"
-	secretRoleStorage = "storage"
-)
-
-func (r *ApplicationReconciler) desiredSecret(
-	application *forgev1alpha1.Application,
-) *corev1.Secret {
-
-	labels := map[string]string{appLabelKey: application.Name, SecretRoleLabel: secretRoleApp}
-	secretType := corev1.SecretTypeOpaque
-	var secretData map[string]string
-
-	if application.Spec.Secret != nil {
-		if application.Spec.Secret.Type != "" {
-			secretType = application.Spec.Secret.Type
-		}
-		secretData = application.Spec.Secret.StringData
-	}
-
-	return &corev1.Secret{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Secret",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      naming.AppSecret(application),
-			Namespace: application.Namespace,
-			Labels:    labels,
-		},
-		Type:       secretType,
-		StringData: secretData,
-	}
-}
+const secretRoleStorage = "storage"
 
 // desiredStorage builds the operator-managed storage credentials Secret.
 // akamaiCreds is passed explicitly by the caller (never read from
@@ -97,22 +64,14 @@ func (r *ApplicationReconciler) desiredStorage(
 		}
 
 		secretData["endpoint"] = akamaiCreds.Endpoint
-		// "endpoint" above is deliberately a bare hostname (see
-		// resolveEndpoint's own doc comment) -- kept as-is for backward
-		// compatibility with anything already reading it, and it's
-		// deliberately still the bucket-prefixed hostname
-		// (bucket.cluster.linodeobjects.com) resolveEndpoint returns.
-		// endpoint_url is different on purpose: this operator's own S3
-		// client (s3ClientFor in the Akamai package) strips that same
-		// bucket prefix back off before connecting, using path-style
-		// addressing (BaseEndpoint = bare cluster host, bucket passed
-		// explicitly in each request) rather than virtual-hosted-style --
-		// the standard, documented way to talk to Akamai/most
-		// S3-compatible providers. Handing a real SDK the bucket-prefixed
-		// host as its endpoint would double up the bucket reference the
-		// moment it also passes a Bucket parameter (which every normal
-		// S3 SDK call does), so this strips the same prefix the same way
-		// before adding the scheme AWS_ENDPOINT_URL requires.
+		// "endpoint" above is kept as the bucket-prefixed hostname
+		// (bucket.cluster.linodeobjects.com) for backward compatibility.
+		// endpoint_url strips that bucket prefix back off: this operator's
+		// own S3 client (s3ClientFor in the Akamai package) uses path-style
+		// addressing (bare cluster host as BaseEndpoint, bucket passed
+		// explicitly per request), so handing a real SDK the bucket-prefixed
+		// host would double up the bucket reference once it also passes a
+		// Bucket parameter.
 		endpointHost := strings.TrimPrefix(akamaiCreds.Endpoint, application.Spec.Storage.Bucket+".")
 		secretData["endpoint_url"] = "https://" + endpointHost
 	}
@@ -160,46 +119,6 @@ func (r *ApplicationReconciler) deleteStaleSecrets(
 	return nil
 }
 
-func (r *ApplicationReconciler) reconcileSecret(
-	ctx context.Context,
-	application *forgev1alpha1.Application,
-) error {
-
-	logger := logf.FromContext(ctx)
-
-	// Presence of spec.secret enables it, not whether data was provided.
-	if application.Spec.Secret == nil {
-		return r.deleteStaleSecrets(ctx, application, secretRoleApp, "")
-	}
-
-	logger.Info("Reconciling Secret")
-
-	desired := r.desiredSecret(application)
-
-	if err := controllerutil.SetControllerReference(application, desired, r.Scheme); err != nil {
-		return fmt.Errorf("failed to set controller reference for Secret: %w", err)
-	}
-
-	err := r.Patch(
-		ctx,
-		desired,
-		client.Apply, //nolint:staticcheck // SSA patch via client.Apply is the standard controller-runtime pattern
-		client.FieldOwner("forge-operator"),
-		client.ForceOwnership,
-	)
-	if err != nil {
-		logger.Error(err, "Failed to apply Secret", "name", desired.Name)
-		return fmt.Errorf("failed to server-side apply Secret: %w", err)
-	}
-
-	if err := r.deleteStaleSecrets(ctx, application, secretRoleApp, desired.Name); err != nil {
-		return fmt.Errorf("failed to clean up stale Secret: %w", err)
-	}
-
-	logger.Info("Successfully reconciled Secret", "name", desired.Name)
-	return nil
-}
-
 func (r *ApplicationReconciler) reconcileStorageSecret(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
@@ -214,21 +133,16 @@ func (r *ApplicationReconciler) reconcileStorageSecret(
 
 	// AWS with an explicitly-set spec.storage.secretName means "use static
 	// credentials from this Secret instead of IRSA" (see s3storage.NewManager)
-	// -- that Secret is a user-supplied input the operator only ever reads,
-	// playing the same role AkamaiTokenSecret's accessKeySecretRef plays for
-	// Akamai's own input token (see that function's doc comment for the
-	// identical reasoning). Taking ownership of it the same way this
-	// function does for its own generated output Secret below -- via
-	// SetControllerReference plus a force-applied SSA write -- would mean
-	// deleting the Application cascades into deleting the user's own
-	// credentials Secret, even though this operator never created it.
-	// Confirmed live: deleting an Application configured this way deleted a
-	// Secret the operator never made, breaking reuse of the same static
-	// credentials across a deleted-and-recreated Application (exactly an
-	// adopt-bucket workflow). The informational fields this function would
-	// otherwise write (provider/bucket/region/endpoint/role_arn) are already
-	// readable from Application.Status.Storage directly, so skipping the
-	// write here loses nothing.
+	// -- a user-supplied input the operator only ever reads, the same role
+	// AkamaiTokenSecret's accessKeySecretRef plays for Akamai's input token.
+	// Taking ownership of it the way this function does for its own
+	// generated output Secret below would mean deleting the Application
+	// cascades into deleting the user's own credentials Secret, breaking
+	// reuse of the same credentials across a deleted-and-recreated
+	// Application (an adopt-bucket workflow). The informational fields this
+	// function would otherwise write are already readable from
+	// Application.Status.Storage directly, so skipping the write here loses
+	// nothing.
 	if application.Spec.Storage.Provider == forgev1alpha1.ProviderAWSS3 && application.Spec.Storage.SecretName != "" {
 		return r.deleteStaleSecrets(ctx, application, secretRoleStorage, "")
 	}

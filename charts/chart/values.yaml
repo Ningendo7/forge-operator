@@ -13,7 +13,17 @@ manager:
   ##
   enabled: true
 
-  replicas: 1
+  ## 2 by default: the webhook server runs in this same pod, with
+  ## failurePolicy: Fail on both the mutating and validating
+  ## ValidatingWebhookConfiguration/MutatingWebhookConfiguration -- a single
+  ## replica means any create/update to an Application (including removing
+  ## a finalizer to un-stick a deletion) is flatly rejected whenever that one
+  ## pod is down, not just skipped. Leader election only gates the
+  ## reconcile loop, not the webhook server (every replica serves admission
+  ## requests independently), so this is safe to raise without risking
+  ## duplicate reconciliation. Pair with manager.affinity below so the
+  ## replicas actually land on different nodes.
+  replicas: 2
 
   image:
     repository: controller
@@ -31,6 +41,11 @@ manager:
   ## - OIDC_PROVIDER_ARN / OIDC_PROVIDER_URL: required for AWS IRSA (see
   ##   the Authentication Flows section in the README) — without these,
   ##   AWS storage reconciliation cannot construct the IRSA trust policy.
+  ## - APP_IRSA_PERMISSIONS_BOUNDARY_ARN: required alongside those two —
+  ##   the AWS IAM policy (Terraform's app_irsa_permissions_boundary_arn
+  ##   output) that caps every app-irsa-* role the operator creates. AWS
+  ##   itself rejects CreateRole for that role pattern unless this exact
+  ##   boundary is set, so AWS storage reconciliation fails without it.
   ## - DEFAULT_AKAMAI_REGION: fallback region for Akamai/Linode storage
   ##   when an Application doesn't set spec.storage.region itself. Should
   ##   match wherever your Akamai/Linode infrastructure actually runs —
@@ -42,6 +57,8 @@ manager:
   #     value: "arn:aws:iam::123456789012:role/example"
   #   - name: OIDC_PROVIDER_URL
   #     value: "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
+  #   - name: APP_IRSA_PERMISSIONS_BOUNDARY_ARN
+  #     value: "arn:aws:iam::123456789012:policy/dev-app-irsa-boundary"
   #   - name: DEFAULT_AKAMAI_REGION
   #     value: "us-iad"
 
@@ -76,9 +93,34 @@ manager:
       cpu: 10m
       memory: 64Mi
 
-  ## Manager pod's affinity
+  ## Manager pod's affinity. Defaults to a soft (preferred, not required)
+  ## anti-affinity spreading replicas across nodes by the control-plane
+  ## label already on this pod -- soft, not hard, so a single-node
+  ## dev/test cluster (e.g. kind) doesn't leave the second replica stuck
+  ## Pending forever; it just won't get the node-failure protection there.
   ##
-  affinity: {}
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: control-plane
+                  operator: In
+                  values:
+                    - controller-manager
+            topologyKey: kubernetes.io/hostname
+
+  ## PodDisruptionBudget for the manager Deployment, so a voluntary
+  ## disruption (node drain, cluster upgrade) can't take every replica
+  ## down at once -- only rendered when manager.replicas > 1: a PDB with
+  ## minAvailable >= the actual replica count would block all voluntary
+  ## eviction of the only pod forever, which is worse than having none.
+  ##
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
 
   ## Manager pod's node selector
   ##

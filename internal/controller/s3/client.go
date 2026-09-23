@@ -2,9 +2,11 @@ package s3storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -22,6 +24,12 @@ import (
 )
 
 const defaultRegion = "us-east-1"
+
+// ErrCredentialsSecretNotFound means spec.storage.secretName is set but
+// that Secret doesn't exist yet -- distinct from other NewManager errors so
+// callers can surface a specific, filterable status reason instead of a
+// generic failure.
+var ErrCredentialsSecretNotFound = errors.New("credentials secret not found")
 
 // S3API defines the interface for interacting with AWS S3.
 type S3API interface {
@@ -55,20 +63,18 @@ type StorageResult struct {
 
 // Manager handles S3 interactions for the Application controller.
 type Manager struct {
-	k8sClient client.Client
-	s3client  S3API
-	iamclient IAMAPI
-
-	app     *forgev1alpha1.Application
-	storage *forgev1alpha1.StorageSpec
-
-	bucket string
-	region string
-
-	serviceAccountName string // Name of the ServiceAccount to be used for IRSA
-
-	OIDCProviderARN string // EKS OIDC provider ARN needed for trust policy
-	OIDCProviderURL string // EKS OIDC provider (without https://)
+	k8sClient              client.Client
+	s3client               S3API
+	iamclient              IAMAPI
+	app                    *forgev1alpha1.Application
+	storage                *forgev1alpha1.StorageSpec
+	bucket                 string
+	region                 string
+	serviceAccountName     string // Name of the ServiceAccount to be used for IRSA
+	OIDCProviderARN        string // EKS OIDC provider ARN needed for trust policy
+	OIDCProviderURL        string // EKS OIDC provider (without https://)
+	PermissionsBoundaryARN string // AWS IAM policy that caps every app-irsa-* role the operator creates
+	recordCreated          func(ctx context.Context) error
 }
 
 func NewManager(
@@ -78,6 +84,8 @@ func NewManager(
 	serviceAccountName string,
 	oidcProviderARN string,
 	oidcProviderURL string,
+	permissionsBoundaryARN string,
+	recordCreated func(ctx context.Context) error,
 	s3Limiter *rate.Limiter,
 	iamLimiter *rate.Limiter,
 ) (*Manager, error) {
@@ -85,6 +93,15 @@ func NewManager(
 	storage := app.Spec.Storage
 	if storage == nil {
 		return nil, fmt.Errorf("storage spec is nil for application %s", app.Name)
+	}
+	if oidcProviderARN == "" {
+		return nil, fmt.Errorf("OIDC_PROVIDER_ARN is not configured, required to create IRSA roles for application %s", app.Name)
+	}
+	if oidcProviderURL == "" {
+		return nil, fmt.Errorf("OIDC_PROVIDER_URL is not configured, required to create IRSA roles for application %s", app.Name)
+	}
+	if permissionsBoundaryARN == "" {
+		return nil, fmt.Errorf("APP_IRSA_PERMISSIONS_BOUNDARY_ARN is not configured, required to create IRSA roles for application %s", app.Name)
 	}
 
 	region := storage.Region
@@ -104,6 +121,9 @@ func NewManager(
 			Namespace: app.Namespace,
 		}
 		if err := k8sClient.Get(ctx, secretKey, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil, fmt.Errorf("%w: %s", ErrCredentialsSecretNotFound, storage.SecretName)
+			}
 			return nil, err
 		}
 
@@ -151,16 +171,17 @@ func NewManager(
 	})
 
 	return &Manager{
-		k8sClient:          k8sClient,
-		s3client:           s3client,
-		iamclient:          iamclient,
-		app:                app,
-		storage:            storage,
-		region:             region,
-		bucket:             storage.Bucket,
-		serviceAccountName: serviceAccountName,
-		OIDCProviderARN:    oidcProviderARN,
-		OIDCProviderURL:    oidcProviderURL,
+		k8sClient:              k8sClient,
+		s3client:               s3client,
+		iamclient:              iamclient,
+		app:                    app,
+		storage:                storage,
+		region:                 region,
+		bucket:                 storage.Bucket,
+		serviceAccountName:     serviceAccountName,
+		OIDCProviderARN:        oidcProviderARN,
+		OIDCProviderURL:        oidcProviderURL,
+		PermissionsBoundaryARN: permissionsBoundaryARN,
 	}, nil
 
 }

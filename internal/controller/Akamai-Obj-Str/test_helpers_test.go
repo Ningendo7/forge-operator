@@ -17,6 +17,7 @@ import (
 
 const (
 	testNamespace         = "default"
+	testAppName           = "demo-app"
 	testBucket            = "demo-bucket"
 	testRegion            = "us-east-1"
 	testAccessKeyLabel    = "default-demo-app-key"
@@ -28,6 +29,9 @@ const (
 	testSecretKeyDataKey  = "secret_key"
 	testNewAccessKey      = "new-access-key"
 	testNewSecretKey      = "new-secret-key"
+	testOwnerNamespace    = "team-a"
+	testAdopterNamespace  = "team-b"
+	testOwnershipID       = "11111111-2222-3333-4444-555555555555"
 )
 
 func newTestApp() *forgev1alpha1.Application {
@@ -105,6 +109,15 @@ func newTestManager(akamaiClient AKAMAIAPI) *Manager {
 		storage:      &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testRegion},
 		bucket:       testBucket,
 		region:       testRegion,
+		recordCreated: func(ctx context.Context) error {
+			app.Status.Storage = &forgev1alpha1.StorageStatus{
+				Provider:  forgev1alpha1.ProviderAkamaiObjectStorage,
+				Bucket:    testBucket,
+				Created:   true,
+				CreatedAt: metav1.Now(),
+			}
+			return fakeClient.Status().Update(ctx, app)
+		},
 	}
 }
 

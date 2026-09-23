@@ -2,22 +2,15 @@
 
 // Package s3storage's integration tests exercise this Manager against a
 // real AWS account -- no Kubernetes cluster involved (see the identical
-// reasoning in the Akamai-Obj-Str package's own integration_test.go; the
-// Kubernetes-facing half of Manager is already well covered by the
-// fake-client unit tests in this package, only the cloud-facing half has
-// ever gone untested by anything but manual, ad-hoc live sessions).
+// reasoning in the Akamai-Obj-Str package's own integration_test.go).
 //
-// Unlike Akamai, this operator never generates a static AWS credential
-// pair for an Application to use -- AWS storage is IRSA-based, and IRSA's
-// whole point is that the Application's own pod gets temporary credentials
-// transparently via a real EKS OIDC-federated ServiceAccount token, which
-// a local Go test process has no way to obtain (there's no live pod, no
-// real OIDC federation to assume the role through). So these tests verify
-// what's actually reachable and meaningful from here: the bucket and IAM
-// role/policy this Manager creates genuinely exist with the right shape,
-// retrying is safe, and ownership/adoption behave the same way they do for
-// Akamai -- not that the generated IRSA role can itself be assumed, which
-// only a real EKS pod can ever prove.
+// Unlike Akamai, this operator never generates a static AWS credential pair
+// -- AWS storage is IRSA-based, and a local Go test process has no live pod
+// to obtain temporary credentials through. So these tests verify what's
+// actually reachable from here: the bucket and IAM role/policy this Manager
+// creates genuinely exist with the right shape, retrying is safe, and
+// ownership/adoption behave the same as Akamai -- not that the generated
+// IRSA role can itself be assumed, which only a real EKS pod can prove.
 //
 // Skipped entirely unless real AWS credentials are reachable via the
 // standard credential chain (the same one this package's own NewManager
@@ -56,9 +49,10 @@ import (
 )
 
 const (
-	integrationTestRegion          = "us-east-1"
-	integrationTestOIDCProviderARN = "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
-	integrationTestOIDCProviderURL = "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
+	integrationTestRegion                 = "us-east-1"
+	integrationTestOIDCProviderARN        = "arn:aws:iam::123456789012:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
+	integrationTestOIDCProviderURL        = "oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
+	integrationTestPermissionsBoundaryARN = "arn:aws:iam::123456789012:policy/app-irsa-boundary"
 )
 
 // skipUnlessLiveAWSCredentials skips the calling test unless the standard
@@ -118,7 +112,17 @@ func newIntegrationManager(t *testing.T, app *forgev1alpha1.Application, extraOb
 	}
 	fakeClient := builder.Build()
 
-	m, err := NewManager(context.Background(), fakeClient, app, app.Name+"-sa", integrationTestOIDCProviderARN, integrationTestOIDCProviderURL)
+	recordCreated := func(ctx context.Context) error {
+		app.Status.Storage = &forgev1alpha1.StorageStatus{
+			Provider:  forgev1alpha1.ProviderAWSS3,
+			Bucket:    app.Spec.Storage.Bucket,
+			Created:   true,
+			CreatedAt: metav1.Now(),
+		}
+		return fakeClient.Status().Update(ctx, app)
+	}
+
+	m, err := NewManager(context.Background(), fakeClient, app, app.Name+"-sa", integrationTestOIDCProviderARN, integrationTestOIDCProviderURL, integrationTestPermissionsBoundaryARN, recordCreated, testLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -151,10 +155,8 @@ func TestIntegration_AWS_BucketLifecycle_RetryIsSafeAndIAMRoleIsReal(t *testing.
 	}
 	firstRoleARN := result.RoleARN
 
-	// The AWS equivalent of the Akamai retry regression: a second
-	// reconcile (simulating an ordinary workqueue retry) must remain
-	// idempotent -- same role, no duplicate-resource errors -- rather than
-	// erroring out or silently drifting.
+	// A second reconcile (simulating an ordinary retry) must be idempotent
+	// -- same role, no duplicate-resource errors.
 	result2, err := m.ReconcileBucket(context.Background())
 	if err != nil {
 		t.Fatalf("second ReconcileBucket (simulating a retry) returned error: %v", err)

@@ -49,15 +49,11 @@ var (
 		[]string{providerLabel},
 	)
 
-	// StorageReady reflects the current StorageReady condition for a single
-	// Application -- 1 when its last reconcile succeeded, 0 otherwise. One
-	// time series per Application that has spec.storage set (not per
-	// reconcile volume), so cardinality scales with fleet size, not
-	// traffic -- fine at any realistic scale for this operator, but the
-	// reason this is the one metric here with a cardinality shape worth
-	// knowing about. Series are deleted when an Application finishes
-	// finalizing (see finalizer.go) so this never accumulates stale entries
-	// for Applications that no longer exist.
+	// StorageReady reflects the current StorageReady condition -- 1 when an
+	// Application's last reconcile succeeded, 0 otherwise. One series per
+	// Application with spec.storage set, so cardinality scales with fleet
+	// size, not traffic. Deleted when an Application finishes finalizing
+	// (see finalizer.go), so it never accumulates stale entries.
 	StorageReady = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "forge_storage_ready",
@@ -76,6 +72,24 @@ var (
 		prometheus.CounterOpts{
 			Name: "forge_storage_bucket_adopted_total",
 			Help: "Bucket ownership adoptions via the adopt-bucket annotation, by provider.",
+		},
+		[]string{providerLabel},
+	)
+
+	// StorageOwnershipReclaimedTotal counts automatic ownership reclaims
+	// after an Application's Kubernetes UID changed but its stable storage
+	// ownership ID still matched the bucket's recorded one -- the signature
+	// of a Velero restore or cluster migration, not a hostile takeover (see
+	// naming.StorageOwnershipIDAnnotation's doc comment). Kept separate
+	// from StorageBucketAdoptedTotal: that one means a human explicitly
+	// authorized taking over a genuinely different Application's bucket,
+	// this one means the same Application came back after its identity was
+	// reset -- different enough events that alerting on the former
+	// shouldn't have to filter out the latter.
+	StorageOwnershipReclaimedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "forge_storage_ownership_reclaimed_total",
+			Help: "Automatic bucket ownership reclaims after this Application's UID changed but its stable storage ownership ID still matched, by provider.",
 		},
 		[]string{providerLabel},
 	)
@@ -105,16 +119,11 @@ var (
 		[]string{providerLabel},
 	)
 
-	// ApplicationReady reflects the current overall Ready condition for a
-	// single Application -- 1 when its last reconcile settled it Ready, 0
-	// otherwise. Distinct from StorageReady: this covers the whole
-	// Application (Deployment/Service/ConfigMap/Ingress/HPA/PDB/Secret, not
-	// just storage), answering "which Applications are unhealthy right now"
-	// fleet-wide -- a question no existing metric (ours or
-	// controller-runtime's own generic per-controller counters) can answer,
-	// since those only give rates of past reconcile attempts, not current
-	// state. Same cardinality shape and same series-deletion-on-finalize
-	// discipline as StorageReady.
+	// ApplicationReady reflects the current overall Ready condition -- the
+	// whole Application (Deployment/Service/ConfigMap/Ingress/HPA/PDB/Secret),
+	// not just storage. Answers "which Applications are unhealthy right now"
+	// fleet-wide, a question a reconcile-attempt-rate counter can't. Same
+	// cardinality shape and series-deletion discipline as StorageReady.
 	ApplicationReady = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "forge_application_ready",
@@ -124,18 +133,14 @@ var (
 	)
 
 	// RateLimitWaitDuration times how long a single outgoing AWS/Akamai
-	// call actually waited on this operator's own rate limiter (see
+	// call waited on this operator's own rate limiter (see
 	// internal/controller/ratelimit) before proceeding, by limiter (s3,
-	// iam, akamai_account, akamai_object -- the same four independent
-	// surfaces ratelimit's package doc explains). Near-zero across the
-	// board means the current QPS/burst defaults have headroom; a
-	// distribution creeping up on one limiter specifically is the signal
-	// to raise that surface's *_RATE_LIMIT_QPS/_BURST env var, not the
-	// others. Buckets top out at 30s since storageReconcileTimeout (90s)
-	// and finalizerCleanupTimeout (5m) both allow multiple sequential
-	// calls per reconcile -- a single wait anywhere near those ceilings
-	// is already a problem worth seeing well before the reconcile itself
-	// times out.
+	// iam, akamai_account, akamai_object). Near-zero means current
+	// QPS/burst defaults have headroom; a distribution creeping up on one
+	// limiter is the signal to raise that surface's env var, not the
+	// others. Buckets top out at 30s -- well under storageReconcileTimeout
+	// (90s) -- so a wait approaching that ceiling is visible before the
+	// reconcile itself times out.
 	RateLimitWaitDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "forge_rate_limit_wait_duration_seconds",
@@ -152,6 +157,7 @@ func init() {
 		StorageReconcileDuration,
 		StorageReady,
 		StorageBucketAdoptedTotal,
+		StorageOwnershipReclaimedTotal,
 		FinalizerCleanupTotal,
 		FinalizerCleanupDuration,
 		ApplicationReady,

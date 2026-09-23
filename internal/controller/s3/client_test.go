@@ -2,6 +2,7 @@ package s3storage
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -24,9 +25,63 @@ func TestNewManager_ReturnsErrorWhenStorageSpecIsNil(t *testing.T) {
 	app := newTestApp()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", testLimiter(), testLimiter())
+	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", "arn:boundary", nil, testLimiter(), testLimiter())
 	if err == nil {
 		t.Fatalf("expected error when storage spec is nil, got nil")
+	}
+}
+
+func TestNewManager_ReturnsErrorWhenOIDCProviderARNMissing(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApp()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "", "oidc.example.com", "arn:boundary", nil, testLimiter(), testLimiter())
+	if err == nil {
+		t.Fatalf("expected error when OIDC_PROVIDER_ARN is empty, got nil")
+	}
+	if !strings.Contains(err.Error(), "OIDC_PROVIDER_ARN") {
+		t.Fatalf("expected the error to name OIDC_PROVIDER_ARN, got: %v", err)
+	}
+}
+
+func TestNewManager_ReturnsErrorWhenOIDCProviderURLMissing(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApp()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "", "arn:boundary", nil, testLimiter(), testLimiter())
+	if err == nil {
+		t.Fatalf("expected error when OIDC_PROVIDER_URL is empty, got nil")
+	}
+	if !strings.Contains(err.Error(), "OIDC_PROVIDER_URL") {
+		t.Fatalf("expected the error to name OIDC_PROVIDER_URL, got: %v", err)
+	}
+}
+
+func TestNewManager_ReturnsErrorWhenPermissionsBoundaryARNMissing(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApp()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", "", nil, testLimiter(), testLimiter())
+	if err == nil {
+		t.Fatalf("expected error when APP_IRSA_PERMISSIONS_BOUNDARY_ARN is empty, got nil")
+	}
+	if !strings.Contains(err.Error(), "APP_IRSA_PERMISSIONS_BOUNDARY_ARN") {
+		t.Fatalf("expected the error to name APP_IRSA_PERMISSIONS_BOUNDARY_ARN, got: %v", err)
 	}
 }
 
@@ -39,7 +94,7 @@ func TestNewManager_DefaultsRegionWhenUnset(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", testLimiter(), testLimiter())
+	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", "arn:boundary", nil, testLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -60,7 +115,7 @@ func TestNewManager_UsesConfiguredRegion(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testEUWestRegion}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", testLimiter(), testLimiter())
+	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", "arn:boundary", nil, testLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -81,9 +136,12 @@ func TestNewManager_ReturnsErrorWhenCredentialsSecretMissing(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", testLimiter(), testLimiter())
+	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", "arn:boundary", nil, testLimiter(), testLimiter())
 	if err == nil {
 		t.Fatalf("expected error when credentials secret is missing, got nil")
+	}
+	if !errors.Is(err, ErrCredentialsSecretNotFound) {
+		t.Fatalf("expected ErrCredentialsSecretNotFound, got %v", err)
 	}
 }
 
@@ -103,7 +161,7 @@ func TestNewManager_ReturnsErrorWhenCredentialsKeysMissing(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", testLimiter(), testLimiter())
+	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", "arn:boundary", nil, testLimiter(), testLimiter())
 	if err == nil {
 		t.Fatalf("expected error when AWS_SECRET_ACCESS_KEY is missing from secret, got nil")
 	}
@@ -128,7 +186,7 @@ func TestNewManager_SucceedsWithCredentialsSecret(t *testing.T) {
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", testLimiter(), testLimiter())
+	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", "arn:boundary", nil, testLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -146,7 +204,7 @@ func TestNewManager_PropagatesServiceAccountAndOIDCFields(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app, "custom-sa", "arn:oidc:role", "oidc.example.com/id/XYZ", testLimiter(), testLimiter())
+	manager, err := NewManager(context.Background(), fakeClient, app, "custom-sa", "arn:oidc:role", "oidc.example.com/id/XYZ", "arn:boundary", nil, testLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -155,6 +213,9 @@ func TestNewManager_PropagatesServiceAccountAndOIDCFields(t *testing.T) {
 	}
 	if manager.OIDCProviderARN != "arn:oidc:role" {
 		t.Errorf("expected OIDCProviderARN arn:oidc:role, got %q", manager.OIDCProviderARN)
+	}
+	if manager.PermissionsBoundaryARN != "arn:boundary" {
+		t.Errorf("expected PermissionsBoundaryARN arn:boundary, got %q", manager.PermissionsBoundaryARN)
 	}
 	if manager.OIDCProviderURL != "oidc.example.com/id/XYZ" {
 		t.Errorf("expected OIDCProviderURL oidc.example.com/id/XYZ, got %q", manager.OIDCProviderURL)
@@ -187,7 +248,7 @@ func TestNewManager_S3LimiterAppliesToS3ClientNotIAMClient(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", blockedLimiter(), rate.NewLimiter(rate.Inf, 1))
+	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", "arn:boundary", nil, blockedLimiter(), rate.NewLimiter(rate.Inf, 1))
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -214,7 +275,7 @@ func TestNewManager_IAMLimiterAppliesToIAMClientNotS3Client(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", rate.NewLimiter(rate.Inf, 1), blockedLimiter())
+	manager, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", "arn:boundary", nil, rate.NewLimiter(rate.Inf, 1), blockedLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}

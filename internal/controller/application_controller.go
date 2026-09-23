@@ -47,16 +47,14 @@ import (
 // readinessRequeueInterval is how soon Reconcile re-checks readiness when not yet ready.
 const readinessRequeueInterval = 10 * time.Second
 
-// storageResyncInterval is how often a settled, storage-backed Application re-verifies its cloud bucket still exists.
-const storageResyncInterval = 10 * time.Minute
-
 // ApplicationReconciler reconciles a Application object
 type ApplicationReconciler struct {
 	client.Client
-	Scheme          *runtime.Scheme
-	Recorder        events.EventRecorder
-	OIDCProviderARN string
-	OIDCProviderURL string
+	Scheme                 *runtime.Scheme
+	Recorder               events.EventRecorder
+	OIDCProviderARN        string
+	OIDCProviderURL        string
+	PermissionsBoundaryARN string
 
 	// DefaultAkamaiRegion is used for Akamai/Linode storage when an
 	// Application doesn't set spec.storage.region itself. It should match
@@ -66,23 +64,20 @@ type ApplicationReconciler struct {
 	// only ever be correct for one specific deployment.
 	DefaultAkamaiRegion string
 
-	// Rate limiters for this operator's own outgoing AWS/Akamai calls --
-	// independent of MaxConcurrentReconciles, which bounds reconcile
-	// parallelism, not external call rate. See
-	// internal/controller/ratelimit's package doc for why each surface
-	// gets its own limiter instead of sharing one budget.
+	// Rate limiters for this operator's own outgoing AWS/Akamai
 	S3RateLimiter            *rate.Limiter
 	IAMRateLimiter           *rate.Limiter
 	AkamaiAccountRateLimiter *rate.Limiter
 	AkamaiObjectRateLimiter  *rate.Limiter
+	MaxConcurrentReconciles  int
 
-	// MaxConcurrentReconciles bounds how many Applications this controller
-	// reconciles in parallel -- independent of the rate limiters above,
-	// which bound external call *rate*, not reconcile *parallelism*. Set
-	// via MAX_CONCURRENT_RECONCILES (see cmd/main.go); SetupWithManager
-	// falls back to 5 for a zero value, so tests and any caller that
-	// doesn't set this field explicitly keep today's behavior.
-	MaxConcurrentReconciles int
+	// StorageResyncInterval is how often a settled, storage-backed
+	// Application re-verifies its cloud bucket still exists (see
+	// resolveStorageResyncInterval for the zero-value fallback). Configurable
+	// down from its 10-minute production default so tests -- e2e chaos
+	// scenarios in particular -- can prove drift detection actually works
+	// within a bounded wait, not just trust the code path exists.
+	StorageResyncInterval time.Duration
 
 	StatusManager *statusmanager.StatusManager
 }
@@ -97,6 +92,7 @@ type ApplicationReconciler struct {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get
 
 // Reconcile drives the cluster state toward the Application's desired state.
 func (r *ApplicationReconciler) Reconcile(
@@ -155,7 +151,7 @@ func (r *ApplicationReconciler) Reconcile(
 
 	if err := r.ensureDesiredState(ctx, application); err != nil {
 		logger.Error(err, "Failed to reconcile desired state")
-		if statusErr := r.StatusManager.SetFailed(ctx, application, err); statusErr != nil {
+		if statusErr := r.StatusManager.SetFailed(ctx, application, reconcileFailureReason(err), err); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
 		forgemetrics.ApplicationReady.WithLabelValues(application.Namespace, application.Name).Set(0)
@@ -165,7 +161,7 @@ func (r *ApplicationReconciler) Reconcile(
 	ready, reason, err := r.StatusManager.EvaluateComputeReadiness(ctx, application)
 	if err != nil {
 		logger.Error(err, "Failed to evaluate Application readiness")
-		if statusErr := r.StatusManager.SetFailed(ctx, application, err); statusErr != nil {
+		if statusErr := r.StatusManager.SetFailed(ctx, application, statusmanager.ReasonFailed, err); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
 		forgemetrics.ApplicationReady.WithLabelValues(application.Namespace, application.Name).Set(0)
@@ -188,7 +184,7 @@ func (r *ApplicationReconciler) Reconcile(
 	forgemetrics.ApplicationReady.WithLabelValues(application.Namespace, application.Name).Set(1)
 
 	if application.Spec.Storage != nil {
-		return ctrl.Result{RequeueAfter: storageResyncInterval}, nil
+		return ctrl.Result{RequeueAfter: resolveStorageResyncInterval(r.StorageResyncInterval)}, nil
 	}
 
 	return ctrl.Result{}, nil
@@ -208,6 +204,22 @@ const defaultMaxConcurrentReconciles = 5
 func resolveMaxConcurrentReconciles(configured int) int {
 	if configured <= 0 {
 		return defaultMaxConcurrentReconciles
+	}
+	return configured
+}
+
+// defaultStorageResyncInterval is resolveStorageResyncInterval's fallback
+// when StorageResyncInterval is left at its zero value -- preserves this
+// controller's original, only-ever interval (a plain literal here before
+// STORAGE_RESYNC_INTERVAL existed) for any caller that doesn't set the field
+// explicitly, tests included.
+const defaultStorageResyncInterval = 10 * time.Minute
+
+// resolveStorageResyncInterval applies defaultStorageResyncInterval's floor
+// to a configured value, mirroring resolveMaxConcurrentReconciles.
+func resolveStorageResyncInterval(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return defaultStorageResyncInterval
 	}
 	return configured
 }

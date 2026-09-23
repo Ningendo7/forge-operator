@@ -122,7 +122,10 @@ var _ = Describe("Application Webhook", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("rejects an AWS Application whose secretName Secret doesn't exist", func() {
+		It("admits, with a warning, an AWS Application whose secretName Secret doesn't exist yet", func() {
+			// A GitOps tool may apply the Application before its Secret --
+			// rejecting here would break that ordering, and reconciliation
+			// already surfaces a missing Secret as a Degraded condition.
 			obj.Name = "aws-app"
 			obj.Namespace = namespace
 			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
@@ -130,12 +133,12 @@ var _ = Describe("Application Webhook", func() {
 				Bucket:     testBucket,
 				SecretName: "whatever",
 			}
-			_, err := validator.ValidateCreate(ctx, obj)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("not found"))
+			warnings, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(ContainElement(ContainSubstring("not found")))
 		})
 
-		It("rejects an AWS Application whose secretName Secret is missing required keys", func() {
+		It("admits, with a warning, an AWS Application whose secretName Secret is missing required keys", func() {
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: "aws-creds-no-keys", Namespace: namespace},
 				Data:       map[string][]byte{"other-key": []byte("value")},
@@ -150,10 +153,12 @@ var _ = Describe("Application Webhook", func() {
 				Bucket:     testBucket,
 				SecretName: "aws-creds-no-keys",
 			}
-			_, err := validator.ValidateCreate(ctx, obj)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("AWS_ACCESS_KEY_ID"))
-			Expect(err.Error()).To(ContainSubstring("AWS_SECRET_ACCESS_KEY"))
+			warnings, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(ContainElement(And(
+				ContainSubstring("AWS_ACCESS_KEY_ID"),
+				ContainSubstring("AWS_SECRET_ACCESS_KEY"),
+			)))
 		})
 
 		It("admits a valid AWS Application with a distinct, existing credentials Secret", func() {
@@ -304,18 +309,6 @@ var _ = Describe("Application Webhook", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("rejects removing spec.secret while spec.container.secretName still references it", func() {
-			oldObj.Name = "orphan-secret-app"
-			oldObj.Spec.Secret = &forgev1alpha1.SecretSpec{Name: "orphan-secret-app-secret"}
-			oldObj.Spec.Container.SecretName = "orphan-secret-app-secret"
-			newObj := oldObj.DeepCopy()
-			newObj.Spec.Secret = nil
-
-			_, err := validator.ValidateUpdate(ctx, oldObj, newObj)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("spec.secret cannot be removed"))
-		})
-
 		It("rejects spec.storage.akamai set when provider is AWS, enforced by the CRD's CEL rule at the API server", func() {
 			obj.Name = "incompatible-aws-app"
 			obj.Namespace = namespace
@@ -358,7 +351,7 @@ var _ = Describe("Application Webhook", func() {
 			Expect(err.Error()).To(ContainSubstring("must not be the same Secret"))
 		})
 
-		It("rejects an Akamai Application whose token Secret doesn't exist", func() {
+		It("admits, with a warning, an Akamai Application whose token Secret doesn't exist yet", func() {
 			obj.Name = "missing-secret-app"
 			obj.Namespace = namespace
 			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
@@ -366,12 +359,12 @@ var _ = Describe("Application Webhook", func() {
 				Bucket:   testBucket,
 				Akamai:   &forgev1alpha1.AkamaiStorageSpec{AccessKeySecretRef: "does-not-exist"},
 			}
-			_, err := validator.ValidateCreate(ctx, obj)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("not found"))
+			warnings, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(ContainElement(ContainSubstring("not found")))
 		})
 
-		It("rejects an Akamai Application whose token Secret is missing the apiToken key", func() {
+		It("admits, with a warning, an Akamai Application whose token Secret is missing the apiToken key", func() {
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: "token-no-key", Namespace: namespace},
 				Data:       map[string][]byte{"other-key": []byte("value")},
@@ -386,9 +379,9 @@ var _ = Describe("Application Webhook", func() {
 				Bucket:   testBucket,
 				Akamai:   &forgev1alpha1.AkamaiStorageSpec{AccessKeySecretRef: "token-no-key"},
 			}
-			_, err := validator.ValidateCreate(ctx, obj)
-			Expect(err).To(HaveOccurred())
-			Expect(err.Error()).To(ContainSubstring("apiToken"))
+			warnings, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(warnings).To(ContainElement(ContainSubstring("apiToken")))
 		})
 
 		It("admits a valid Akamai Application with a distinct, existing token Secret", func() {

@@ -74,7 +74,7 @@ func TestSetFailed_SetsDegradedTrueAndReadyFalse(t *testing.T) {
 	app := newTestApplication()
 	s := newTestStatusManager(app)
 
-	if err := s.SetFailed(context.Background(), app, errors.New("boom")); err != nil {
+	if err := s.SetFailed(context.Background(), app, ReasonFailed, errors.New("boom")); err != nil {
 		t.Fatalf("SetFailed returned error: %v", err)
 	}
 
@@ -92,6 +92,24 @@ func TestSetFailed_SetsDegradedTrueAndReadyFalse(t *testing.T) {
 	}
 	if ready.Reason != ReasonFailed {
 		t.Errorf("expected reason %q, got %q", ReasonFailed, ready.Reason)
+	}
+}
+
+func TestSetFailed_UsesGivenReason(t *testing.T) {
+	app := newTestApplication()
+	s := newTestStatusManager(app)
+
+	if err := s.SetFailed(context.Background(), app, ReasonSecretNotFound, errors.New("boom")); err != nil {
+		t.Fatalf("SetFailed returned error: %v", err)
+	}
+
+	degraded := findCondition(app, TypeDegraded)
+	if degraded == nil || degraded.Reason != ReasonSecretNotFound {
+		t.Fatalf("expected Degraded reason %q, got %#v", ReasonSecretNotFound, degraded)
+	}
+	ready := findCondition(app, TypeReady)
+	if ready == nil || ready.Reason != ReasonSecretNotFound {
+		t.Fatalf("expected Ready reason %q, got %#v", ReasonSecretNotFound, ready)
 	}
 }
 

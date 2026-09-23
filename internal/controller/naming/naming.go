@@ -6,12 +6,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
-	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 )
 
 // AdoptBucketAnnotation, when set to "true" on an Application, tells the
@@ -22,7 +26,28 @@ import (
 // previously owned -- most commonly one left behind by
 // spec.storage.deletionPolicy: Retain. Shared between both provider
 // packages so the exact annotation key can never drift between them.
+//
+// On its own this only ever authorizes adoption within the same namespace
+// as the previous owner; taking a bucket across namespaces additionally
+// requires the previous owner's namespace to carry
+// AllowBucketAdoptionFromAnnotation (see EvaluateBucketAdoption).
 const AdoptBucketAnnotation = "forge-operator.ningendo7.github.io/adopt-bucket"
+
+// StorageOwnershipIDAnnotation records a random, operator-generated identity
+// for this Application's storage ownership (see storage.go's
+// ensureStorageOwnershipID, which generates and persists it once and never
+// regenerates one that's already present). Neither of the two identifiers
+// ownership already relies on survives a Velero restore or cluster
+// migration: metadata.uid is server-assigned and can never be preserved
+// across recreation, and Status.Storage.CreatedAt lives on a subresource
+// that restore tooling generally can't populate via a plain Create call.
+// This annotation is ordinary object metadata with no such gate, so both
+// naturally carry it forward -- letting a genuinely restored Application
+// reclaim its own bucket automatically (see claimOrVerifyOwnership in the
+// s3 and Akamai-Obj-Str packages) without a human setting
+// AdoptBucketAnnotation by hand, while a merely name-colliding new
+// Application -- which was never handed this value -- still can't.
+const StorageOwnershipIDAnnotation = "forge-operator.ningendo7.github.io/storage-ownership-id"
 
 // AdoptBucketAnnotationValue is the value AdoptBucketAnnotation must be set
 // to for it to take effect (kept alongside the key so both packages read it
@@ -30,34 +55,21 @@ const AdoptBucketAnnotation = "forge-operator.ningendo7.github.io/adopt-bucket"
 const AdoptBucketAnnotationValue = "true"
 
 // ApplicationExistsWithUID reports whether any Application in the cluster
-// currently has the given UID. AdoptBucketAnnotation's whole premise is
-// taking over a bucket left behind by an Application that's genuinely
-// gone (most commonly one retained via spec.storage.deletionPolicy:
-// Retain) -- but the ownership tag/marker it's overwriting only ever
-// stores a bare UID, with no namespace/name to check directly, and
-// Kubernetes has no "get by UID" lookup. Listing every Application and
-// scanning for a match is the only way to answer "is the previous owner
-// actually gone" rather than just assuming it because the annotation was
-// set, which is what let a live, still-in-use bucket be silently taken
-// over from its still-running owner before this existed.
+// currently has the given UID. The ownership tag/marker AdoptBucketAnnotation
+// overwrites only ever stores a bare UID with no namespace/name, and
+// Kubernetes has no "get by UID" lookup, so listing and scanning is the only
+// way to confirm the previous owner is actually gone rather than assuming it
+// from the annotation alone.
 //
-// Deliberately checks existence, not readiness: an Application mid
-// transient failure (a flaky dependency, a brief misconfiguration --
-// anything recoverable) must not become adoptable by anyone with the
-// annotation just because it's temporarily not Ready. Only a Kubernetes
-// object that's actually gone from the API server counts as "gone" here.
+// Deliberately checks existence, not readiness: an Application mid transient
+// failure must not become adoptable just because it's temporarily not Ready.
 //
-// Requires cluster-wide list/watch on Applications -- already granted
-// unconditionally in this chart's default (ClusterRole) RBAC mode, since
-// any cluster-scoped operator needs it to reconcile every Application in
-// every namespace regardless of this function. If this chart is instead
-// deployed with rbac.namespaced: true (a Role, not a ClusterRole), this
-// List call will only ever see Applications in the operator's own
-// namespace, or fail outright with Forbidden -- callers MUST treat any
-// non-nil error here as "cannot confirm the previous owner is gone" and
-// refuse the adoption, not as "must be gone since we couldn't find it".
-// Silently permitting a live takeover under reduced RBAC would be far
-// worse than adopt-bucket simply not working there.
+// Requires cluster-wide list/watch on Applications (already granted under
+// this chart's default ClusterRole RBAC). Under rbac.namespaced: true (a
+// Role instead), this only sees Applications in the operator's own
+// namespace or fails with Forbidden -- callers MUST treat any non-nil error
+// as "cannot confirm the previous owner is gone" and refuse the adoption,
+// never as "must be gone since we couldn't find it".
 func ApplicationExistsWithUID(ctx context.Context, c client.Client, uid types.UID) (bool, error) {
 	if uid == "" {
 		return false, nil
@@ -74,6 +86,82 @@ func ApplicationExistsWithUID(ctx context.Context, c client.Client, uid types.UI
 		}
 	}
 	return false, nil
+}
+
+// AllowBucketAdoptionFromAnnotation, set on a Namespace object, grants
+// Applications in the named namespace(s) (comma-separated, or "*" for any)
+// permission to adopt buckets left behind by Applications that lived in
+// this namespace. Lives on the Namespace, not the adopting Application:
+// editing a Namespace typically requires separate, more-privileged RBAC
+// than editing Applications inside one, so an ordinary tenant can't grant
+// this to themselves.
+const AllowBucketAdoptionFromAnnotation = "forge.ningendo7.github.io/allow-bucket-adoption-from"
+
+// CrossNamespaceAdoptionAllowed reports whether ownerNamespace's Namespace
+// object grants adoptingNamespace permission to adopt buckets it left
+// behind, via AllowBucketAdoptionFromAnnotation.
+func CrossNamespaceAdoptionAllowed(ctx context.Context, c client.Client, ownerNamespace, adoptingNamespace string) (bool, error) {
+	var ns corev1.Namespace
+	if err := c.Get(ctx, types.NamespacedName{Name: ownerNamespace}, &ns); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to get namespace %q while checking cross-namespace bucket adoption grant: %w", ownerNamespace, err)
+	}
+
+	grant := ns.Annotations[AllowBucketAdoptionFromAnnotation]
+	if grant == "" {
+		return false, nil
+	}
+	if grant == "*" {
+		return true, nil
+	}
+	for _, allowed := range strings.Split(grant, ",") {
+		if strings.TrimSpace(allowed) == adoptingNamespace {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// EvaluateBucketAdoption decides whether adoptingNamespace may take over a
+// bucket whose ownership tag/marker names ownerUID. ownerNamespace is the
+// namespace recorded alongside that UID at tag/marker-write time -- "" means
+// the bucket was tagged before namespace-scoped ownership shipped and its
+// owner's namespace is unknown. Returns nil to allow adoption, or an error
+// explaining the refusal otherwise.
+//
+// Same-namespace adoption is allowed automatically once the previous owner
+// is confirmed gone. Cross-namespace adoption additionally requires an
+// explicit grant on the previous owner's Namespace object (see
+// AllowBucketAdoptionFromAnnotation). Buckets with no owner namespace
+// recorded refuse cross-namespace adoption unconditionally until re-tagged
+// -- there's nothing to check a grant against.
+func EvaluateBucketAdoption(ctx context.Context, c client.Client, ownerUID types.UID, ownerNamespace, adoptingNamespace string) error {
+	exists, err := ApplicationExistsWithUID(ctx, c, ownerUID)
+	if err != nil {
+		return fmt.Errorf("could not confirm the previous owner no longer exists: %w", err)
+	}
+	if exists {
+		return errors.New("the Application that currently owns this bucket still exists")
+	}
+
+	if ownerNamespace == "" {
+		return fmt.Errorf("this bucket's ownership was recorded before namespace-scoped adoption shipped; re-tag it manually before adopting")
+	}
+	if ownerNamespace == adoptingNamespace {
+		return nil
+	}
+
+	allowed, err := CrossNamespaceAdoptionAllowed(ctx, c, ownerNamespace, adoptingNamespace)
+	if err != nil {
+		return fmt.Errorf("could not verify cross-namespace bucket adoption grant: %w", err)
+	}
+	if !allowed {
+		return fmt.Errorf("cross-namespace adoption (%s -> %s) requires namespace %q to carry the %s annotation naming %q",
+			ownerNamespace, adoptingNamespace, ownerNamespace, AllowBucketAdoptionFromAnnotation, adoptingNamespace)
+	}
+	return nil
 }
 
 // Service returns the name of the Application's Service.
@@ -111,15 +199,6 @@ func AppConfigMap(application *forgev1alpha1.Application) string {
 		return application.Spec.ConfigMap.Name
 	}
 	return application.Name + "-config"
-}
-
-// AppSecret returns the name of the operator-managed app Secret, honoring
-// spec.secret.name when set. Exported for the same reason as AppConfigMap.
-func AppSecret(application *forgev1alpha1.Application) string {
-	if application.Spec.Secret != nil && application.Spec.Secret.Name != "" {
-		return application.Spec.Secret.Name
-	}
-	return application.Name + "-secret"
 }
 
 // StorageSecret returns the name of the operator-managed Secret that holds

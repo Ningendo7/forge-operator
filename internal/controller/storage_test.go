@@ -7,6 +7,7 @@ import (
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
 	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
+	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
@@ -324,6 +325,54 @@ func TestReconcileStorageSecret_DoesNotOwnAWSStaticCredentialsSecret(t *testing.
 	}
 }
 
+// --- ensureStorageOwnershipID ---
+
+func TestEnsureStorageOwnershipID_GeneratesAndPersistsWhenAbsent(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.ensureStorageOwnershipID(context.Background(), app); err != nil {
+		t.Fatalf("ensureStorageOwnershipID returned error: %v", err)
+	}
+
+	id := app.Annotations[naming.StorageOwnershipIDAnnotation]
+	if id == "" {
+		t.Fatalf("expected a non-empty ownership ID to be set on the in-memory Application")
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+	if got.Annotations[naming.StorageOwnershipIDAnnotation] != id {
+		t.Fatalf("expected the ownership ID to be persisted to the API server, got %q", got.Annotations[naming.StorageOwnershipIDAnnotation])
+	}
+}
+
+func TestEnsureStorageOwnershipID_DoesNotRegenerateWhenPresent(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Annotations = map[string]string{naming.StorageOwnershipIDAnnotation: "existing-id"}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.ensureStorageOwnershipID(context.Background(), app); err != nil {
+		t.Fatalf("ensureStorageOwnershipID returned error: %v", err)
+	}
+
+	if got := app.Annotations[naming.StorageOwnershipIDAnnotation]; got != "existing-id" {
+		t.Fatalf("expected the existing ownership ID to be left unchanged, got %q", got)
+	}
+}
+
 // --- reconcileStorage dispatch ---
 
 func TestReconcileStorage_NilStorageReconcilesSecretOnly(t *testing.T) {
@@ -529,6 +578,40 @@ func TestReconcileStorage_MatchingBucketIdentityDoesNotTriggerCleanup(t *testing
 	}
 }
 
+func TestReconcileStorage_SetsOwnershipIDAnnotationOnFirstReconcile(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		Region:   testWestRegion,
+	}
+
+	withS3StorageManager(t, &mockS3StorageManager{
+		reconcileBucketFunc: func(ctx context.Context) (*s3storage.StorageResult, error) {
+			return &s3storage.StorageResult{}, nil
+		},
+	})
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	if err := r.reconcileStorage(context.Background(), app); err != nil {
+		t.Fatalf("reconcileStorage returned error: %v", err)
+	}
+
+	got := &forgev1alpha1.Application{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: testAppName, Namespace: testNamespace}, got); err != nil {
+		t.Fatalf("failed to get Application: %v", err)
+	}
+	if got.Annotations[naming.StorageOwnershipIDAnnotation] == "" {
+		t.Fatalf("expected a storage ownership ID to be persisted after reconciling storage")
+	}
+}
+
 func TestReconcileStorage_ReturnsErrorAndSetsStatusForUnsupportedProvider(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)
@@ -667,6 +750,8 @@ func withS3StorageManager(t *testing.T, m *mockS3StorageManager) {
 		serviceAccountName string,
 		oidcProviderARN string,
 		oidcProviderURL string,
+		permissionsBoundaryARN string,
+		recordCreated func(ctx context.Context) error,
 		s3Limiter *rate.Limiter,
 		iamLimiter *rate.Limiter,
 	) (s3StorageManager, error) {
@@ -685,6 +770,8 @@ func withFailingS3StorageManagerConstruction(t *testing.T, constructErr error) {
 		serviceAccountName string,
 		oidcProviderARN string,
 		oidcProviderURL string,
+		permissionsBoundaryARN string,
+		recordCreated func(ctx context.Context) error,
 		s3Limiter *rate.Limiter,
 		iamLimiter *rate.Limiter,
 	) (s3StorageManager, error) {
@@ -959,6 +1046,7 @@ func withAkamaiStorageManager(t *testing.T, m *mockAkamaiStorageManager) {
 		c client.Client,
 		application *forgev1alpha1.Application,
 		defaultRegion string,
+		recordCreated func(ctx context.Context) error,
 		accountLimiter *rate.Limiter,
 		objectLimiter *rate.Limiter,
 	) (akamaiStorageManager, error) {
@@ -975,6 +1063,7 @@ func withFailingAkamaiStorageManagerConstruction(t *testing.T, constructErr erro
 		c client.Client,
 		application *forgev1alpha1.Application,
 		defaultRegion string,
+		recordCreated func(ctx context.Context) error,
 		accountLimiter *rate.Limiter,
 		objectLimiter *rate.Limiter,
 	) (akamaiStorageManager, error) {

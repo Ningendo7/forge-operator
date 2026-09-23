@@ -2,10 +2,12 @@ package akamaiobjstr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -47,6 +49,13 @@ type Manager struct {
 	bucket string
 	region string
 
+	// recordCreated persists Application.Status recording that this Manager
+	// itself just created the bucket -- injected by the caller (storage.go)
+	// rather than written here, so this package never needs to know
+	// Application.Status's shape or how it's durably persisted. nil for
+	// cleanup-only managers, which never call recordBucketCreated.
+	recordCreated func(ctx context.Context) error
+
 	// objectLimiter paces calls to this bucket's own S3-compatible
 	// endpoint (marker GetObject/PutObject) -- stored on Manager rather
 	// than applied once at construction like s3client/iamclient in the
@@ -77,13 +86,11 @@ type s3ObjectAPI interface {
 }
 
 // newS3ObjectClient is a var-bound constructor so tests can substitute a
-// fake S3-compatible client; production code always builds a real one.
-// Path-style addressing is used against the bucket's own resolved cluster
-// endpoint (the bucket name already stripped back off its hostname) rather
-// than guessing a generic "<region>.linodeobjects.com" endpoint -- Linode
-// can return a bucket hostname on a different numbered sub-cluster than the
-// account's nominal region cluster (observed live: cluster "us-iad-1"
-// registered, but the bucket's actual hostname was on "us-iad-10").
+// fake S3-compatible client. Path-style addressing is used against the
+// bucket's own resolved cluster endpoint, not a guessed
+// "<region>.linodeobjects.com" -- Linode can place a bucket on a different
+// numbered sub-cluster than the account's nominal region (e.g. cluster
+// "us-iad-1" registered, but the bucket actually lives on "us-iad-10").
 var newS3ObjectClient = func(region, clusterEndpoint, accessKey, secretKey string, objectLimiter *rate.Limiter) s3ObjectAPI {
 	cfg := aws.Config{
 		Region:      region,
@@ -101,19 +108,12 @@ var newS3ObjectClient = func(region, clusterEndpoint, accessKey, secretKey strin
 		o.BaseEndpoint = aws.String("https://" + clusterEndpoint)
 		o.UsePathStyle = true
 
-		// aws-sdk-go-v2 defaults to computing a flexible checksum (CRC32,
-		// sent via an aws-chunked trailer) on every PutObject/GetObject
-		// call since it added that feature -- AWS itself handles this
-		// fine, but Akamai/Linode's Ceph RGW-based Object Storage does
-		// not: it accepts the request and returns success with no error,
-		// but silently never persists the body. Confirmed live: writing
-		// the ownership marker via this client reported success on every
-		// call, yet the object was never actually retrievable afterward,
-		// while writing the identical key/content via a plain S3 client
-		// (mc) round-tripped correctly immediately. WhenRequired restores
-		// the classic behavior (only checksum when the operation actually
-		// demands one), matching how every other S3-compatible provider
-		// with this same incompatibility is worked around.
+		// aws-sdk-go-v2 defaults to computing a flexible checksum (CRC32) on
+		// every PutObject/GetObject call. AWS handles this fine, but
+		// Akamai/Linode's Ceph RGW-based Object Storage silently accepts
+		// the request and never persists the body -- no error, just data
+		// loss. WhenRequired restores the classic behavior (checksum only
+		// when the operation actually demands one).
 		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 	})
@@ -127,21 +127,24 @@ func (m *Manager) s3ClientFor(bucketHostname, accessKey, secretKey string) s3Obj
 	return newS3ObjectClient(m.region, clusterEndpoint, accessKey, secretKey, m.objectLimiter)
 }
 
+// ErrTokenSecretNotFound means the Akamai API token Secret
+// (spec.storage.akamai.accessKeySecretRef) doesn't exist yet -- distinct
+// from other NewManager errors so callers can surface a specific,
+// filterable status reason instead of a generic failure.
+var ErrTokenSecretNotFound = errors.New("token secret not found")
+
 // NewManager creates a new Manager instance for managing Akamai interactions.
-// defaultRegion is used only when the Application doesn't set
-// spec.storage.region itself; it's the operator's own DEFAULT_AKAMAI_REGION
-// configuration (see cmd/main.go), not a value guessed here. There's no
-// further hardcoded fallback: this repo's own Terraform provisions its LKE
-// cluster in a specific region, and a literal baked into this package would
-// only ever be correct for that one deployment. If both are unset, region
-// ends up empty and Linode's API rejects the request with a clear error,
-// which is preferable to silently defaulting to a region that may not match
-// wherever the operator is actually running.
+// defaultRegion is used only when spec.storage.region is unset -- the
+// operator's own DEFAULT_AKAMAI_REGION (see cmd/main.go), never a hardcoded
+// fallback baked into this package, since that would only ever be correct
+// for one deployment. If both are unset, region ends up empty and Linode's
+// API rejects the request with a clear error rather than silently guessing.
 func NewManager(
 	ctx context.Context,
 	k8sClient client.Client,
 	app *forgev1alpha1.Application,
 	defaultRegion string,
+	recordCreated func(ctx context.Context) error,
 	accountLimiter *rate.Limiter,
 	objectLimiter *rate.Limiter,
 ) (*Manager, error) {
@@ -157,14 +160,10 @@ func NewManager(
 		region = defaultRegion
 	}
 
-	// naming.AkamaiTokenSecret is deliberately a different Secret (and
-	// different default name) than naming.StorageSecret: that one is the
-	// operator's own generated output (bucket access/secret key), owned and
-	// overwritten by the controller. Reusing its name here for the
-	// user-supplied input token would mean the operator's SSA-applied output
-	// fields and the controller-owned lifecycle (SetControllerReference, so
-	// the Secret gets garbage collected with the Application) would apply to
-	// the user's manually-created token Secret too.
+	// A deliberately different Secret than naming.StorageSecret: that one is
+	// the operator's own generated, owned-and-overwritten output. Reusing
+	// its name for this user-supplied input token would apply the same
+	// SSA/garbage-collection lifecycle to a Secret the user manages.
 	secretName := naming.AkamaiTokenSecret(app)
 
 	var secret corev1.Secret
@@ -174,6 +173,9 @@ func NewManager(
 	}
 
 	if err := k8sClient.Get(ctx, secretKey, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("%w: %s", ErrTokenSecretNotFound, secretName)
+		}
 		return nil, fmt.Errorf("failed to get secret %s: %w", secretName, err)
 	}
 
@@ -182,17 +184,11 @@ func NewManager(
 		return nil, fmt.Errorf("key 'apiToken' not found in secret %s", secretName)
 	}
 
-	// Initialize linode client. linodego has no OTel middleware of its own
-	// (unlike aws-sdk-go-v2's otelaws above), but it accepts a plain
+	// linodego has no OTel middleware of its own, but accepts a plain
 	// *http.Client -- wrapping its Transport with otelhttp.NewTransport
-	// auto-instruments every linodego call (bucket/key management) the same
-	// "free," no-per-call-code way otelaws covers AWS.
-	// Same reasoning as s3/client.go's split between s3client and
-	// iamclient: Akamai's account API (bucket/key CRUD, this client) and
-	// its S3-compatible object endpoint (the marker writes s3ClientFor
-	// builds separately) are different infrastructure with different real
-	// capacities -- sharing one budget would throttle whichever has more
-	// headroom down to the other's ceiling.
+	// instruments every call the same way otelaws covers AWS. accountLimiter
+	// is separate from objectLimiter for the same reason s3/client.go splits
+	// s3client and iamclient: different infrastructure, different capacity.
 	tokenSource := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: string(tokenBytes)})
 	oauthClient := oauth2.NewClient(ctx, tokenSource)
 	oauthClient.Transport = otelhttp.NewTransport(ratelimit.NewRoundTripper(accountLimiter, oauthClient.Transport, "akamai_account"))
@@ -205,6 +201,7 @@ func NewManager(
 		storage:       storage,
 		bucket:        bucket,
 		region:        region,
+		recordCreated: recordCreated,
 		objectLimiter: objectLimiter,
 	}, nil
 }

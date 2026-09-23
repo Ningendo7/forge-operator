@@ -2,17 +2,10 @@
 
 // Package akamaiobjstr's integration tests exercise this Manager against a
 // real Akamai/Linode Object Storage account -- no Kubernetes cluster
-// involved (the Kubernetes-facing half of Manager is already well covered
-// by the fake-client unit tests in this same package; only the cloud-facing
-// half has ever gone untested by anything other than manual, ad-hoc live
-// cluster sessions). Every real bug found in this package during live
-// testing (access-key reuse returning an empty secret on a second
-// reconcile, the bucket never being emptied before deletion, ownership
-// verification gaps) was invisible to the mocked unit test suite by
-// construction: a mock only ever proves the code reacts correctly to what
-// the test author assumed the real API returns, never that the assumption
-// itself was right. These tests exist to catch exactly that category
-// again, automatically, before a human has to find it live.
+// involved (that half is already covered by this package's fake-client unit
+// tests). A mock only ever proves the code reacts correctly to what the test
+// author assumed the real API returns, never that the assumption itself was
+// right, so these tests exist to catch the category of bug a mock can't.
 //
 // Skipped entirely unless LINODE_TOKEN is set, so `go test ./...` and CI
 // never need real credentials. Run explicitly with:
@@ -116,7 +109,17 @@ func newIntegrationManager(t *testing.T, app *forgev1alpha1.Application, extraOb
 	}
 	fakeClient := builder.Build()
 
-	m, err := NewManager(context.Background(), fakeClient, app, integrationTestRegion)
+	recordCreated := func(ctx context.Context) error {
+		app.Status.Storage = &forgev1alpha1.StorageStatus{
+			Provider:  forgev1alpha1.ProviderAkamaiObjectStorage,
+			Bucket:    app.Spec.Storage.Bucket,
+			Created:   true,
+			CreatedAt: metav1.Now(),
+		}
+		return fakeClient.Status().Update(ctx, app)
+	}
+
+	m, err := NewManager(context.Background(), fakeClient, app, integrationTestRegion, recordCreated, testLimiter(), testLimiter())
 	if err != nil {
 		t.Fatalf("NewManager returned error: %v", err)
 	}
@@ -152,14 +155,9 @@ func TestIntegration_Akamai_BucketLifecycle_ReconcileRetryStillReturnsUsableSecr
 	}
 	firstAccessKey := result.AccessKey
 
-	// This is the exact regression class found live: ensureAccessKey found
-	// an existing key by label on a second call and returned an empty
-	// SecretKey instead of either reusing a recoverable one or issuing a
-	// fresh key -- silently breaking every reconcile after the first for
-	// that Application. A real second ReconcileBucket call is the only way
-	// to catch this: no mock of "what Linode's key API returns the second
-	// time" would have been written to include this bug, since nobody knew
-	// to assume it.
+	// A second reconcile (simulating an ordinary retry) must still return a
+	// usable secret key -- ensureAccessKey reusing an existing key by label
+	// must not silently return an empty one.
 	result2, err := m.ReconcileBucket(context.Background())
 	if err != nil {
 		t.Fatalf("second ReconcileBucket (simulating a retry) returned error: %v", err)
@@ -174,7 +172,7 @@ func TestIntegration_Akamai_BucketLifecycle_ReconcileRetryStillReturnsUsableSecr
 	// Prove the returned credentials are genuinely usable for real object
 	// I/O, using the exact same client construction path this Manager uses
 	// internally -- this is the actual point of the whole storage feature.
-	s3Client := newS3ObjectClient(integrationTestRegion, strings.TrimPrefix(result2.Endpoint, app.Spec.Storage.Bucket+"."), result2.AccessKey, result2.SecretKey)
+	s3Client := newS3ObjectClient(integrationTestRegion, strings.TrimPrefix(result2.Endpoint, app.Spec.Storage.Bucket+"."), result2.AccessKey, result2.SecretKey, testLimiter())
 	body := []byte("forge-operator integration test object")
 	if _, err := s3Client.PutObject(context.Background(), &s3sdk.PutObjectInput{
 		Bucket: aws.String(app.Spec.Storage.Bucket),
@@ -199,9 +197,8 @@ func TestIntegration_Akamai_BucketLifecycle_ReconcileRetryStillReturnsUsableSecr
 		t.Fatalf("expected object content %q, got %q", body, got)
 	}
 
-	// Real bucket-emptying-then-deletion, the other regression class found
-	// live (a bucket with real objects in it, not just the ownership
-	// marker, previously failed to delete at all).
+	// A bucket with real objects in it, not just the ownership marker, must
+	// still delete cleanly.
 	if _, err := m.DeleteBucket(context.Background()); err != nil {
 		t.Fatalf("DeleteBucket returned error: %v", err)
 	}
@@ -246,10 +243,8 @@ func TestIntegration_Akamai_Adoption_RefusesWhileOwnerStillExists_SucceedsOnceGo
 	adopterApp.Spec.Storage.Bucket = bucket
 	adopterApp.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
 
-	// First: the real owner Application object still exists (seeded
-	// alongside the adopter in the fake Kubernetes client) -- adoption
-	// must be refused even against a real bucket/marker, exactly the live
-	// takeover this check exists to close.
+	// Owner still exists (seeded alongside the adopter) -- adoption must be
+	// refused even against a real bucket/marker.
 	stillAlive := newIntegrationManager(t, adopterApp, *ownerApp)
 	if _, err := stillAlive.ReconcileBucket(context.Background()); !isBucketNotOwnedErr(err) {
 		t.Fatalf("expected adoption to be refused while the owner Application still exists, got %v", err)

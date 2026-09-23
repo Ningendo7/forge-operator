@@ -14,7 +14,6 @@ import (
 
 const (
 	testNamespace           = "default"
-	testAPIKey              = "API_KEY"
 	testCustomSecretName    = "custom-secret"
 	testCustomConfigMapName = "custom-config"
 	testCustomSAName        = "custom-sa"
@@ -29,7 +28,6 @@ const (
 	testHPAName             = "demo-app-hpa"
 	testDeploymentName      = "demo-app-deployment"
 	testPDBName             = "demo-app-pdb"
-	testAPIKeyValue         = "abc123"
 	testSecretAppName       = "demo-app-secret"
 	testOldName             = "old-name"
 	testNewName             = "new-name"

@@ -37,6 +37,11 @@ output "oidc_provider_arn" {
   value       = module.eks.oidc_provider_arn
 }
 
+output "app_irsa_permissions_boundary_arn" {
+  description = "Permissions boundary ARN the operator must set on every app-irsa-* role it creates (APP_IRSA_PERMISSIONS_BOUNDARY_ARN env var)"
+  value       = aws_iam_policy.app_irsa_boundary.arn
+}
+
 output "oidc_provider_url" {
   description = "OIDC provider URL (for IRSA configuration)"
   value       = module.eks.oidc_provider_url

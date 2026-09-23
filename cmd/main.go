@@ -91,6 +91,21 @@ func envInt(name string, fallback int) int {
 	return i
 }
 
+// envDuration reads name via time.ParseDuration (e.g. "15s", "10m"),
+// returning fallback if unset or unparseable -- same degrade-don't-crash
+// reasoning as envInt/envFloat.
+func envDuration(name string, fallback time.Duration) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fallback
+	}
+	return d
+}
+
 // nolint:gocyclo
 func main() {
 	var metricsAddr string
@@ -129,12 +144,8 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	// if the enable-http2 flag is false (the default), http/2 should be disabled
-	// due to its vulnerabilities. More specifically, disabling http/2 will
-	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
-	// Rapid Reset CVEs. For more information see:
-	// - https://github.com/advisories/GHSA-qppj-fm5r-hxr3
-	// - https://github.com/advisories/GHSA-4374-p667-p6c8
+	// Disabled by default: HTTP/2 Stream Cancellation and Rapid Reset CVEs
+	// (GHSA-qppj-fm5r-hxr3, GHSA-4374-p667-p6c8).
 	disableHTTP2 := func(c *tls.Config) {
 		setupLog.Info("Disabling HTTP/2")
 		c.NextProtos = []string{"http/1.1"}
@@ -161,10 +172,6 @@ func main() {
 
 	webhookServer := webhook.NewServer(webhookServerOptions)
 
-	// Metrics endpoint is enabled in 'config/default/kustomization.yaml'. The Metrics options configure the server.
-	// More info:
-	// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/metrics/server
-	// - https://book.kubebuilder.io/reference/metrics.html
 	metricsServerOptions := metricsserver.Options{
 		BindAddress:   metricsAddr,
 		SecureServing: secureMetrics,
@@ -172,21 +179,14 @@ func main() {
 	}
 
 	if secureMetrics {
-		// FilterProvider is used to protect the metrics endpoint with authn/authz.
-		// These configurations ensure that only authorized users and service accounts
-		// can access the metrics endpoint. The RBAC are configured in 'config/rbac/kustomization.yaml'. More info:
-		// https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/metrics/filters#WithAuthenticationAndAuthorization
+		// Enforces authn/authz on the metrics endpoint; RBAC lives in
+		// config/rbac/kustomization.yaml.
 		metricsServerOptions.FilterProvider = filters.WithAuthenticationAndAuthorization
 	}
 
-	// If the certificate is not specified, controller-runtime will automatically
-	// generate self-signed certificates for the metrics server. While convenient for development and testing,
-	// this setup is not recommended for production.
-	//
-	// TODO(user): If you enable certManager, uncomment the following lines:
-	// - [METRICS-WITH-CERTS] at config/default/kustomization.yaml to generate and use certificates
-	// managed by cert-manager for the metrics server.
-	// - [PROMETHEUS-WITH-CERTS] at config/prometheus/kustomization.yaml for TLS certification.
+	// With no certificate specified, controller-runtime self-signs one --
+	// fine for dev, not for production. To use cert-manager instead, enable
+	// [METRICS-WITH-CERTS] in config/default/kustomization.yaml.
 	if len(metricsCertPath) > 0 {
 		setupLog.Info("Initializing metrics certificate watcher using provided certificates",
 			"metrics-cert-path", metricsCertPath, "metrics-cert-name", metricsCertName, "metrics-cert-key", metricsCertKey)
@@ -198,18 +198,12 @@ func main() {
 
 	// secretCacheSelector restricts the manager's informer cache for Secrets to
 	// only the ones this operator itself creates and labels (see
-	// controller.SecretRoleLabel) -- not every Secret in the cluster. Without
-	// this, Owns(&corev1.Secret{}) in ApplicationReconciler.SetupWithManager
-	// makes the cache watch and hold a live copy of every Secret in every
-	// namespace, cluster-wide, in this pod's memory, regardless of whether the
-	// operator has any relationship to it -- a much bigger blast radius in
-	// practice than the RBAC grant on paper (RBAC still permits cluster-wide
-	// secret access; narrowing that is a separate, larger decision). Reads of
-	// arbitrary user-supplied credentials Secrets (spec.storage.secretName,
-	// spec.storage.akamai.accessKeySecretRef) still work: they're exempted
-	// from the cache entirely below (Client.Cache.DisableFor), so they go
-	// straight to the API server rather than being filtered out by this
-	// selector.
+	// controller.SecretRoleLabel). Without it, Owns(&corev1.Secret{}) in
+	// ApplicationReconciler.SetupWithManager would cache every Secret in
+	// every namespace cluster-wide in this pod's memory. Arbitrary
+	// user-supplied credentials Secrets (spec.storage.secretName,
+	// spec.storage.akamai.accessKeySecretRef) are exempted from the cache
+	// entirely below (Client.Cache.DisableFor) so reads of those still work.
 	secretRoleExists, err := labels.NewRequirement(controller.SecretRoleLabel, selection.Exists, nil)
 	if err != nil {
 		setupLog.Error(err, "Failed to build Secret cache label selector")
@@ -240,16 +234,9 @@ func main() {
 				DisableFor: []client.Object{&corev1.Secret{}},
 			},
 		},
-		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
-		// when the Manager ends. This requires the binary to immediately end when the
-		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly
-		// speeds up voluntary leader transitions as the new leader don't have to wait
-		// LeaseDuration time first.
-		//
-		// In the default scaffold provided, the program ends immediately after
-		// the manager stops, so would be fine to enable this option. However,
-		// if you are doing or is intended to do any operation such as perform cleanups
-		// after the manager stops then its usage might be unsafe.
+		// LeaderElectionReleaseOnCancel speeds up leader transitions but requires
+		// the binary to exit immediately once the Manager stops -- unsafe if
+		// anything here ever runs cleanup after that point.
 		// LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
@@ -290,6 +277,7 @@ func main() {
 	oidcProviderARN := os.Getenv("OIDC_PROVIDER_ARN")
 	oidcProviderURL := os.Getenv("OIDC_PROVIDER_URL")
 	defaultAkamaiRegion := os.Getenv("DEFAULT_AKAMAI_REGION")
+	permissionsBoundaryARN := os.Getenv("APP_IRSA_PERMISSIONS_BOUNDARY_ARN")
 
 	// Rate limiting for this operator's own outgoing AWS/Akamai calls --
 	// independent of MaxConcurrentReconciles. Each surface gets its own
@@ -320,18 +308,26 @@ func main() {
 	// original, only-ever value from before this was configurable.
 	maxConcurrentReconciles := envInt("MAX_CONCURRENT_RECONCILES", 5)
 
+	// How often a settled, storage-backed Application re-verifies its cloud
+	// bucket still exists. Configurable down from the 10-minute production
+	// default so e2e drift-detection tests can prove this actually works
+	// within a bounded wait rather than trusting the code path exists.
+	storageResyncInterval := envDuration("STORAGE_RESYNC_INTERVAL", 10*time.Minute)
+
 	if err := (&controller.ApplicationReconciler{
 		Client:                   mgr.GetClient(),
 		Scheme:                   mgr.GetScheme(),
 		Recorder:                 mgr.GetEventRecorder("forge-operator"),
 		OIDCProviderARN:          oidcProviderARN,
 		OIDCProviderURL:          oidcProviderURL,
+		PermissionsBoundaryARN:   permissionsBoundaryARN,
 		DefaultAkamaiRegion:      defaultAkamaiRegion,
 		S3RateLimiter:            s3RateLimiter,
 		IAMRateLimiter:           iamRateLimiter,
 		AkamaiAccountRateLimiter: akamaiAccountRateLimiter,
 		AkamaiObjectRateLimiter:  akamaiObjectRateLimiter,
 		MaxConcurrentReconciles:  maxConcurrentReconciles,
+		StorageResyncInterval:    storageResyncInterval,
 		StatusManager:            statusmanager.NewStatusManager(mgr.GetClient(), mgr.GetAPIReader()),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "application")

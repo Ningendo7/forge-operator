@@ -44,10 +44,20 @@ func SetupApplicationWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
-// +kubebuilder:webhook:path=/mutate-forge-ningendo7-github-io-v1alpha1-application,mutating=true,failurePolicy=fail,sideEffects=None,groups=forge.ningendo7.github.io,resources=applications,verbs=create;update,versions=v1alpha1,name=mapplication-v1alpha1.kb.io,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/mutate-forge-ningendo7-github-io-v1alpha1-application,mutating=true,failurePolicy=ignore,sideEffects=None,groups=forge.ningendo7.github.io,resources=applications,verbs=create;update,versions=v1alpha1,name=mapplication-v1alpha1.kb.io,admissionReviewVersions=v1
 
 // ApplicationCustomDefaulter sets default values on the Application custom
 // resource when it's created or updated.
+//
+// failurePolicy=ignore, deliberately unlike the validating webhook below:
+// the only fields this defaults (Akamai's storage.secretName/
+// accessKeySecretRef) already have equivalent fallback logic in
+// naming.StorageSecret/AkamaiTokenSecret for when they're unset, so this is
+// a kubectl-get-shows-the-real-name convenience, not something reconciling
+// actually depends on. If this webhook is unreachable (e.g. the only
+// replica is down), admitting the request undefaulted is safe; rejecting it
+// outright, as failurePolicy=fail would, is not worth the extra SPOF this
+// webhook would otherwise add on top of the validating one.
 //
 // NOTE: The +kubebuilder:object:generate=false marker prevents controller-gen from generating DeepCopy methods,
 // as it is used only for temporary operations and does not need to be deeply copied.
@@ -114,17 +124,13 @@ func (v *ApplicationCustomValidator) ValidateUpdate(ctx context.Context, oldObj,
 	applicationlog.Info("Validation for Application upon update", "name", newObj.GetName())
 
 	// Once deletion has started, the only legitimate change left is
-	// finalizers being removed one by one as cleanup completes -- re-running
-	// live-Secret-existence checks (validateAkamai/validateAWS below) against
-	// possibly-already-deleted external state serves no purpose at that
-	// point and can permanently deadlock deletion. Confirmed live via chaos
-	// testing: ordinary namespace teardown deletes a Secret this webhook
-	// depends on before the stuck Application it belongs to, and every
-	// subsequent attempt to remove that Application's own finalizer -- the
-	// only way to unstick it, since a namespace already Terminating also
-	// refuses to let the missing Secret be recreated -- was rejected because
-	// the now-gone Secret failed re-validation. Immutability/orphan checks
-	// below are similarly pointless once the object is being torn down.
+	// finalizers being removed as cleanup completes -- re-running
+	// live-Secret-existence checks against possibly-already-deleted
+	// external state serves no purpose and can permanently deadlock
+	// deletion (e.g. namespace teardown deleting a Secret this webhook
+	// depends on before the stuck Application it belongs to, with no way
+	// to recreate it in an already-Terminating namespace). Immutability/
+	// orphan checks below are similarly pointless once torn down.
 	if newObj.GetDeletionTimestamp() != nil {
 		return nil, nil
 	}
@@ -133,7 +139,7 @@ func (v *ApplicationCustomValidator) ValidateUpdate(ctx context.Context, oldObj,
 		return nil, err
 	}
 
-	if err := validateConfigAndSecretNotOrphaned(oldObj, newObj); err != nil {
+	if err := validateConfigNotOrphaned(oldObj, newObj); err != nil {
 		return nil, err
 	}
 
@@ -148,17 +154,11 @@ func (v *ApplicationCustomValidator) ValidateDelete(_ context.Context, obj *forg
 
 // validateStorageIdentityImmutable rejects changing spec.storage.provider,
 // spec.storage.bucket, or spec.storage.region on an existing Application.
-// Unlike most spec fields, these three don't just describe desired state --
-// each one names the identity of a real, already-provisioned cloud
-// resource. Nothing in the reconciler cleans up the old identity's bucket
-// or credentials when any of these change: it would just start treating
-// spec.storage as naming an entirely different resource from that reconcile
-// on, permanently orphaning whatever the old identity had provisioned, with
-// the operator never even aware anything was left behind (see
-// bucketCreationClaimWindow's own doc comment in the s3/Akamai packages for
-// the closely related problem of an operator-created bucket's name later
-// being reused by something else entirely -- an in-place rename here would
-// manufacture exactly that scenario deliberately).
+// Unlike most spec fields, these three name the identity of a real,
+// already-provisioned cloud resource, and nothing in the reconciler cleans
+// up the old identity when any of these change -- it would just start
+// treating spec.storage as an entirely different resource, permanently
+// orphaning whatever the old identity had provisioned.
 func validateStorageIdentityImmutable(oldObj, newObj *forgev1alpha1.Application) error {
 	if oldObj.Spec.Storage == nil || newObj.Spec.Storage == nil {
 		return nil
@@ -197,21 +197,16 @@ func validateStorageIdentityImmutable(oldObj, newObj *forgev1alpha1.Application)
 	return nil
 }
 
-// validateConfigAndSecretNotOrphaned rejects removing spec.config (or
-// spec.secret) while spec.container.configMapName (or secretName) still
-// names the exact ConfigMap/Secret that removal would delete.
-// container.configMapName/secretName are deliberately independent of
-// spec.config/spec.secret -- they can equally well point at some other,
-// externally-managed ConfigMap/Secret this operator never owns, the same
-// way spec.storage.secretName can reference an unrelated externally-managed
-// Secret. That flexibility is intentional and this check doesn't touch it.
-// The specific case it closes: container.configMapName was pointed at this
-// operator's own managed ConfigMap (matching the exact name spec.config
-// would have produced), and spec.config is now being removed -- reconcile
-// would delete that ConfigMap out from under a Deployment whose pod
-// template still mounts it by that same name, with no error and no
-// degraded status until the next pod restart hits a permanent FailedMount.
-func validateConfigAndSecretNotOrphaned(oldObj, newObj *forgev1alpha1.Application) error {
+// validateConfigNotOrphaned rejects removing spec.config while
+// spec.container.configMapName still names the exact ConfigMap that removal
+// would delete. container.configMapName is deliberately independent of
+// spec.config -- it can equally well point at some other, externally-managed
+// ConfigMap this operator never owns, and that flexibility is intentional.
+// This only closes the case where container.configMapName happens to match
+// this operator's own managed name: removing spec.config would then delete
+// the ConfigMap out from under a Deployment that still mounts it, breaking
+// the pod on its next restart with no earlier warning.
+func validateConfigNotOrphaned(oldObj, newObj *forgev1alpha1.Application) error {
 	if oldObj.Spec.ConfigMap != nil && newObj.Spec.ConfigMap == nil {
 		orphanedName := naming.AppConfigMap(oldObj)
 		if newObj.Spec.Container.ConfigMapName == orphanedName {
@@ -219,17 +214,6 @@ func validateConfigAndSecretNotOrphaned(oldObj, newObj *forgev1alpha1.Applicatio
 				"spec.config cannot be removed while spec.container.configMapName still references %q: "+
 					"that ConfigMap would be deleted while the pod spec still mounts it by name, breaking "+
 					"the Deployment on its next pod restart -- clear or repoint spec.container.configMapName first",
-				orphanedName)
-		}
-	}
-
-	if oldObj.Spec.Secret != nil && newObj.Spec.Secret == nil {
-		orphanedName := naming.AppSecret(oldObj)
-		if newObj.Spec.Container.SecretName == orphanedName {
-			return fmt.Errorf(
-				"spec.secret cannot be removed while spec.container.secretName still references %q: "+
-					"that Secret would be deleted while the pod spec still mounts it by name, breaking "+
-					"the Deployment on its next pod restart -- clear or repoint spec.container.secretName first",
 				orphanedName)
 		}
 	}
@@ -273,31 +257,30 @@ func (v *ApplicationCustomValidator) validateAkamai(ctx context.Context, app *fo
 			outputSecret, tokenSecret)
 	}
 
+	// Never rejects admission on live Secret state: a GitOps tool may apply
+	// this before the Secret exists, and reconciliation already surfaces a
+	// missing/malformed Secret as a Degraded condition.
 	secret := &corev1.Secret{}
 	err := v.Client.Get(ctx, types.NamespacedName{Name: tokenSecret, Namespace: app.Namespace}, secret)
 	switch {
 	case apierrors.IsNotFound(err):
-		return nil, fmt.Errorf(
-			"spec.storage.akamai.accessKeySecretRef Secret %q not found in namespace %q",
-			tokenSecret, app.Namespace)
+		return admission.Warnings{fmt.Sprintf("spec.storage.akamai.accessKeySecretRef Secret %q not found in namespace %q", tokenSecret, app.Namespace)}, nil
 	case err != nil:
-		// Don't hard-fail admission on a transient API server error; let it
-		// through and surface via the normal reconcile/status path instead.
 		return admission.Warnings{fmt.Sprintf("could not verify Akamai credentials Secret %q: %v", tokenSecret, err)}, nil
 	case len(secret.Data["apiToken"]) == 0:
-		return nil, fmt.Errorf("secret %q (spec.storage.akamai.accessKeySecretRef) is missing required key %q", tokenSecret, "apiToken")
+		return admission.Warnings{fmt.Sprintf("secret %q (spec.storage.akamai.accessKeySecretRef) is missing required key %q", tokenSecret, "apiToken")}, nil
 	}
 
 	return nil, nil
 }
 
-// validateAWS checks the optional static-credentials Secret when
-// spec.storage.secretName is set, the same way validateAkamai checks its
-// required token Secret -- fail fast at admission instead of only
-// surfacing as Degraded status later. Unlike Akamai's token Secret, AWS's
-// spec.storage.secretName is optional (IRSA needs no Secret at all), so
-// this is a no-op unless it's actually set. Required keys mirror exactly
-// what internal/controller/s3/client.go's NewManager reads.
+// validateAWS warns (never rejects) about the optional static-credentials
+// Secret when spec.storage.secretName is set, the same way validateAkamai
+// treats its token Secret -- see that function's comment. Unlike Akamai's
+// token Secret, AWS's spec.storage.secretName is optional (IRSA needs no
+// Secret at all), so this is a no-op unless it's actually set. Required
+// keys mirror exactly what internal/controller/s3/client.go's NewManager
+// reads.
 func (v *ApplicationCustomValidator) validateAWS(ctx context.Context, app *forgev1alpha1.Application) (admission.Warnings, error) {
 	secretName := app.Spec.Storage.SecretName
 	if secretName == "" {
@@ -308,9 +291,7 @@ func (v *ApplicationCustomValidator) validateAWS(ctx context.Context, app *forge
 	err := v.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: app.Namespace}, secret)
 	switch {
 	case apierrors.IsNotFound(err):
-		return nil, fmt.Errorf(
-			"spec.storage.secretName Secret %q not found in namespace %q",
-			secretName, app.Namespace)
+		return admission.Warnings{fmt.Sprintf("spec.storage.secretName Secret %q not found in namespace %q", secretName, app.Namespace)}, nil
 	case err != nil:
 		return admission.Warnings{fmt.Sprintf("could not verify AWS credentials Secret %q: %v", secretName, err)}, nil
 	}
@@ -322,7 +303,7 @@ func (v *ApplicationCustomValidator) validateAWS(ctx context.Context, app *forge
 		}
 	}
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("secret %q (spec.storage.secretName) is missing required key(s): %s", secretName, strings.Join(missing, ", "))
+		return admission.Warnings{fmt.Sprintf("secret %q (spec.storage.secretName) is missing required key(s): %s", secretName, strings.Join(missing, ", "))}, nil
 	}
 
 	return nil, nil

@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -27,12 +28,8 @@ import (
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
 )
 
-// storageReconcileTimeout bounds each storage provisioning attempt (bucket,
-// versioning, lifecycle, IAM role/policy, access key -- several sequential
-// cloud API calls). Without this, a hung or unusually slow call blocks this
-// reconcile indefinitely -- and that blocks every other Application in the
-// cluster from reconciling too, not just this one.
-// Bounded here means a stuck call becomes a normal, retryable error instead.
+// storageReconcileTimeout bounds each storage provisioning attempt so a hung
+// cloud call can't block every other Application's reconcile indefinitely.
 const storageReconcileTimeout = 90 * time.Second
 
 // logStorageStatusUpdateError logs a best-effort status write failure without
@@ -47,16 +44,11 @@ func logStorageStatusUpdateError(ctx context.Context, err error) {
 // retrying with a freshly-fetched copy on a resourceVersion conflict rather
 // than surfacing it as a hard Reconcile error. Mirrors
 // status.StatusManager.UpdateStatus's own fix for the identical class of bug
-// (see its doc comment for the full mechanism: application was Get()'d from
-// the manager's informer cache, which can briefly lag the API server's true
-// state right after a fast preceding write, so the resourceVersion this
-// Update() carries can be stale) -- generalized here for every place in this
-// package (and the s3/Akamai storage manager packages, which have their own
-// copy of this same helper) that writes application.Status directly instead
-// of going through StatusManager. Unlike StatusManager, this re-fetches via
-// the same cached client rather than a dedicated uncached APIReader (not
-// available to every caller of this helper) -- RetryOnConflict's own backoff
-// between attempts is relied on to give the cache time to catch up instead.
+// (see its doc comment for the mechanism), generalized here for every place
+// in this package that writes application.Status directly instead of going
+// through StatusManager. Unlike StatusManager, this re-fetches via the same
+// cached client rather than a dedicated uncached APIReader -- RetryOnConflict's
+// own backoff between attempts gives the cache time to catch up instead.
 func retryStatusUpdate(ctx context.Context, c client.Client, application *forgev1alpha1.Application) error {
 	desiredStatus := application.Status
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -95,6 +87,8 @@ var newS3StorageManager = func(
 	serviceAccountName string,
 	oidcProviderARN string,
 	oidcProviderURL string,
+	permissionsBoundaryARN string,
+	recordCreated func(ctx context.Context) error,
 	s3Limiter *rate.Limiter,
 	iamLimiter *rate.Limiter,
 ) (s3StorageManager, error) {
@@ -105,6 +99,8 @@ var newS3StorageManager = func(
 		serviceAccountName,
 		oidcProviderARN,
 		oidcProviderURL,
+		permissionsBoundaryARN,
+		recordCreated,
 		s3Limiter,
 		iamLimiter,
 	)
@@ -115,6 +111,7 @@ var newAkamaiStorageManager = func(
 	c client.Client,
 	application *forgev1alpha1.Application,
 	defaultRegion string,
+	recordCreated func(ctx context.Context) error,
 	accountLimiter *rate.Limiter,
 	objectLimiter *rate.Limiter,
 ) (akamaiStorageManager, error) {
@@ -123,6 +120,7 @@ var newAkamaiStorageManager = func(
 		c,
 		application,
 		defaultRegion,
+		recordCreated,
 		accountLimiter,
 		objectLimiter,
 	)
@@ -146,26 +144,19 @@ func (r *ApplicationReconciler) reconcileStorage(
 		return r.reconcileStorageSecret(ctx, application, nil)
 	}
 
-	// Defense against a race the immutability webhook can't fully close on
-	// its own: each individual spec.storage update is validated against
-	// only its own immediate predecessor (validateStorageIdentityImmutable
-	// in the webhook), so a rapid nil -> different-identity sequence --
-	// spec.storage removed, then set again to a new provider/bucket/region,
-	// as two separate updates -- can pass admission cleanly even though the
-	// *overall* change is exactly what that check exists to block. If the
-	// workqueue coalesces those two updates into a single reconcile (an
-	// ordinary controller-runtime behavior: rapid Add()s for the same
-	// object dedupe to one pending item, and Get() when it's finally
-	// processed returns whatever's current, not either historical state),
-	// this method would never observe the nil state in between at all --
-	// jumping straight from the old identity to the new one, with nothing
-	// to trigger cleanup of whatever Status.Storage still remembers, so it
-	// would be silently overwritten and orphaned once the new bucket's own
-	// reconcile records over it. Detected here by comparing the identity
-	// Status.Storage last recorded against what Spec.Storage names now;
-	// a mismatch means the target changed out from under this reconcile,
-	// so the old one is cleaned up first, the same way an explicit nil
-	// transition already would be.
+	// Defense against a race the immutability webhook can't fully close:
+	// validateStorageIdentityImmutable only compares each update against its
+	// immediate predecessor, so a rapid nil -> different-identity sequence
+	// (removed, then set again to a new provider/bucket/region as two
+	// separate updates) can pass admission even though the overall change is
+	// exactly what that check blocks. If the workqueue coalesces those two
+	// updates into one reconcile, this method would jump straight from the
+	// old identity to the new one and never observe the nil state in
+	// between, silently orphaning whatever Status.Storage still remembers.
+	// Detected here by comparing the identity Status.Storage last recorded
+	// against what Spec.Storage names now; a mismatch means the target
+	// changed out from under this reconcile, so the old one is cleaned up
+	// first, same as an explicit nil transition would.
 	if oldStorage := application.Status.Storage; oldStorage != nil &&
 		(oldStorage.Provider != application.Spec.Storage.Provider ||
 			oldStorage.Bucket != application.Spec.Storage.Bucket ||
@@ -175,11 +166,13 @@ func (r *ApplicationReconciler) reconcileStorage(
 		}
 	}
 
-	// Provision Backend Cloud Storage Resources. akamaiCreds is only ever a
-	// local value for the duration of this call: it must never be assigned to
-	// application.Status (see the AkamaiStorageStatus doc comment) since that
-	// gets persisted as plaintext and is far more widely readable than the
-	// storage Secret it ends up in.
+	if err := r.ensureStorageOwnershipID(ctx, application); err != nil {
+		return fmt.Errorf("failed to ensure storage ownership ID: %w", err)
+	}
+
+	// akamaiCreds is only ever local to this call -- must never be assigned
+	// to application.Status (see AkamaiStorageStatus's doc comment), which
+	// is far more widely readable than the storage Secret it ends up in.
 	var akamaiCreds *akamaiobjstr.StorageResult
 	switch application.Spec.Storage.Provider {
 	case forgev1alpha1.ProviderAWSS3:
@@ -200,10 +193,57 @@ func (r *ApplicationReconciler) reconcileStorage(
 		return err
 	}
 
-	// Reconcile Storage Secret
 	if err := r.reconcileStorageSecret(ctx, application, akamaiCreds); err != nil {
 		return fmt.Errorf("failed to reconcile storage secret: %w", err)
 	}
+
+	return nil
+}
+
+// ensureStorageOwnershipID makes sure application carries
+// naming.StorageOwnershipIDAnnotation before any provider package reads it
+// off application.Annotations -- generating and persisting a fresh one on
+// first use, never regenerating one that's already there. A deliberate,
+// narrowly-scoped SSA patch (just the one annotation, not the full in-memory
+// application) rather than a Status write: see
+// naming.StorageOwnershipIDAnnotation's own doc comment for why this has to
+// live in ordinary metadata rather than a subresource.
+func (r *ApplicationReconciler) ensureStorageOwnershipID(
+	ctx context.Context,
+	application *forgev1alpha1.Application,
+) error {
+	if application.Annotations[naming.StorageOwnershipIDAnnotation] != "" {
+		return nil
+	}
+
+	ownershipID := uuid.NewString()
+
+	patch := &forgev1alpha1.Application{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Application",
+			APIVersion: forgev1alpha1.GroupVersion.String(),
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        application.Name,
+			Namespace:   application.Namespace,
+			Annotations: map[string]string{naming.StorageOwnershipIDAnnotation: ownershipID},
+		},
+	}
+
+	if err := r.Patch(
+		ctx,
+		patch,
+		client.Apply, //nolint:staticcheck // SSA patch via client.Apply is the standard controller-runtime pattern
+		client.FieldOwner("forge-operator"),
+		client.ForceOwnership,
+	); err != nil {
+		return fmt.Errorf("failed to persist storage ownership ID: %w", err)
+	}
+
+	if application.Annotations == nil {
+		application.Annotations = map[string]string{}
+	}
+	application.Annotations[naming.StorageOwnershipIDAnnotation] = ownershipID
 
 	return nil
 }
@@ -213,22 +253,17 @@ func (r *ApplicationReconciler) reconcileStorage(
 // Status.Storage and the StorageReady condition. Shared by
 // reconcileStorage's two call sites: spec.storage removed outright, and
 // spec.storage replaced with a different identity underneath an in-flight
-// reconcile (see the comment above that second call site).
+// reconcile.
 //
-// oldStorage, not application.Spec.Storage, is what actually gets cleaned
-// up here -- via a throwaway DeepCopy with Spec.Storage overwritten to
-// match oldStorage's identity. This matters specifically for the
-// replaced-identity case: application.Spec.Storage already names the *new*
-// target there, and finalizeApplication has no way to know a target it's
-// handed is stale rather than exactly what should be cleaned up.
+// oldStorage, not application.Spec.Storage, is what gets cleaned up -- via a
+// throwaway DeepCopy with Spec.Storage overwritten to match oldStorage's
+// identity, since application.Spec.Storage may already name the new target.
 //
-// finalizeApplication only ever leaves the StorageReady condition at
-// "cleanup in progress" (or a terminal failure) -- on the real deletion
-// path that's harmless since the whole Application is gone moments later,
-// but here the Application lives on, so a stuck, misleading condition
-// would be left behind permanently. Removing it entirely (rather than
-// setting some other reason) matches the condition an Application that
-// never had storage configured shows: none at all.
+// The StorageReady condition is removed entirely rather than left at
+// whatever finalizeApplication last set it to ("cleanup in progress" or a
+// terminal failure), since here the Application lives on and a stuck,
+// misleading condition would otherwise persist -- matching the condition an
+// Application that never had storage configured shows: none at all.
 func (r *ApplicationReconciler) cleanupPreviousStorage(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
@@ -255,11 +290,9 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 
 	provider := string(forgev1alpha1.ProviderAWSS3)
 
-	// Child span of whatever's already in ctx -- the "Reconcile" root span
-	// from application_controller.go, in the normal reconcile path. Every
-	// individual AWS API call underneath this (via the otelaws middleware
-	// wired into the s3 package's NewManager) nests under this span in
-	// turn, since cloudCtx below is derived from this ctx.
+	// Child span of the "Reconcile" root span; every AWS call underneath
+	// (via the otelaws middleware in the s3 package's NewManager) nests
+	// under this in turn, since cloudCtx below derives from this ctx.
 	ctx, span := forgemetrics.Tracer().Start(ctx, "reconcileAWSStorage",
 		trace.WithAttributes(
 			attribute.String("forge.storage.provider", provider),
@@ -282,8 +315,6 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 		forgemetrics.StorageReconcileDuration.WithLabelValues(provider).Observe(time.Since(start).Seconds())
 	}()
 
-	// Initialize S3 Storage Manager with OIDC info for IRSA role creation
-
 	storageManager, err := newS3StorageManager(
 		cloudCtx,
 		r.Client,
@@ -291,6 +322,16 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 		serviceAccountNameFor(application),
 		r.OIDCProviderARN,
 		r.OIDCProviderURL,
+		r.PermissionsBoundaryARN,
+		func(ctx context.Context) error {
+			application.Status.Storage = &forgev1alpha1.StorageStatus{
+				Provider:  forgev1alpha1.ProviderAWSS3,
+				Bucket:    application.Spec.Storage.Bucket,
+				Created:   true,
+				CreatedAt: metav1.Now(),
+			}
+			return retryStatusUpdate(ctx, r.Client, application)
+		},
 		r.S3RateLimiter,
 		r.IAMRateLimiter,
 	)
@@ -303,7 +344,6 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 		return fmt.Errorf("failed to create S3 storage manager: %w", err)
 	}
 
-	// Reconcile Bucket and IRSA
 	result, err := storageManager.ReconcileBucket(cloudCtx)
 	if err != nil {
 		outcome := classifyAWSStorageError(err)
@@ -323,13 +363,10 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 		}
 	}
 
-	// Structured Status metadata. Created/CreatedAt are carried forward from
-	// whatever ReconcileBucket already durably recorded (via
-	// recordBucketCreated, on the same application pointer) rather than
-	// reconstructed here -- CreatedAt in particular must never be reset to
-	// "now" on a routine successful reconcile of an already-owned bucket, or
-	// it would defeat the whole point of bucketCreationClaimWindow bounding
-	// it in the s3 package.
+	// CreatedAt is carried forward from whatever ReconcileBucket already
+	// durably recorded, never reset to "now" on a routine reconcile of an
+	// already-owned bucket -- otherwise bucketCreationClaimWindow's bound in
+	// the s3 package becomes meaningless.
 	createdAt := metav1.Now()
 	if application.Status.Storage != nil && !application.Status.Storage.CreatedAt.IsZero() {
 		createdAt = application.Status.Storage.CreatedAt
@@ -371,7 +408,6 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 
 	provider := string(forgev1alpha1.ProviderAkamaiObjectStorage)
 
-	// Same reasoning as reconcileAWSStorage's span.
 	ctx, span := forgemetrics.Tracer().Start(ctx, "reconcileAkamaiStorage",
 		trace.WithAttributes(
 			attribute.String("forge.storage.provider", provider),
@@ -394,12 +430,20 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 		forgemetrics.StorageReconcileDuration.WithLabelValues(provider).Observe(time.Since(start).Seconds())
 	}()
 
-	// Initialize Akamai Storage Manager
 	storageManager, err := newAkamaiStorageManager(
 		cloudCtx,
 		r.Client,
 		application,
 		r.DefaultAkamaiRegion,
+		func(ctx context.Context) error {
+			application.Status.Storage = &forgev1alpha1.StorageStatus{
+				Provider:  forgev1alpha1.ProviderAkamaiObjectStorage,
+				Bucket:    application.Spec.Storage.Bucket,
+				Created:   true,
+				CreatedAt: metav1.Now(),
+			}
+			return retryStatusUpdate(ctx, r.Client, application)
+		},
 		r.AkamaiAccountRateLimiter,
 		r.AkamaiObjectRateLimiter,
 	)
@@ -411,7 +455,6 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 		return nil, fmt.Errorf("failed to create Akamai storage manager: %w", err)
 	}
 
-	// Reconcile Bucket and Access Key
 	result, err = storageManager.ReconcileBucket(cloudCtx)
 	if err != nil {
 		outcome := classifyAkamaiStorageError(err)
@@ -445,14 +488,10 @@ func (r *ApplicationReconciler) reconcileAkamaiStorage(
 	if application.Status.Storage != nil && !application.Status.Storage.CreatedAt.IsZero() {
 		createdAt = application.Status.Storage.CreatedAt
 	}
-	// accessKeySecretRef is recorded onto Status.Storage.Akamai (not just
-	// read from Spec here) so cleanup can still resolve the right input
-	// token Secret after spec.storage has been removed -- see
-	// storageSpecFromStatus and AkamaiStorageStatus.AccessKeySecretRef's own
-	// doc comment for the bug this closes. Normally always non-empty by
-	// this point (the defaulting webhook resolves it at admission time for
-	// every Akamai Application), but guarded defensively in case the
-	// webhook is disabled or this is exercised directly, as in tests.
+	// Recorded onto Status.Storage.Akamai so cleanup can still resolve the
+	// right input token Secret after spec.storage is removed (see
+	// storageSpecFromStatus). Guarded defensively in case the defaulting
+	// webhook is disabled.
 	accessKeySecretRef := ""
 	if application.Spec.Storage.Akamai != nil {
 		accessKeySecretRef = application.Spec.Storage.Akamai.AccessKeySecretRef
