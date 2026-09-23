@@ -982,11 +982,17 @@ spec:
 			Expect(err).NotTo(HaveOccurred(), "controller-manager did not roll out with the LocalStack env")
 
 			By("refreshing the controller-manager pod name for failure-log collection after the rollout")
-			if podName, err := utils.Run(exec.Command("kubectl", "get", "pods",
-				"-l", "control-plane=controller-manager", "-n", namespace,
-				"-o", "jsonpath={.items[0].metadata.name}")); err == nil {
-				controllerPodName = podName
-			}
+			// The leader specifically, not .items[0] (arbitrary list order,
+			// often the non-leader with 2 replicas) -- AfterEach's
+			// failure-log fetch is useless if it grabs the pod that was
+			// never actually reconciling anything.
+			Eventually(func(g Gomega) {
+				holderIdentity, err := utils.Run(exec.Command("kubectl", "get", "lease",
+					"9429151e.ningendo7.github.io", "-n", namespace, "-o", "jsonpath={.spec.holderIdentity}"))
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(holderIdentity).NotTo(BeEmpty())
+				controllerPodName = strings.SplitN(holderIdentity, "_", 2)[0]
+			}, time.Minute, 2*time.Second).Should(Succeed())
 		})
 
 		AfterAll(func() {

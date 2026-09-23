@@ -35,6 +35,15 @@ spec:
             # set starts faster than LocalStack's full default catalog.
             - name: SERVICES
               value: "iam,sts,s3"
+            # LocalStack lazy-loads each service on its first request by
+            # default -- the readinessProbe below only checks the edge proxy
+            # itself, which comes up before iam/s3 have actually finished
+            # starting, so the Deployment can report Available while the
+            # first real CreateBucket/CreateRole calls still race a cold
+            # start. Eager loading makes "ready" mean what the e2e tests
+            # need it to mean.
+            - name: EAGER_SERVICE_LOADING
+              value: "1"
           readinessProbe:
             httpGet:
               path: /_localstack/health
