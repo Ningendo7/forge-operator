@@ -10,7 +10,7 @@
 // Skipped entirely unless LINODE_TOKEN is set, so `go test ./...` and CI
 // never need real credentials. Run explicitly with:
 //
-//	LINODE_TOKEN=... go test -tags=integration ./internal/controller/Akamai-Obj-Str/... -v
+//	LINODE_TOKEN=... go test -tags=integration ./internal/controller/akamaiobjstr/... -v
 //
 // Every test creates its own uniquely-named real bucket and cleans it (and
 // its access key) up via t.Cleanup, which runs even if the test body fails

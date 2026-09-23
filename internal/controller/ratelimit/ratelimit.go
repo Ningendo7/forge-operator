@@ -75,7 +75,7 @@ func NewLimiter(qps float64, burst int) *rate.Limiter {
 // NewLimiter applies to a misconfigured QPS/burst.
 //
 // Attached via a client's own per-instance Options.APIOptions (see
-// s3/client.go, Akamai-Obj-Str/client.go), not the shared aws.Config
+// s3/client.go, akamaiobjstr/client.go), not the shared aws.Config
 // every client built from it would otherwise inherit -- sharing would
 // collapse S3 and IAM (or Akamai's two surfaces) onto one budget,
 // throttling the higher-capacity one down to the tighter one's ceiling.
@@ -105,7 +105,7 @@ func AWSMiddleware(limiter *rate.Limiter, name string) func(*smithymiddleware.St
 
 // RoundTripper is AWSMiddleware's plain net/http equivalent, for clients
 // that aren't aws-sdk-go-v2-based -- specifically linodego's account API
-// client (see Akamai-Obj-Str/client.go), which only ever accepts a
+// client (see akamaiobjstr/client.go), which only ever accepts a
 // *http.Client to instrument.
 type RoundTripper struct {
 	limiter *rate.Limiter

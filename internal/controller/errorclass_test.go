@@ -12,7 +12,7 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/linode/linodego"
 
-	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
+	"github.com/Ningendo7/forge-operator/internal/controller/akamaiobjstr"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
 )

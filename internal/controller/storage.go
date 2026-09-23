@@ -21,7 +21,7 @@ import (
 	"golang.org/x/time/rate"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
-	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
+	"github.com/Ningendo7/forge-operator/internal/controller/akamaiobjstr"
 	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
@@ -220,7 +220,7 @@ func (r *ApplicationReconciler) ensureStorageOwnershipID(
 
 	patch := &forgev1alpha1.Application{
 		TypeMeta: metav1.TypeMeta{
-			Kind:       "Application",
+			Kind:       applicationKind,
 			APIVersion: forgev1alpha1.GroupVersion.String(),
 		},
 		ObjectMeta: metav1.ObjectMeta{

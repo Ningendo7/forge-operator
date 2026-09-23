@@ -104,7 +104,7 @@ Primary code paths:
 - [internal/controller/finalizer.go](../internal/controller/finalizer.go) — deletion/cleanup
 - [internal/controller/status](../internal/controller/status) — condition management
 - [internal/controller/s3](../internal/controller/s3) — AWS S3 + IRSA
-- [internal/controller/Akamai-Obj-Str](../internal/controller/Akamai-Obj-Str) — Akamai/Linode Object Storage
+- [internal/controller/akamaiobjstr](../internal/controller/akamaiobjstr) — Akamai/Linode Object Storage
 
 Kubernetes manifests:
 

@@ -221,8 +221,8 @@ func TestApplicationExistsWithUID(t *testing.T) {
 
 // --- CrossNamespaceAdoptionAllowed ---
 
-func namespaceWithGrant(name, grant string) *corev1.Namespace {
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+func namespaceWithGrant(grant string) *corev1.Namespace {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testOwnerNS}}
 	if grant != "" {
 		ns.Annotations = map[string]string{AllowBucketAdoptionFromAnnotation: grant}
 	}
@@ -239,35 +239,35 @@ func TestCrossNamespaceAdoptionAllowed(t *testing.T) {
 	}{
 		{
 			name:        "owner namespace has no grant annotation at all",
-			ownerNS:     namespaceWithGrant(testOwnerNS, ""),
+			ownerNS:     namespaceWithGrant(""),
 			ownerNSName: testOwnerNS,
 			adoptingNS:  testAdopterNS,
 			want:        false,
 		},
 		{
 			name:        "wildcard grant allows any namespace",
-			ownerNS:     namespaceWithGrant(testOwnerNS, "*"),
+			ownerNS:     namespaceWithGrant("*"),
 			ownerNSName: testOwnerNS,
 			adoptingNS:  testAdopterNS,
 			want:        true,
 		},
 		{
 			name:        "exact namespace named in a comma-separated list",
-			ownerNS:     namespaceWithGrant(testOwnerNS, testUnrelatedNS+","+testAdopterNS),
+			ownerNS:     namespaceWithGrant(testUnrelatedNS + "," + testAdopterNS),
 			ownerNSName: testOwnerNS,
 			adoptingNS:  testAdopterNS,
 			want:        true,
 		},
 		{
 			name:        "whitespace around list entries is trimmed",
-			ownerNS:     namespaceWithGrant(testOwnerNS, testUnrelatedNS+" , "+testAdopterNS+" "),
+			ownerNS:     namespaceWithGrant(testUnrelatedNS + " , " + testAdopterNS + " "),
 			ownerNSName: testOwnerNS,
 			adoptingNS:  testAdopterNS,
 			want:        true,
 		},
 		{
 			name:        "namespace not named in the list is refused",
-			ownerNS:     namespaceWithGrant(testOwnerNS, testUnrelatedNS),
+			ownerNS:     namespaceWithGrant(testUnrelatedNS),
 			ownerNSName: testOwnerNS,
 			adoptingNS:  testAdopterNS,
 			want:        false,
@@ -342,7 +342,7 @@ func TestEvaluateBucketAdoption_RefusesLegacyBucketWithNoRecordedNamespace(t *te
 }
 
 func TestEvaluateBucketAdoption_RefusesCrossNamespaceWithoutGrant(t *testing.T) {
-	c := newFakeClient(t, namespaceWithGrant(testOwnerNS, ""))
+	c := newFakeClient(t, namespaceWithGrant(""))
 
 	err := EvaluateBucketAdoption(context.Background(), c, testOwnerUID, testOwnerNS, testAdopterNS)
 	if err == nil {
@@ -354,7 +354,7 @@ func TestEvaluateBucketAdoption_RefusesCrossNamespaceWithoutGrant(t *testing.T) 
 }
 
 func TestEvaluateBucketAdoption_AllowsCrossNamespaceWithGrant(t *testing.T) {
-	c := newFakeClient(t, namespaceWithGrant(testOwnerNS, testAdopterNS))
+	c := newFakeClient(t, namespaceWithGrant(testAdopterNS))
 
 	if err := EvaluateBucketAdoption(context.Background(), c, testOwnerUID, testOwnerNS, testAdopterNS); err != nil {
 		t.Fatalf("expected cross-namespace adoption to succeed with an explicit grant, got: %v", err)
@@ -362,7 +362,7 @@ func TestEvaluateBucketAdoption_AllowsCrossNamespaceWithGrant(t *testing.T) {
 }
 
 func TestEvaluateBucketAdoption_AllowsCrossNamespaceWithWildcardGrant(t *testing.T) {
-	c := newFakeClient(t, namespaceWithGrant(testOwnerNS, "*"))
+	c := newFakeClient(t, namespaceWithGrant("*"))
 
 	if err := EvaluateBucketAdoption(context.Background(), c, testOwnerUID, testOwnerNS, testAdopterNS); err != nil {
 		t.Fatalf("expected cross-namespace adoption to succeed with a wildcard grant, got: %v", err)

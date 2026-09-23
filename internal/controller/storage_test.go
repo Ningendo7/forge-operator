@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
-	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
+	"github.com/Ningendo7/forge-operator/internal/controller/akamaiobjstr"
 	"github.com/Ningendo7/forge-operator/internal/controller/naming"
 	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
@@ -134,7 +134,7 @@ func TestDesiredStorage_InjectsAkamaiCredentialsFromCaller(t *testing.T) {
 func TestDesiredStorage_EndpointURLStripsBucketPrefixForStandardSDKUse(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Provider: forgev1alpha1.ProviderAkamaiObjectStorage, Bucket: testBucket}
-	// resolveEndpoint (Akamai-Obj-Str/obj_storage.go) prefers the bucket's
+	// resolveEndpoint (akamaiobjstr/obj_storage.go) prefers the bucket's
 	// own real hostname, which Linode returns bucket-prefixed --
 	// reproducing that shape here, not the bare-cluster-host shape
 	// testAkamaiEndpoint happens to already be in.

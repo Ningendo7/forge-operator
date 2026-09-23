@@ -30,3 +30,22 @@ jobs:
         run: make lint-config
       - name: Run linter
         run: make lint
+
+  generated-drift:
+    permissions:
+      contents: read
+    name: Check generated files and Helm CRD/RBAC copies for drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Check for generated-file and Helm chart CRD/RBAC drift
+        run: ./scripts/check-generated-drift.sh

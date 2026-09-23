@@ -534,6 +534,85 @@ spec:
 			Eventually(verifyAppReady, 2*time.Minute, 2*time.Second).Should(Succeed())
 		})
 
+		// Finding #9 (chaos scenario): proves the controller's 2-replica
+		// leader-election setup actually delivers what it's for -- a
+		// reconcile in flight surviving the leader pod disappearing, not
+		// just serving admission webhooks from a spare. Doesn't try to hit
+		// an exact "mid-reconcile" instant (unreliable to trigger from
+		// outside a black-box deployed process); instead it kills the
+		// current leader immediately after triggering a change that takes
+		// real, multi-second work to converge (a Deployment scale-up -- new
+		// pod scheduling/starting), which is a wide enough window to
+		// reliably land the kill before convergence, and relies on
+		// reconciliation being driven entirely by cluster state (not
+		// in-memory state) for the new leader to finish the job from
+		// scratch, not resume it.
+		It("still converges a scaling change after the leader controller pod is killed mid-flight (crash-recovery regression)", func() {
+			By("identifying the current leader controller pod via its leader-election Lease")
+			cmd := exec.Command("kubectl", "get", "lease", "9429151e.ningendo7.github.io", "-n", namespace,
+				"-o", "jsonpath={.spec.holderIdentity}")
+			holderIdentity, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to read leader election Lease")
+			Expect(holderIdentity).NotTo(BeEmpty())
+			leaderPod := strings.SplitN(holderIdentity, "_", 2)[0]
+
+			By("triggering a scaling change that takes real, multi-second work to converge")
+			cmd = exec.Command("kubectl", "patch", "application", appName, "-n", appNamespace,
+				"--type=merge", "-p", `{"spec":{"replicas":3}}`)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to patch Application replicas")
+
+			By("immediately killing the leader controller pod, before the scale-up has had time to converge")
+			cmd = exec.Command("kubectl", "delete", "pod", leaderPod, "-n", namespace, "--wait=false")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete the leader controller pod")
+
+			By("confirming the scale-up still converges to 3 available replicas despite the leader being killed mid-flight")
+			deploymentName := appName + "-deployment"
+			verifyScaledUp := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", deploymentName,
+					"-n", appNamespace, "-o", "jsonpath={.status.availableReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("3"))
+			}
+			Eventually(verifyScaledUp, 3*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("confirming the Application reports Ready again after recovering from the killed leader")
+			verifyAppReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "application", appName, "-n", appNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"))
+			}
+			Eventually(verifyAppReady, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("confirming both controller-manager pods are back to Running -- the killed one was recreated by the Deployment")
+			verifyControllerPodsUp := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get",
+					"pods", "-l", "control-plane=controller-manager",
+					"-o", "go-template={{ range .items }}"+
+						"{{ if not .metadata.deletionTimestamp }}"+
+						"{{ .metadata.name }}"+
+						"{{ \"\\n\" }}{{ end }}{{ end }}",
+					"-n", namespace,
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				podNames := utils.GetNonEmptyLines(output)
+				g.Expect(podNames).To(HaveLen(2))
+				for _, podName := range podNames {
+					cmd := exec.Command("kubectl", "get", "pod", podName, "-n", namespace, "-o", "jsonpath={.status.phase}")
+					phase, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(phase).To(Equal("Running"))
+				}
+				controllerPodName = podNames[0]
+			}
+			Eventually(verifyControllerPodsUp, 2*time.Minute, 2*time.Second).Should(Succeed())
+		})
+
 		// This is the scenario envtest explicitly can't cover (see the comment
 		// atop application_integration_test.go: AWS/Akamai storage paths are
 		// out of scope there). It doesn't need real AWS credentials or
@@ -716,6 +795,12 @@ spec:
 			Expect(err).NotTo(HaveOccurred(), "Failed to create fake AWS credentials Secret")
 
 			By("creating an Application pointed at an unreachable endpoint, so its cleanup can never complete")
+			// deletionPolicy: Delete is explicit and load-bearing here --
+			// Retain (the default) skips bucket cleanup and treats IAM/
+			// access-key cleanup as best-effort/non-blocking (see
+			// finalizeApplication's Retain branch), so the finalizer would
+			// be removed almost immediately regardless of the unreachable
+			// endpoint, defeating the whole point of this test.
 			manifest := fmt.Sprintf(`
 apiVersion: forge.ningendo7.github.io/v1alpha1
 kind: Application
@@ -729,6 +814,7 @@ spec:
     bucket: e2e-deadlock-bucket
     secretName: %s
     endpoint: https://e2e-unreachable.invalid
+    deletionPolicy: Delete
 `, deadlockAppName, appNamespace, appImage, credsSecretName)
 			applyManifest(manifest, "e2e-deadlock-app.yaml")
 

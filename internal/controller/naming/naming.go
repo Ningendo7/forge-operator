@@ -20,7 +20,7 @@ import (
 
 // AdoptBucketAnnotation, when set to "true" on an Application, tells the
 // ownership check (claimOrVerifyOwnership in both the s3 and
-// Akamai-Obj-Str packages) to overwrite a mismatched ownership tag/marker
+// akamaiobjstr packages) to overwrite a mismatched ownership tag/marker
 // instead of rejecting the bucket as foreign. This is the deliberate,
 // explicit opt-in for taking over a bucket a *different* Application
 // previously owned -- most commonly one left behind by
@@ -44,7 +44,7 @@ const AdoptBucketAnnotation = "forge-operator.ningendo7.github.io/adopt-bucket"
 // This annotation is ordinary object metadata with no such gate, so both
 // naturally carry it forward -- letting a genuinely restored Application
 // reclaim its own bucket automatically (see claimOrVerifyOwnership in the
-// s3 and Akamai-Obj-Str packages) without a human setting
+// s3 and akamaiobjstr packages) without a human setting
 // AdoptBucketAnnotation by hand, while a merely name-colliding new
 // Application -- which was never handed this value -- still can't.
 const StorageOwnershipIDAnnotation = "forge-operator.ningendo7.github.io/storage-ownership-id"
@@ -116,7 +116,7 @@ func CrossNamespaceAdoptionAllowed(ctx context.Context, c client.Client, ownerNa
 	if grant == "*" {
 		return true, nil
 	}
-	for _, allowed := range strings.Split(grant, ",") {
+	for allowed := range strings.SplitSeq(grant, ",") {
 		if strings.TrimSpace(allowed) == adoptingNamespace {
 			return true, nil
 		}

@@ -5,7 +5,7 @@
 #   terraform plan -var-file=dev.tfvars
 
 bucket  = "<your-akamai-object-storage-bucket-for-tfstate>"
-key     = "terraform.tfstate"
+key     = "dev/terraform.tfstate"
 region  = "us-east"
 # Name of the AWS-credentials-file profile holding your Akamai Object Storage
 # S3-compatible access key/secret (see ~/.aws/credentials).

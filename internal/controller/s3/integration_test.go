@@ -2,7 +2,7 @@
 
 // Package s3storage's integration tests exercise this Manager against a
 // real AWS account -- no Kubernetes cluster involved (see the identical
-// reasoning in the Akamai-Obj-Str package's own integration_test.go).
+// reasoning in the akamaiobjstr package's own integration_test.go).
 //
 // Unlike Akamai, this operator never generates a static AWS credential pair
 // -- AWS storage is IRSA-based, and a local Go test process has no live pod

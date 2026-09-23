@@ -10,7 +10,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
-	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
+	"github.com/Ningendo7/forge-operator/internal/controller/akamaiobjstr"
 	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
