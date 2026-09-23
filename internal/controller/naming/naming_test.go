@@ -1,10 +1,17 @@
 package naming
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 const testAppName = "demo-app"
@@ -151,5 +158,213 @@ func TestCloudResourceName_HandlesMaxLenSmallerThanHashSuffix(t *testing.T) {
 	got := CloudResourceName([]string{testRolePrefix, testNamespace, testAppName}, 3)
 	if len(got) == 0 {
 		t.Fatalf("expected a non-empty result even for a very small maxLen")
+	}
+}
+
+// --- ApplicationExistsWithUID ---
+
+const (
+	testOwnerUID    = types.UID("11111111-1111-1111-1111-111111111111")
+	testAdopterNS   = "team-b"
+	testOwnerNS     = "team-a"
+	testUnrelatedNS = "team-c"
+)
+
+func newFakeClient(t *testing.T, objs ...client.Object) client.Client {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := forgev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add forgev1alpha1 to scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("failed to add corev1 to scheme: %v", err)
+	}
+	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+}
+
+func TestApplicationExistsWithUID(t *testing.T) {
+	owner := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: testOwnerNS, UID: testOwnerUID},
+	}
+	c := newFakeClient(t, owner)
+
+	t.Run("empty UID is never found", func(t *testing.T) {
+		exists, err := ApplicationExistsWithUID(context.Background(), c, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if exists {
+			t.Fatalf("expected empty UID to never be reported as existing")
+		}
+	})
+
+	t.Run("finds an existing Application by UID regardless of namespace", func(t *testing.T) {
+		exists, err := ApplicationExistsWithUID(context.Background(), c, testOwnerUID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !exists {
+			t.Fatalf("expected the owner's UID to be found")
+		}
+	})
+
+	t.Run("reports false for a UID nothing carries", func(t *testing.T) {
+		exists, err := ApplicationExistsWithUID(context.Background(), c, "99999999-9999-9999-9999-999999999999")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if exists {
+			t.Fatalf("expected a UID nothing carries to be reported as not found")
+		}
+	})
+}
+
+// --- CrossNamespaceAdoptionAllowed ---
+
+func namespaceWithGrant(grant string) *corev1.Namespace {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testOwnerNS}}
+	if grant != "" {
+		ns.Annotations = map[string]string{AllowBucketAdoptionFromAnnotation: grant}
+	}
+	return ns
+}
+
+func TestCrossNamespaceAdoptionAllowed(t *testing.T) {
+	tests := []struct {
+		name        string
+		ownerNS     *corev1.Namespace
+		ownerNSName string
+		adoptingNS  string
+		want        bool
+	}{
+		{
+			name:        "owner namespace has no grant annotation at all",
+			ownerNS:     namespaceWithGrant(""),
+			ownerNSName: testOwnerNS,
+			adoptingNS:  testAdopterNS,
+			want:        false,
+		},
+		{
+			name:        "wildcard grant allows any namespace",
+			ownerNS:     namespaceWithGrant("*"),
+			ownerNSName: testOwnerNS,
+			adoptingNS:  testAdopterNS,
+			want:        true,
+		},
+		{
+			name:        "exact namespace named in a comma-separated list",
+			ownerNS:     namespaceWithGrant(testUnrelatedNS + "," + testAdopterNS),
+			ownerNSName: testOwnerNS,
+			adoptingNS:  testAdopterNS,
+			want:        true,
+		},
+		{
+			name:        "whitespace around list entries is trimmed",
+			ownerNS:     namespaceWithGrant(testUnrelatedNS + " , " + testAdopterNS + " "),
+			ownerNSName: testOwnerNS,
+			adoptingNS:  testAdopterNS,
+			want:        true,
+		},
+		{
+			name:        "namespace not named in the list is refused",
+			ownerNS:     namespaceWithGrant(testUnrelatedNS),
+			ownerNSName: testOwnerNS,
+			adoptingNS:  testAdopterNS,
+			want:        false,
+		},
+		{
+			name:        "owner namespace object doesn't exist at all",
+			ownerNS:     nil,
+			ownerNSName: "namespace-does-not-exist",
+			adoptingNS:  testAdopterNS,
+			want:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objs []client.Object
+			if tt.ownerNS != nil {
+				objs = append(objs, tt.ownerNS)
+			}
+			c := newFakeClient(t, objs...)
+
+			got, err := CrossNamespaceAdoptionAllowed(context.Background(), c, tt.ownerNSName, tt.adoptingNS)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("expected %v, got %v", tt.want, got)
+			}
+		})
+	}
+}
+
+// --- EvaluateBucketAdoption ---
+
+func TestEvaluateBucketAdoption_RefusesWhilePreviousOwnerExists(t *testing.T) {
+	owner := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: testOwnerNS, UID: testOwnerUID},
+	}
+	c := newFakeClient(t, owner)
+
+	err := EvaluateBucketAdoption(context.Background(), c, testOwnerUID, testOwnerNS, testAdopterNS)
+	if err == nil {
+		t.Fatalf("expected an error while the previous owner still exists")
+	}
+	if !strings.Contains(err.Error(), "still exists") {
+		t.Fatalf("expected the error to explain the previous owner still exists, got: %v", err)
+	}
+}
+
+func TestEvaluateBucketAdoption_AllowsSameNamespaceOnceOwnerGone(t *testing.T) {
+	c := newFakeClient(t)
+
+	if err := EvaluateBucketAdoption(context.Background(), c, testOwnerUID, testOwnerNS, testOwnerNS); err != nil {
+		t.Fatalf("expected same-namespace adoption to succeed once the owner is gone, got: %v", err)
+	}
+}
+
+func TestEvaluateBucketAdoption_RefusesLegacyBucketWithNoRecordedNamespace(t *testing.T) {
+	c := newFakeClient(t)
+
+	// ownerNamespace == "" means this bucket was tagged/marked before
+	// namespace-scoped ownership shipped -- there's nothing to compare
+	// against, so cross-namespace adoption must fail closed rather than
+	// silently allow it just because the previous owner happens to be gone.
+	err := EvaluateBucketAdoption(context.Background(), c, testOwnerUID, "", testAdopterNS)
+	if err == nil {
+		t.Fatalf("expected an error for a bucket with no recorded owner namespace")
+	}
+	if !strings.Contains(err.Error(), "namespace-scoped adoption shipped") {
+		t.Fatalf("expected the error to explain the missing namespace record, got: %v", err)
+	}
+}
+
+func TestEvaluateBucketAdoption_RefusesCrossNamespaceWithoutGrant(t *testing.T) {
+	c := newFakeClient(t, namespaceWithGrant(""))
+
+	err := EvaluateBucketAdoption(context.Background(), c, testOwnerUID, testOwnerNS, testAdopterNS)
+	if err == nil {
+		t.Fatalf("expected cross-namespace adoption to be refused without a grant")
+	}
+	if !strings.Contains(err.Error(), AllowBucketAdoptionFromAnnotation) {
+		t.Fatalf("expected the error to name the missing annotation, got: %v", err)
+	}
+}
+
+func TestEvaluateBucketAdoption_AllowsCrossNamespaceWithGrant(t *testing.T) {
+	c := newFakeClient(t, namespaceWithGrant(testAdopterNS))
+
+	if err := EvaluateBucketAdoption(context.Background(), c, testOwnerUID, testOwnerNS, testAdopterNS); err != nil {
+		t.Fatalf("expected cross-namespace adoption to succeed with an explicit grant, got: %v", err)
+	}
+}
+
+func TestEvaluateBucketAdoption_AllowsCrossNamespaceWithWildcardGrant(t *testing.T) {
+	c := newFakeClient(t, namespaceWithGrant("*"))
+
+	if err := EvaluateBucketAdoption(context.Background(), c, testOwnerUID, testOwnerNS, testAdopterNS); err != nil {
+		t.Fatalf("expected cross-namespace adoption to succeed with a wildcard grant, got: %v", err)
 	}
 }

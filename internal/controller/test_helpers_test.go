@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
-	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
+	"github.com/Ningendo7/forge-operator/internal/controller/akamaiobjstr"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -14,7 +14,6 @@ import (
 
 const (
 	testNamespace           = "default"
-	testAPIKey              = "API_KEY"
 	testCustomSecretName    = "custom-secret"
 	testCustomConfigMapName = "custom-config"
 	testCustomSAName        = "custom-sa"
@@ -29,7 +28,6 @@ const (
 	testHPAName             = "demo-app-hpa"
 	testDeploymentName      = "demo-app-deployment"
 	testPDBName             = "demo-app-pdb"
-	testAPIKeyValue         = "abc123"
 	testSecretAppName       = "demo-app-secret"
 	testOldName             = "old-name"
 	testNewName             = "new-name"

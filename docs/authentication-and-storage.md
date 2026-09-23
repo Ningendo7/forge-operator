@@ -89,16 +89,33 @@ flowchart TD
 
 ## Ownership verification
 
-Before an `Application` reconciles against an existing bucket — whether it's finding one that already exists, or one it just created a moment ago — the operator verifies it's actually the owner, rather than silently adopting (and potentially later deleting) a bucket someone else created with the same name:
+Before an `Application` reconciles against an existing bucket — whether it's finding one that already exists, or one it just created a moment ago — the operator verifies it's actually the owner, rather than silently adopting (and potentially later deleting) a bucket someone else created with the same name.
 
-- **AWS**: the bucket is tagged with the `Application`'s Kubernetes UID (`forge-operator.ningendo7.github.io/owner-uid`) on creation. S3's `PutBucketTagging` replaces a bucket's entire tag set rather than merging into it, so every write of this tag reads the bucket's existing tags first and writes them back alongside the ownership tag — any other tags on the bucket (Terraform's own `default_tags`, cost-allocation tags, anything else already there) are preserved, not wiped, each time ownership is (re-)established.
-- **Akamai**: Linode's Object Storage bucket API has no tagging support at all, so a small marker object (`.forge-operator-owner`) is written inside the bucket instead, via the S3-compatible protocol using the generated access key. This is a single-object write, not a tag-set replace, so it has no equivalent risk to the AWS case above.
+Three things get recorded, not just one:
 
-On every reconcile, the rule is the same for both providers: **no tag/marker at all → claim it, but only if this operator durably recorded (in `Application.status`) having created this exact bucket itself within the last hour, or the adopt-bucket annotation (below) is set; present and naming a different Application → reject (`Degraded`, reason `BucketNotOwned`), unless adopt-bucket is set; present and matching → proceed.**
+- **The Application's Kubernetes UID** — the primary identity check on every reconcile.
+- **The Application's namespace** — scopes who's allowed to [explicitly adopt](#explicit-adoption) a bucket left behind.
+- **A stable, operator-generated ownership ID** (`forge-operator.ningendo7.github.io/storage-ownership-id`, an annotation on the `Application` itself, generated once and never regenerated) — survives a Velero restore or cluster migration, which the UID and `Application.status` don't (see [Automatic reclaim after a restore](#automatic-reclaim-after-a-restore)).
+
+**AWS**: all three are written as bucket tags (`forge-operator.ningendo7.github.io/owner-uid`, `.../owner-namespace`, `.../ownership-id`). S3's `PutBucketTagging` replaces a bucket's entire tag set rather than merging into it, so every write reads the bucket's existing tags first and writes them back alongside these — any other tags on the bucket (Terraform's own `default_tags`, cost-allocation tags, anything else already there) are preserved, not wiped, each time ownership is (re-)established.
+
+**Akamai**: Linode's Object Storage bucket API has no tagging support at all, so a small marker object (`.forge-operator-owner`) is written inside the bucket instead, via the S3-compatible protocol using the generated access key — a single-object JSON write (`{"uid":"...","namespace":"...","ownershipId":"..."}`), not a tag-set replace, so it has no equivalent risk to the AWS case above.
+
+On every reconcile, the rule is the same for both providers: **no tag/marker at all → claim it, but only if this operator durably recorded (in `Application.status`) having created this exact bucket itself within the last hour, or the adopt-bucket annotation is set; present and naming a different UID → reject (`Degraded`, reason `BucketNotOwned`) unless the ownership ID matches (automatic reclaim) or adopt-bucket is set (explicit adoption); present and matching → proceed.**
 
 That "claim on missing tag/marker, if we made it" rule is deliberate, not an oversight: an earlier design only claimed a bucket if it was created *in that exact reconcile call*, which had a self-lockout bug — if the tag/marker write failed transiently right after a real, successful bucket creation, every later reconcile would find the bucket already existing with no marker on it, and permanently treat it as foreign with no way to recover. Recording creation in `Application.status` and trusting that record for a bounded window (`bucketCreationClaimWindow`, currently **1 hour**) lets a retry within that window recover automatically, without going as far as treating *any* untagged bucket as automatically ours forever — a bucket name is released back to the provider's global namespace on deletion, so an unconditional rule would let this operator silently reclaim a completely unrelated bucket that happens to reuse a name we once had. If the tag/marker write keeps failing for longer than that hour (e.g. the operator was down, or crash-looping), the bucket falls back to being treated as foreign, and recovering it requires the same manual adopt-bucket annotation used for a `deletionPolicy: Retain` bucket, below — there's no unbounded automatic retry.
 
-If you ever delete and recreate an `Application` that's meant to reuse a bucket it previously owned, note that Kubernetes assigns a new UID on recreation — the bucket will read as not-owned even though it's logically "the same" Application from your perspective. This is the safe default (never silently reclaim). To deliberately take over a bucket owned by a different Application's UID — the common case being a bucket left behind by [`deletionPolicy: Retain`](#deletion-policy) — set this annotation on the new `Application`:
+### Automatic reclaim after a restore
+
+Kubernetes assigns a new UID whenever an object is created — including when Velero restores an `Application`, or you reapply the same manifest after a cluster rebuild. `Application.status` usually isn't restored either, since it lives on a subresource a plain `Create` call can't populate. Both would normally mean the bucket reads as not-owned even though it's logically "the same" Application from your perspective, forcing you to manually adopt every single restored Application by hand.
+
+The ownership ID annotation exists specifically to avoid that: it's ordinary `metadata`, so it survives both a Velero restore and a reapplied manifest. If a bucket's recorded ownership ID matches the restored `Application`'s own, the operator reclaims it automatically — no `adopt-bucket` annotation needed, no human intervention — and self-heals the tag/marker to the new UID. This is logged and counted separately from explicit adoption (`forge_storage_ownership_reclaimed_total`, distinct from `forge_storage_bucket_adopted_total`), since one means "this is provably the same Application coming back" and the other means "a human explicitly authorized taking over a different Application's bucket."
+
+A genuinely different, unrelated `Application` that merely reuses the same name never gets handed this ID, so it still can't automatically inherit the old bucket — the protection this whole mechanism exists for is unchanged.
+
+### Explicit adoption
+
+To deliberately take over a bucket owned by a different Application's UID with no matching ownership ID — the common case being a bucket left behind by [`deletionPolicy: Retain`](#deletion-policy) — set this annotation on the new `Application`:
 
 ```yaml
 metadata:
@@ -106,9 +123,20 @@ metadata:
     forge-operator.ningendo7.github.io/adopt-bucket: "true"
 ```
 
-With that set, a mismatched tag/marker is overwritten with the current Application's own UID instead of being rejected — but only if the `Application` that currently owns the bucket (per the UID in that tag/marker) can no longer be found in the cluster. This is a live check against the Kubernetes API at reconcile time, not just a permission gate: adopt-bucket is meant to reclaim a bucket left behind by an `Application` that's genuinely gone, not to let a second `Application` take a bucket away from one that's still alive and using it. If the previous owner still exists, adoption is refused the same as if adopt-bucket weren't set at all (`Degraded`, reason `BucketNotOwned`). It's still a deliberate, explicit, human-in-the-loop opt-in otherwise — there's no automatic reclaiming.
+With that set, a mismatched tag/marker is overwritten with the current Application's own UID instead of being rejected — but only if the `Application` that currently owns the bucket (per the UID in that tag/marker) can no longer be found in the cluster. This is a live check against the Kubernetes API at reconcile time, not just a permission gate: adopt-bucket is meant to reclaim a bucket left behind by an `Application` that's genuinely gone, not to let a second `Application` take a bucket away from one that's still alive and using it. If the previous owner still exists, adoption is refused the same as if adopt-bucket weren't set at all (`Degraded`, reason `BucketNotOwned`). It's still a deliberate, explicit, human-in-the-loop opt-in otherwise — there's no automatic reclaiming outside the ownership-ID case above.
 
-This check needs a cluster-wide list of `Application`s, since the tag/marker only ever stores a bare UID with no namespace to scope the lookup to. That's already covered by this chart's default RBAC mode (a ClusterRole). If you instead install with `rbac.namespaced: true` (a `Role`, scoped to one namespace), this check can only ever see `Application`s in the operator's own namespace — any error or an incomplete view is treated as "cannot confirm the previous owner is gone," so adoption fails closed (refused) rather than risking a live takeover, but this does mean adopt-bucket may never succeed at all under `rbac.namespaced: true` for a previous owner in a different namespace.
+**Namespace scoping.** The recorded owner namespace limits who adopt-bucket actually works for: by default, it only ever succeeds when the adopting `Application` is in the *same* namespace as the one that previously owned the bucket. Taking over a bucket across namespaces additionally requires the previous owner's namespace to explicitly grant it — an ordinary tenant creating `Application`s in their own namespace can't do this themselves, since editing a `Namespace` object typically requires separate, more-privileged RBAC:
+
+```yaml
+# On the Namespace the bucket's previous owner lived in
+metadata:
+  annotations:
+    forge.ningendo7.github.io/allow-bucket-adoption-from: "team-b"  # or "*" for any namespace
+```
+
+A bucket tagged before namespace-scoped ownership shipped has no recorded owner namespace at all — cross-namespace adoption of one of those is refused unconditionally until it's re-tagged (same-namespace re-verification of a bucket you already own is unaffected).
+
+This check (confirming the previous owner is actually gone) needs a cluster-wide list of `Application`s. That's already covered by this chart's default RBAC mode (a ClusterRole). If you instead install with `rbac.namespaced: true` (a `Role`, scoped to one namespace), this check can only ever see `Application`s in the operator's own namespace — any error or an incomplete view is treated as "cannot confirm the previous owner is gone," so adoption fails closed (refused) rather than risking a live takeover, but this does mean adopt-bucket may never succeed at all under `rbac.namespaced: true` for a previous owner in a different namespace.
 
 ## AWS bucket versioning and lifecycle policy
 

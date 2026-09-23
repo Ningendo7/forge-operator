@@ -9,8 +9,9 @@ import (
 	smithy "github.com/aws/smithy-go"
 	"github.com/linode/linodego"
 
-	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
+	"github.com/Ningendo7/forge-operator/internal/controller/akamaiobjstr"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
+	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
 )
 
 // Outcome label values recorded against forge_storage_reconcile_total and
@@ -90,4 +91,14 @@ func classifyAkamaiStorageError(err error) string {
 func isAkamaiAccessDenied(err error) bool {
 	var lerr *linodego.Error
 	return errors.As(err, &lerr) && (lerr.Code == http.StatusForbidden || lerr.Code == http.StatusUnauthorized)
+}
+
+// reconcileFailureReason picks a StatusManager.SetFailed reason for err, so
+// a missing credentials Secret shows up as its own filterable Degraded
+// reason instead of the generic ReasonFailed.
+func reconcileFailureReason(err error) string {
+	if errors.Is(err, s3storage.ErrCredentialsSecretNotFound) || errors.Is(err, akamaiobjstr.ErrTokenSecretNotFound) {
+		return statusmanager.ReasonSecretNotFound
+	}
+	return statusmanager.ReasonFailed
 }

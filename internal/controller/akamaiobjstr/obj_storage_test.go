@@ -2,6 +2,7 @@ package akamaiobjstr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -22,6 +23,24 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+// markerBody JSON-encodes an ownerMarker the way claimOwnership does, for
+// building mock GetObject responses in tests.
+func markerBody(t *testing.T, uid, namespace string) string {
+	t.Helper()
+	return markerBodyWithOwnershipID(t, uid, namespace, "")
+}
+
+// markerBodyWithOwnershipID is markerBody plus an explicit ownership ID, for
+// tests exercising the UID-changed-but-ownership-ID-matches reclaim path.
+func markerBodyWithOwnershipID(t *testing.T, uid, namespace, ownershipID string) string {
+	t.Helper()
+	body, err := json.Marshal(ownerMarker{UID: uid, Namespace: namespace, OwnershipID: ownershipID})
+	if err != nil {
+		t.Fatalf("failed to encode test marker: %v", err)
+	}
+	return string(body)
+}
 
 func notFoundErr() error {
 	return &linodego.Error{Code: http.StatusNotFound}
@@ -348,7 +367,7 @@ func TestResolveEndpoint_DefaultsToRegionBasedEndpoint(t *testing.T) {
 func TestReconcileBucket_HappyPath(t *testing.T) {
 	withS3ObjectClient(t, &mockS3ObjectClient{
 		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
-			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(string(testAppUID)))}, nil
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(markerBody(t, string(testAppUID), testNamespace)))}, nil
 		},
 	})
 
@@ -396,8 +415,12 @@ func TestClaimOrVerifyOwnership_ClaimsMissingMarkerWhenPreviouslyCreatedByUs(t *
 		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
 			claimed = true
 			body, _ := io.ReadAll(params.Body)
-			if string(body) != string(testAppUID) {
-				t.Errorf("expected marker body to be the app UID, got %q", body)
+			var owner ownerMarker
+			if err := json.Unmarshal(body, &owner); err != nil {
+				t.Fatalf("expected marker body to be valid JSON, got %q: %v", body, err)
+			}
+			if owner.UID != string(testAppUID) || owner.Namespace != testNamespace {
+				t.Errorf("expected marker {uid:%q namespace:%q}, got %+v", testAppUID, testNamespace, owner)
 			}
 			return &s3sdk.PutObjectOutput{}, nil
 		},
@@ -526,10 +549,12 @@ func TestPreviouslyCreatedByUs(t *testing.T) {
 }
 
 func TestClaimOrVerifyOwnership_ProceedsWhenMarkerMatches(t *testing.T) {
+	// A fully-migrated marker: JSON body, UID and namespace both already
+	// correct -- nothing to backfill, no write expected.
 	putCalled := false
 	withS3ObjectClient(t, &mockS3ObjectClient{
 		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
-			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(string(testAppUID)))}, nil
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(markerBody(t, string(testAppUID), testNamespace)))}, nil
 		},
 		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
 			putCalled = true
@@ -544,6 +569,141 @@ func TestClaimOrVerifyOwnership_ProceedsWhenMarkerMatches(t *testing.T) {
 	}
 	if putCalled {
 		t.Fatalf("expected no write when the marker already matches")
+	}
+}
+
+func TestClaimOrVerifyOwnership_BackfillsNamespaceForLegacyMarkerMatchingUID(t *testing.T) {
+	// A legacy marker: bare UID string, no namespace at all. The UID still
+	// confirms this Application owns the bucket, so this must self-heal by
+	// rewriting the marker to the modern JSON format rather than error or
+	// silently leave the namespace unrecorded.
+	var writtenBody []byte
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(string(testAppUID)))}, nil
+		},
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			writtenBody, _ = io.ReadAll(params.Body)
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+
+	m := newTestManager(nil)
+
+	if err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk"); err != nil {
+		t.Fatalf("claimOrVerifyOwnership returned error: %v", err)
+	}
+
+	var owner ownerMarker
+	if err := json.Unmarshal(writtenBody, &owner); err != nil {
+		t.Fatalf("expected the backfilled marker to be valid JSON, got %q: %v", writtenBody, err)
+	}
+	if owner.UID != string(testAppUID) || owner.Namespace != testNamespace {
+		t.Fatalf("expected the backfilled marker {uid:%q namespace:%q}, got %+v", testAppUID, testNamespace, owner)
+	}
+}
+
+func TestClaimOrVerifyOwnership_BackfillsOwnershipIDForBucketAlreadyOwned(t *testing.T) {
+	// UID and namespace already match, but the marker predates the
+	// ownership-ID field -- self-heal by rewriting it in, same as the
+	// namespace backfill.
+	var writtenBody []byte
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(markerBody(t, string(testAppUID), testNamespace)))}, nil
+		},
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			writtenBody, _ = io.ReadAll(params.Body)
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+
+	m := newTestManager(nil)
+	m.app.Annotations = map[string]string{naming.StorageOwnershipIDAnnotation: testOwnershipID}
+
+	if err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk"); err != nil {
+		t.Fatalf("claimOrVerifyOwnership returned error: %v", err)
+	}
+
+	var owner ownerMarker
+	if err := json.Unmarshal(writtenBody, &owner); err != nil {
+		t.Fatalf("expected the backfilled marker to be valid JSON, got %q: %v", writtenBody, err)
+	}
+	if owner.OwnershipID != testOwnershipID {
+		t.Fatalf("expected the backfilled marker's ownership ID to be %q, got %q", testOwnershipID, owner.OwnershipID)
+	}
+}
+
+func TestClaimOrVerifyOwnership_ReclaimsAfterUIDChangeWhenOwnershipIDMatches(t *testing.T) {
+	// The Velero-restore/cluster-migration case: a different UID owns the
+	// marker (this Application's own previous incarnation), but the stable
+	// ownership ID matches -- must reclaim automatically, no adopt-bucket
+	// annotation required.
+	var writtenBody []byte
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(markerBodyWithOwnershipID(t, string(testOtherUID), testNamespace, testOwnershipID)))}, nil
+		},
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			writtenBody, _ = io.ReadAll(params.Body)
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+
+	m := newTestManager(nil)
+	m.app.Annotations = map[string]string{naming.StorageOwnershipIDAnnotation: testOwnershipID}
+
+	forgemetrics.StorageOwnershipReclaimedTotal.Reset()
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
+	if err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk"); err != nil {
+		t.Fatalf("claimOrVerifyOwnership returned error: %v", err)
+	}
+
+	var owner ownerMarker
+	if err := json.Unmarshal(writtenBody, &owner); err != nil {
+		t.Fatalf("expected the rewritten marker to be valid JSON, got %q: %v", writtenBody, err)
+	}
+	if owner.UID != string(testAppUID) {
+		t.Fatalf("expected the marker rewritten to this Application's own UID %q, got %q", testAppUID, owner.UID)
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageOwnershipReclaimedTotal.WithLabelValues(string(forgev1alpha1.ProviderAkamaiObjectStorage))); got != 1 {
+		t.Fatalf("expected StorageOwnershipReclaimedTotal to be 1 after an automatic reclaim, got %v", got)
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAkamaiObjectStorage))); got != 0 {
+		t.Fatalf("expected StorageBucketAdoptedTotal to stay 0 for an automatic reclaim, not a human-authorized adoption, got %v", got)
+	}
+}
+
+func TestClaimOrVerifyOwnership_RefusesReclaimWhenOwnershipIDMismatched(t *testing.T) {
+	// A different UID and a non-matching ownership ID: this is a genuinely
+	// different Application, not a restore of this one -- must still
+	// require the explicit adopt-bucket annotation.
+	putCalled := false
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(markerBodyWithOwnershipID(t, string(testOtherUID), testNamespace, "some-other-ownership-id")))}, nil
+		},
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			putCalled = true
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+
+	m := newTestManager(nil)
+	m.app.Annotations = map[string]string{naming.StorageOwnershipIDAnnotation: testOwnershipID}
+
+	forgemetrics.StorageOwnershipReclaimedTotal.Reset()
+
+	err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk")
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned when the ownership ID doesn't match, got %v", err)
+	}
+	if putCalled {
+		t.Fatalf("expected the marker to be left untouched when the ownership ID doesn't match")
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageOwnershipReclaimedTotal.WithLabelValues(string(forgev1alpha1.ProviderAkamaiObjectStorage))); got != 0 {
+		t.Fatalf("expected no reclaim to be recorded, got %v", got)
 	}
 }
 
@@ -566,13 +726,20 @@ func TestClaimOrVerifyOwnership_AdoptsMismatchedMarkerWhenAnnotationSet(t *testi
 	claimed := false
 	withS3ObjectClient(t, &mockS3ObjectClient{
 		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
-			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(string(testOtherUID)))}, nil
+			// Same namespace as the adopting Application (testNamespace) --
+			// this exercises same-namespace adoption, which needs no
+			// cross-namespace grant.
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(markerBody(t, string(testOtherUID), testNamespace)))}, nil
 		},
 		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
 			claimed = true
 			body, _ := io.ReadAll(params.Body)
-			if string(body) != string(testAppUID) {
-				t.Errorf("expected the marker to be rewritten to this Application's own UID, got %q", body)
+			var owner ownerMarker
+			if err := json.Unmarshal(body, &owner); err != nil {
+				t.Fatalf("expected the rewritten marker to be valid JSON, got %q: %v", body, err)
+			}
+			if owner.UID != string(testAppUID) || owner.Namespace != testNamespace {
+				t.Errorf("expected the marker rewritten to {uid:%q namespace:%q}, got %+v", testAppUID, testNamespace, owner)
 			}
 			return &s3sdk.PutObjectOutput{}, nil
 		},
@@ -595,6 +762,137 @@ func TestClaimOrVerifyOwnership_AdoptsMismatchedMarkerWhenAnnotationSet(t *testi
 	}
 	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAkamaiObjectStorage))); got != 1 {
 		t.Fatalf("expected StorageBucketAdoptedTotal to be 1 after an actual adoption, got %v", got)
+	}
+}
+
+func TestClaimOrVerifyOwnership_RefusesAdoptionOfLegacyMarkerWithNoNamespace(t *testing.T) {
+	// A marker written before namespace-scoped ownership shipped is a bare
+	// UID string naming a *different* Application, with no namespace to
+	// compare against -- must fail closed rather than silently treat it as
+	// same-namespace.
+	putCalled := false
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(string(testOtherUID)))}, nil
+		},
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			putCalled = true
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+
+	m := newTestManager(nil)
+	m.app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
+
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
+	err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk")
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned for a legacy marker with no recorded namespace, got %v", err)
+	}
+	if putCalled {
+		t.Fatalf("expected the marker to be left untouched for a legacy marker with no recorded namespace")
+	}
+}
+
+func TestClaimOrVerifyOwnership_RefusesCrossNamespaceAdoptionWithoutGrant(t *testing.T) {
+	putCalled := false
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(markerBody(t, string(testOtherUID), testOwnerNamespace)))}, nil
+		},
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			putCalled = true
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testAdopterNamespace, UID: testAppUID},
+	}
+	app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
+
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
+
+	m := &Manager{
+		k8sClient: fakeClient,
+		app:       app,
+		storage:   &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testRegion},
+		bucket:    testBucket,
+		region:    testRegion,
+	}
+
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
+	err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk")
+	if !errors.Is(err, ErrBucketNotOwned) {
+		t.Fatalf("expected ErrBucketNotOwned for cross-namespace adoption without a grant, got %v", err)
+	}
+	if putCalled {
+		t.Fatalf("expected the marker to be left untouched without a cross-namespace grant")
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAkamaiObjectStorage))); got != 0 {
+		t.Fatalf("expected no adoption to be recorded, got %v", got)
+	}
+}
+
+func TestClaimOrVerifyOwnership_AllowsCrossNamespaceAdoptionWithGrant(t *testing.T) {
+	var writtenBody []byte
+	withS3ObjectClient(t, &mockS3ObjectClient{
+		getObjectFunc: func(ctx context.Context, params *s3sdk.GetObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.GetObjectOutput, error) {
+			return &s3sdk.GetObjectOutput{Body: io.NopCloser(strings.NewReader(markerBody(t, string(testOtherUID), testOwnerNamespace)))}, nil
+		},
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			writtenBody, _ = io.ReadAll(params.Body)
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testAdopterNamespace, UID: testAppUID},
+	}
+	app.Annotations = map[string]string{naming.AdoptBucketAnnotation: naming.AdoptBucketAnnotationValue}
+
+	// The previous owner's namespace explicitly grants this adopting
+	// namespace permission via naming.AllowBucketAdoptionFromAnnotation.
+	ownerNamespace := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        testOwnerNamespace,
+			Annotations: map[string]string{naming.AllowBucketAdoptionFromAnnotation: testAdopterNamespace},
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app, ownerNamespace).WithStatusSubresource(app).Build()
+
+	m := &Manager{
+		k8sClient: fakeClient,
+		app:       app,
+		storage:   &forgev1alpha1.StorageSpec{Bucket: testBucket, Region: testRegion},
+		bucket:    testBucket,
+		region:    testRegion,
+	}
+
+	forgemetrics.StorageBucketAdoptedTotal.Reset()
+
+	if err := m.claimOrVerifyOwnership(context.Background(), "demo-bucket.us-iad-10.linodeobjects.com", "ak", "sk"); err != nil {
+		t.Fatalf("claimOrVerifyOwnership returned error: %v", err)
+	}
+
+	var owner ownerMarker
+	if err := json.Unmarshal(writtenBody, &owner); err != nil {
+		t.Fatalf("expected the rewritten marker to be valid JSON, got %q: %v", writtenBody, err)
+	}
+	if owner.Namespace != testAdopterNamespace {
+		t.Fatalf("expected the marker rewritten to the adopting namespace %q, got %+v", testAdopterNamespace, owner)
+	}
+	if got := testutil.ToFloat64(forgemetrics.StorageBucketAdoptedTotal.WithLabelValues(string(forgev1alpha1.ProviderAkamaiObjectStorage))); got != 1 {
+		t.Fatalf("expected StorageBucketAdoptedTotal to be 1 after a granted cross-namespace adoption, got %v", got)
 	}
 }
 
@@ -673,6 +971,49 @@ func TestClaimOwnership_PropagatesPutError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected error from claimOwnership, got nil")
+	}
+}
+
+func TestClaimOwnership_IncludesOwnershipIDWhenSet(t *testing.T) {
+	var writtenBody []byte
+	m := newTestManager(nil)
+	m.app.Annotations = map[string]string{naming.StorageOwnershipIDAnnotation: testOwnershipID}
+
+	err := m.claimOwnership(context.Background(), &mockS3ObjectClient{
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			writtenBody, _ = io.ReadAll(params.Body)
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("claimOwnership returned error: %v", err)
+	}
+
+	var owner ownerMarker
+	if unmarshalErr := json.Unmarshal(writtenBody, &owner); unmarshalErr != nil {
+		t.Fatalf("expected valid JSON, got %q: %v", writtenBody, unmarshalErr)
+	}
+	if owner.OwnershipID != testOwnershipID {
+		t.Fatalf("expected ownership ID %q, got %q", testOwnershipID, owner.OwnershipID)
+	}
+}
+
+func TestClaimOwnership_OmitsOwnershipIDWhenUnset(t *testing.T) {
+	var writtenBody []byte
+	m := newTestManager(nil)
+
+	err := m.claimOwnership(context.Background(), &mockS3ObjectClient{
+		putObjectFunc: func(ctx context.Context, params *s3sdk.PutObjectInput, optFns ...func(*s3sdk.Options)) (*s3sdk.PutObjectOutput, error) {
+			writtenBody, _ = io.ReadAll(params.Body)
+			return &s3sdk.PutObjectOutput{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("claimOwnership returned error: %v", err)
+	}
+
+	if strings.Contains(string(writtenBody), "ownershipId") {
+		t.Fatalf("expected no ownershipId field when the Application carries none, got %q", writtenBody)
 	}
 }
 

@@ -808,8 +808,8 @@ func TestReconcileDeployment_SetsOwnerReference(t *testing.T) {
 		t.Fatalf("expected owner reference name %q, got %q", app.Name, owner.Name)
 	}
 
-	if owner.Kind != "Application" {
-		t.Fatalf("expected owner reference kind %q, got %q", "Application", owner.Kind)
+	if owner.Kind != applicationKind {
+		t.Fatalf("expected owner reference kind %q, got %q", applicationKind, owner.Kind)
 	}
 }
 

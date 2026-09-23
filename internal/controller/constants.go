@@ -9,4 +9,7 @@ const (
 
 	// deploymentKind is the Kind used when referencing a Deployment (e.g. ownerRef, scaleTargetRef).
 	deploymentKind = "Deployment"
+
+	// applicationKind is the Kind used when referencing an Application (e.g. TypeMeta on an SSA patch, ownerRef assertions in tests).
+	applicationKind = "Application"
 )

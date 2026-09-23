@@ -40,14 +40,10 @@ func isNotFoundError(err error) bool {
 // IRSA cleanup deliberately runs before, and independently of, the bucket
 // ownership check below: the role's identity is entirely deterministic
 // (irsaRoleName derives it from this Application's own namespace/name),
-// never ambiguous the way a bucket's ownership can be, so there's nothing
-// to verify before removing it. Confirmed live as a real gap: once a
-// bucket is adopted away from this Application via the adopt-bucket
-// annotation, verifyOwnership will correctly and permanently refuse to
-// touch that bucket for this Application from then on -- which, when IRSA
-// cleanup was gated behind that same check, meant this Application could
-// never clean up its own IAM role again either, leaking it indefinitely
-// even though the role itself was never in dispute.
+// never ambiguous the way a bucket's ownership can be. Gating it behind the
+// ownership check would leak the role indefinitely once a bucket is adopted
+// away via the adopt-bucket annotation, since verifyOwnership then
+// permanently refuses to touch that bucket for this Application.
 func (m *Manager) CleanupBucket(
 	ctx context.Context,
 ) (irsaErr error, err error) {
@@ -86,14 +82,10 @@ func (m *Manager) CleanupBucket(
 
 // CleanupCredentialsOnly deletes only this Application's IRSA role, leaving
 // the bucket untouched -- used when deletionPolicy is Retain, so the bucket
-// survives but its no-longer-tracked IAM role doesn't linger indefinitely.
-// A later Application adopting the retained bucket mints its own fresh
-// role/credentials regardless (nothing can recover this one's), so it
-// serves no purpose once this Application is gone. Safe to call
-// unconditionally, independent of bucket ownership, for the same reason
-// CleanupBucket's own IRSA cleanup already runs before its ownership check
-// above: the role's identity is entirely deterministic, never ambiguous the
-// way a bucket's ownership can be.
+// survives but its no-longer-tracked IAM role doesn't linger indefinitely. A
+// later Application adopting the retained bucket mints its own fresh
+// role/credentials regardless. Safe to call unconditionally, independent of
+// bucket ownership, since the role's identity is entirely deterministic.
 func (m *Manager) CleanupCredentialsOnly(ctx context.Context) error {
 	return m.cleanupAppIRSA(ctx)
 }
@@ -103,10 +95,8 @@ func (m *Manager) CleanupCredentialsOnly(ctx context.Context) error {
 // adoptBucketRequested from desireds3.go (same package). A bucket that's
 // already gone entirely (noSuchBucketErrorCode, distinct from
 // noSuchTagSetErrorCode's "exists but untagged") is treated as a
-// successful no-op here -- confirmed live as a real gap otherwise: without
-// this, retrying cleanup on a bucket a previous attempt had already
-// successfully deleted wrongly reported ErrBucketNotOwned for a bucket
-// that was, in fact, correctly cleaned up already.
+// successful no-op here, so retrying cleanup on an already-deleted bucket
+// doesn't wrongly report ErrBucketNotOwned.
 func (m *Manager) verifyOwnership(ctx context.Context) error {
 	out, err := m.s3client.GetBucketTagging(ctx, &s3sdk.GetBucketTaggingInput{
 		Bucket: aws.String(m.bucket),
@@ -114,14 +104,9 @@ func (m *Manager) verifyOwnership(ctx context.Context) error {
 	if err != nil {
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == noSuchBucketErrorCode {
-			// Already gone -- nothing to verify or clean up. Confirmed
-			// live, via this package's own integration test: without this
-			// check, retrying cleanup on a bucket a previous attempt had
-			// already successfully deleted (e.g. after a transient error
-			// removing the finalizer itself, or a controller restart
-			// mid-flight) wrongly reported ErrBucketNotOwned for a bucket
-			// that was in fact correctly cleaned up already, permanently
-			// stuck-failing an Application's deletion for no real reason.
+			// Already gone -- nothing to verify or clean up (e.g. after a
+			// transient error removing the finalizer, or a controller
+			// restart mid-flight).
 			return nil
 		}
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == noSuchTagSetErrorCode {

@@ -10,7 +10,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	forgev1alpha1 "github.com/Ningendo7/forge-operator/api/v1alpha1"
-	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
+	"github.com/Ningendo7/forge-operator/internal/controller/akamaiobjstr"
 	forgemetrics "github.com/Ningendo7/forge-operator/internal/controller/observability"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
 	"github.com/Ningendo7/forge-operator/internal/controller/storagestatus"
@@ -75,13 +75,10 @@ func (r *ApplicationReconciler) handleFinalizer(
 // which credentials to use and whether the bucket should actually be
 // deleted.
 //
-// Akamai.AccessKeySecretRef must be carried forward too, not just the
-// top-level fields -- akamaiobjstr.NewManager resolves the input token
-// Secret via naming.AkamaiTokenSecret(app), which falls back to a default
-// name whenever Spec.Storage.Akamai is nil. Omitting it here silently broke
-// cleanup for any Akamai Application using a customized (non-default)
-// accessKeySecretRef: the token Secret genuinely exists, cleanup just looks
-// for it under the wrong (default) name and fails to find it.
+// Akamai.AccessKeySecretRef must be carried forward too: akamaiobjstr.NewManager
+// resolves the input token Secret via naming.AkamaiTokenSecret(app), which
+// falls back to a default name whenever Spec.Storage.Akamai is nil, breaking
+// cleanup for any Akamai Application using a customized accessKeySecretRef.
 func storageSpecFromStatus(status *forgev1alpha1.StorageStatus) *forgev1alpha1.StorageSpec {
 	spec := &forgev1alpha1.StorageSpec{
 		Provider:       status.Provider,
@@ -101,24 +98,18 @@ func (r *ApplicationReconciler) finalizeApplication(
 	application *forgev1alpha1.Application,
 ) (err error) {
 
-	// spec.storage may already be gone -- either because it was removed from
-	// an otherwise-still-live Application (see reconcileStorage's own call
-	// into this same function) or because the Application was deleted after
-	// that removal, before the cleanup it should have triggered actually
-	// ran. Status.Storage is the only remaining record of what to clean up
-	// in that case.
+	// spec.storage may already be gone -- either removed from an
+	// otherwise-still-live Application, or the Application was deleted after
+	// that removal before cleanup ran. Status.Storage is the only remaining
+	// record of what to clean up in that case.
 	//
-	// Deliberately kept in a local variable, never written onto
-	// application.Spec.Storage itself: every r.Status().Update(ctx,
-	// application) call below re-syncs application's non-status fields from
-	// whatever's actually stored server-side once it returns (real
-	// apiserver behavior, not a fake-client quirk -- a status-subresource
-	// response is decoded back into the same object pointer) -- which would
-	// silently revert a synthesized Spec.Storage back to nil mid-function.
-	// cleanupApp is a throwaway snapshot, built once storage is known
-	// non-nil, purely so NewManager (which reads Spec.Storage off whatever
-	// *Application it's given) sees a stable value regardless of how many
-	// status updates application itself goes through afterward.
+	// Kept in a local variable, never written onto application.Spec.Storage
+	// itself: every r.Status().Update(ctx, application) call below re-syncs
+	// application's non-status fields from the server (a status-subresource
+	// response decodes back into the same object pointer), which would
+	// revert a synthesized Spec.Storage back to nil mid-function. cleanupApp
+	// below is a throwaway snapshot so NewManager sees a stable value
+	// regardless of how many status updates application goes through after.
 	storage := application.Spec.Storage
 	if storage == nil && application.Status.Storage != nil {
 		storage = storageSpecFromStatus(application.Status.Storage)
@@ -166,6 +157,8 @@ func (r *ApplicationReconciler) finalizeApplication(
 			serviceAccountNameFor(application),
 			r.OIDCProviderARN,
 			r.OIDCProviderURL,
+			r.PermissionsBoundaryARN,
+			nil, // cleanup never creates a bucket, so recordCreated is never invoked
 			r.S3RateLimiter,
 			r.IAMRateLimiter,
 		)
@@ -204,6 +197,7 @@ func (r *ApplicationReconciler) finalizeApplication(
 			r.Client,
 			cleanupApp,
 			r.DefaultAkamaiRegion,
+			nil, // cleanup never creates a bucket, so recordCreated is never invoked
 			r.AkamaiAccountRateLimiter,
 			r.AkamaiObjectRateLimiter,
 		)
@@ -233,21 +227,16 @@ func (r *ApplicationReconciler) finalizeApplication(
 
 // cleanupRetainedStorageCredentials deletes this Application's IAM
 // role/access key even though deletionPolicy is Retain -- the bucket itself
-// is left alone (see retainStorage below), but there's no reason to also
-// leave behind a credential nothing tracks anymore: a later Application
-// that adopts the retained bucket mints its own fresh credential regardless
-// (ensureAccessKey/IRSA role creation can't recover the old one -- its
-// secret was only ever exposed once, in this operator's own output Secret,
-// which is deleted along with the rest of this Application's Kubernetes
-// resources), so the old one serves no purpose and is just an untracked,
-// still-valid credential sitting in the cloud account indefinitely.
+// is left alone (see retainStorage below), but a later Application that
+// adopts the retained bucket mints its own fresh credential regardless
+// (the old secret was only ever exposed once, in this Application's own
+// output Secret, which is deleted along with it), so the old credential
+// would otherwise sit untracked and still-valid in the cloud account
+// indefinitely.
 //
-// Best-effort and never fails the Application's own deletion -- same
-// reasoning as retainStorage itself: a transient failure here shouldn't
-// block the Application from actually going away. Surfaced instead as a
-// Warning Event for later manual cleanup, the same visibility non-Retain
-// credential-cleanup failures already get (IRSACleanupFailed/
-// AccessKeyCleanupFailed below).
+// Best-effort and never fails the Application's own deletion, the same as
+// retainStorage. Failures are surfaced as a Warning Event, the same
+// visibility non-Retain credential-cleanup failures get.
 func (r *ApplicationReconciler) cleanupRetainedStorageCredentials(
 	ctx context.Context,
 	application *forgev1alpha1.Application,
@@ -269,6 +258,8 @@ func (r *ApplicationReconciler) cleanupRetainedStorageCredentials(
 			serviceAccountNameFor(application),
 			r.OIDCProviderARN,
 			r.OIDCProviderURL,
+			r.PermissionsBoundaryARN,
+			nil, // cleanup never creates a bucket, so recordCreated is never invoked
 			r.S3RateLimiter,
 			r.IAMRateLimiter,
 		)
@@ -289,6 +280,7 @@ func (r *ApplicationReconciler) cleanupRetainedStorageCredentials(
 			r.Client,
 			cleanupApp,
 			r.DefaultAkamaiRegion,
+			nil, // cleanup never creates a bucket, so recordCreated is never invoked
 			r.AkamaiAccountRateLimiter,
 			r.AkamaiObjectRateLimiter,
 		)
@@ -308,16 +300,12 @@ func (r *ApplicationReconciler) cleanupRetainedStorageCredentials(
 
 // retainStorage skips *bucket* deletion when spec.storage.deletionPolicy is
 // Retain: the bucket (and its ownership tag/marker) is left exactly as-is,
-// only the Kubernetes Application object and its finalizer are removed. Its
-// IAM role/access key still gets a separate best-effort cleanup attempt
-// first (see cleanupRetainedStorageCredentials above) -- Retain protects the
-// data, not the no-longer-tracked credential that happened to reach it.
-// Emits an Event so this is visible and auditable, not silent. bucket is
-// passed in explicitly rather than read from application.Spec.Storage since
-// the caller may be cleaning up a bucket described only by Status.Storage
-// (spec.storage already removed). Never fails: retaining storage is just
-// skipping cloud calls, and a best-effort status/Event write here shouldn't
-// block the Application's own deletion from proceeding.
+// only the Kubernetes Application object and its finalizer are removed --
+// Retain protects the data, not the credential that reaches it (see
+// cleanupRetainedStorageCredentials above). Emits an Event so this is
+// visible and auditable. bucket is passed in explicitly rather than read
+// from application.Spec.Storage since the caller may be cleaning up a
+// bucket described only by Status.Storage. Never fails.
 func (r *ApplicationReconciler) retainStorage(
 	ctx context.Context,
 	application *forgev1alpha1.Application,

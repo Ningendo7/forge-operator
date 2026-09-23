@@ -62,33 +62,23 @@ func NewLimiter(qps float64, burst int) *rate.Limiter {
 }
 
 // AWSMiddleware returns an aws-sdk-go-v2 middleware that blocks on
-// limiter.Wait before letting a request proceed to the network, for
-// exactly as long as it takes a token to become available or until the
-// call's own context is done, whichever comes first -- so this composes
-// correctly with storageReconcileTimeout/finalizerCleanupTimeout: a wait
-// long enough to exceed those surfaces as a plain context.DeadlineExceeded,
-// which classifyAWSStorageError/classifyAkamaiStorageError already map to
-// outcomeTimeout. No new outcome classification needed.
+// limiter.Wait before letting a request proceed, until a token is
+// available or the call's own context ends -- a long-enough wait surfaces
+// as a plain context.DeadlineExceeded, which classifyAWSStorageError/
+// classifyAkamaiStorageError already map to outcomeTimeout, so no new
+// outcome classification is needed.
 //
 // name labels the forge_rate_limit_wait_duration_seconds observation this
-// records for every call regardless of outcome -- e.g. "s3" or "iam" (see
-// s3/client.go) -- so a specific surface's wait times can be told apart on
-// the same shared metric, the tuning signal for that surface's
-// *_RATE_LIMIT_QPS/_BURST env vars (see cmd/main.go).
+// records for every call regardless of outcome, e.g. "s3" or "iam".
 //
-// A nil limiter is a no-op (the request proceeds immediately, unlimited,
-// and nothing is observed) rather than a panic -- the same defensive floor
-// NewLimiter already applies to a misconfigured QPS/burst, extended to a
-// caller that forgot to construct a limiter at all (e.g. a test building
-// an ApplicationReconciler without setting its *RateLimiter fields).
+// A nil limiter is a no-op rather than a panic, the same defensive floor
+// NewLimiter applies to a misconfigured QPS/burst.
 //
-// Deliberately attached via a client's own per-instance Options.APIOptions
-// (see s3/client.go, Akamai-Obj-Str/client.go) rather than the shared
-// aws.Config.APIOptions every client built from that config would
-// otherwise inherit together -- that's what would collapse S3 and IAM (or
-// Akamai's account and object-endpoint clients) onto one shared budget,
-// throttling the higher-capacity one down to the tighter one's ceiling for
-// no reason tied to its own real capacity.
+// Attached via a client's own per-instance Options.APIOptions (see
+// s3/client.go, akamaiobjstr/client.go), not the shared aws.Config
+// every client built from it would otherwise inherit -- sharing would
+// collapse S3 and IAM (or Akamai's two surfaces) onto one budget,
+// throttling the higher-capacity one down to the tighter one's ceiling.
 func AWSMiddleware(limiter *rate.Limiter, name string) func(*smithymiddleware.Stack) error {
 	return func(stack *smithymiddleware.Stack) error {
 		return stack.Finalize.Add(
@@ -115,7 +105,7 @@ func AWSMiddleware(limiter *rate.Limiter, name string) func(*smithymiddleware.St
 
 // RoundTripper is AWSMiddleware's plain net/http equivalent, for clients
 // that aren't aws-sdk-go-v2-based -- specifically linodego's account API
-// client (see Akamai-Obj-Str/client.go), which only ever accepts a
+// client (see akamaiobjstr/client.go), which only ever accepts a
 // *http.Client to instrument.
 type RoundTripper struct {
 	limiter *rate.Limiter

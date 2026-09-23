@@ -36,15 +36,11 @@ type DeletionPolicy string
 
 const (
 	// DeletionPolicyDelete deletes the bucket (and its contents) along with
-	// the Application. Default when unset, matching this operator's
-	// previous, only-ever behavior.
+	// the Application.
 	DeletionPolicyDelete DeletionPolicy = "Delete"
 
-	// DeletionPolicyRetain leaves the bucket in place when the Application
-	// is deleted -- the Kubernetes Application object is still removed (its
-	// finalizer still clears), only the cloud resource itself is kept. The
-	// bucket's ownership tag/marker is left as-is, so it isn't silently
-	// available for a different Application to adopt.
+	// DeletionPolicyRetain (the default) removes the Application and its
+	// finalizer but leaves the bucket and its ownership marker in place.
 	DeletionPolicyRetain DeletionPolicy = "Retain"
 )
 
@@ -77,10 +73,6 @@ type ApplicationSpec struct {
 	// ConfigMap configuration.
 	// +optional
 	ConfigMap *ConfigSpec `json:"config,omitempty"`
-
-	// Secret configuration.
-	// +optional
-	Secret *SecretSpec `json:"secret,omitempty"`
 
 	// Kubernetes Service configuration.
 	// +optional
@@ -151,30 +143,18 @@ type StorageStatus struct {
 	Bucket string `json:"bucket,omitempty"`
 
 	// Created records whether this operator itself successfully created
-	// this bucket (as opposed to finding one that already existed). Used
-	// to decide whether an untagged/unmarked bucket found on a later
-	// reconcile is safe to claim ownership of: only if this operator has a
-	// durable record of having created it itself, not merely because no
-	// tag/marker happens to be present -- which could just as easily mean
-	// a long-lived, genuinely foreign bucket that happens to share this
-	// name. Set the moment bucket creation succeeds, before ownership
-	// tagging/marking is even attempted, so it survives a transient
-	// failure in that later step -- exactly the case this field exists to
-	// recover from.
+	// this bucket, as opposed to finding one that already existed.
+	// Internal bookkeeping: combined with CreatedAt, it lets a later
+	// reconcile recover from a transient failure tagging/marking a bucket
+	// it just created, without treating every untagged bucket as
+	// automatically its own.
 	// +optional
 	Created bool `json:"created,omitempty"`
 
 	// CreatedAt records when Created was set, bounding how long it's
-	// trusted as ownership provenance. Cloud bucket names are typically
-	// released back to the provider's global namespace once deleted --
-	// without a bound, a bucket this operator created that was later
-	// deleted and had its name picked up again by something completely
-	// unrelated (same cloud account or a different one) would be silently
-	// reclaimed as ours the next time the untagged-bucket path runs, since
-	// Created/Bucket alone can't tell the two apart. Scoped to the retry
-	// window Created actually exists for -- recovering from a transient
-	// failure in the ownership-tagging step right after creation -- not
-	// meant as a permanent claim on the name.
+	// trusted as ownership provenance (see bucketCreationClaimWindow) --
+	// a deleted bucket's name can be reused by something unrelated, so
+	// this can't be a permanent claim.
 	// +optional
 	CreatedAt metav1.Time `json:"createdAt,omitempty"`
 
@@ -227,18 +207,11 @@ type AkamaiStorageStatus struct {
 	Endpoint string `json:"endpoint,omitempty"`
 
 	// AccessKeySecretRef is spec.storage.akamai.accessKeySecretRef as it
-	// stood when this bucket was last successfully reconciled, if any.
-	// Recorded for the same reason StorageStatus.SecretName is: once
-	// spec.storage is removed, this is the only remaining record of which
-	// Secret holds the Akamai API token cleanup needs to authenticate with.
-	// Only a Secret *name* is recorded here, never its contents -- the same
-	// non-sensitivity naming.StorageSecret's own recorded name already has.
-	// Without this, a customized (non-default) accessKeySecretRef was
-	// silently lost on spec.storage removal: cleanup fell back to
-	// naming.AkamaiTokenSecret's default name instead of the one actually
-	// configured, failed to find the token Secret under that wrong name,
-	// and got stuck -- even though the real credentials existed all along,
-	// just under a different name.
+	// stood when this bucket was last successfully reconciled, if any --
+	// same reasoning as StorageStatus.SecretName: once spec.storage is
+	// removed, this is the only remaining record of which Secret holds
+	// the Akamai API token cleanup needs. Only the Secret name is
+	// recorded, never its contents.
 	// +optional
 	AccessKeySecretRef string `json:"accessKeySecretRef,omitempty"`
 }
@@ -293,21 +266,6 @@ type ConfigSpec struct {
 	// Data stored in the ConfigMap.
 	// +optional
 	Data map[string]string `json:"data,omitempty"`
-}
-
-// SecretSpec defines the Secret data that the operator manages.
-type SecretSpec struct {
-	// Name of the Secret to reconcile.
-	// +optional
-	Name string `json:"name,omitempty"`
-
-	// String data stored in the Secret.
-	// +optional
-	StringData map[string]string `json:"stringData,omitempty"`
-
-	// Secret type.
-	// +optional
-	Type corev1.SecretType `json:"type,omitempty"`
 }
 
 // ServiceSpec defines service settings.
@@ -411,15 +369,11 @@ type StorageSpec struct {
 	Bucket string `json:"bucket"`
 
 	// DeletionPolicy controls what happens to the bucket when this
-	// Application is deleted. Defaults to "Retain" when unset: object
-	// storage most often holds real data, so losing a bucket because an
-	// Application was deleted (intentionally or by mistake) is a worse
-	// failure mode than a retained bucket costing a few cents until someone
-	// notices. Set this explicitly to "Delete" for ephemeral/throwaway
-	// Applications (dev sandboxes, PR preview environments) where automatic
-	// cleanup is actually wanted -- at fleet scale, forgetting to do so
-	// under this default means a retained bucket per deleted Application,
-	// not a one-off.
+	// Application is deleted. Defaults to "Retain": losing real data
+	// because an Application was deleted is worse than a retained bucket
+	// costing a few cents until someone notices. Set explicitly to
+	// "Delete" for ephemeral Applications (dev sandboxes, PR previews)
+	// where automatic cleanup is actually wanted.
 	// +optional
 	// +kubebuilder:default=Retain
 	DeletionPolicy DeletionPolicy `json:"deletionPolicy,omitempty"`
@@ -547,19 +501,12 @@ type AkamaiStorageSpec struct {
 
 	// InjectCredentials adds this bucket's access key/secret key/endpoint/
 	// region/bucket name to the Application's own container as environment
-	// variables (standard AWS-SDK-style names: AWS_ACCESS_KEY_ID,
-	// AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL, AWS_REGION, plus
-	// FORGE_STORAGE_BUCKET), sourced from the operator's own generated
-	// storage Secret. Defaults to false: without this, an Akamai-backed
-	// Application has a bucket and working credentials, but no way for its
-	// own container to actually read or write it -- unlike AWS, Akamai has
-	// no IRSA-equivalent web-identity mechanism, so this is the only path
-	// to make the bucket genuinely usable by the Application itself, not
-	// just administratively provisioned. Akamai-only: AWS Applications
-	// already get this transparently through IRSA (the ServiceAccount's
-	// IRSA annotation plus the IAM policy's object-level
-	// GetObject/PutObject/DeleteObject/ListBucket grants), with no
-	// per-Application opt-in needed.
+	// variables (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL,
+	// AWS_REGION, FORGE_STORAGE_BUCKET). Defaults to false. Akamai-only:
+	// AWS Applications already get equivalent access transparently through
+	// IRSA, with no opt-in needed; Akamai has no IRSA-equivalent, so this
+	// is the only way to make the bucket usable by the Application itself
+	// rather than just administratively provisioned.
 	// +optional
 	InjectCredentials bool `json:"injectCredentials,omitempty"`
 }

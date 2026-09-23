@@ -99,7 +99,7 @@ func (f *fakeFinalizeHandler) HandleFinalize(ctx context.Context, in smithymiddl
 }
 
 // awsRateLimitMiddleware builds a Stack, applies AWSMiddleware(limiter,
-// name) to it exactly as s3/client.go and Akamai-Obj-Str/client.go do via
+// name) to it exactly as s3/client.go and akamaiobjstr/client.go do via
 // Options.APIOptions, and returns the registered "RateLimit" middleware so
 // tests can invoke it directly without standing up a real AWS client.
 func awsRateLimitMiddleware(t *testing.T, limiter *rate.Limiter, name string) smithymiddleware.FinalizeMiddleware {

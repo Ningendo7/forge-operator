@@ -268,8 +268,8 @@ func TestReconcileService_SetsControllerReference(t *testing.T) {
 	if owner.Name != app.Name {
 		t.Errorf("expected owner reference name %q, got %q", app.Name, owner.Name)
 	}
-	if owner.Kind != "Application" {
-		t.Errorf("expected owner reference kind 'Application', got %q", owner.Kind)
+	if owner.Kind != applicationKind {
+		t.Errorf("expected owner reference kind %q, got %q", applicationKind, owner.Kind)
 	}
 }
 

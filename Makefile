@@ -96,7 +96,7 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 
 .PHONY: test-integration
 test-integration: ## Run live cloud-provider integration tests (real AWS/Akamai accounts, no Kubernetes cluster). Needs real credentials already active in your shell (same ones Terraform uses); each provider's tests skip themselves cleanly if theirs aren't available. NEVER runs in CI.
-	go test -tags=integration ./internal/controller/s3/... ./internal/controller/Akamai-Obj-Str/... -v -timeout 10m
+	go test -tags=integration ./internal/controller/s3/... ./internal/controller/akamaiobjstr/... -v -timeout 10m
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

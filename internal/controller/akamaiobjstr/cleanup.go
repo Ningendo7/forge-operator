@@ -16,20 +16,16 @@ import (
 // DeleteBucket deletes the bucket and its access key. Bucket deletion is
 // deliberately never blocked by an access-key cleanup failure -- the bucket
 // is the billed resource, the access key is not, so guaranteeing the costly
-// one gets deleted takes priority over a transient failure on the free one.
-// accessKeyErr surfaces that failure to the caller (for an Event, status, or
-// similar) without making it fatal: it's returned separately from err,
-// which is only ever the bucket deletion's own error.
+// one gets deleted takes priority. accessKeyErr surfaces that failure to the
+// caller (for an Event, status, or similar) without making it fatal: it's
+// returned separately from err, which is only ever the bucket deletion's
+// own error.
 //
 // verifyOwnershipAndEmptyBucket runs first and gates everything else: if it
 // can't confirm this Application still genuinely owns the bucket, nothing
-// gets touched at all -- not the bucket, not the access key -- rather than
-// partially cleaning up around an uncertain resource. That doesn't leak the
-// key on an ownership failure, though: verifyOwnershipAndEmptyBucket
-// already cleans up whatever key it resolved for the check via its own
-// deferred ErrBucketNotOwned handling (see its doc comment) -- so unlike
-// the bucket, this Application's access key is never left stranded here
-// regardless of how the ownership check comes out.
+// gets touched at all. It already cleans up whatever key it resolved for
+// the check via its own deferred ErrBucketNotOwned handling (see its doc
+// comment), so the access key is never left stranded here either way.
 func (m *Manager) DeleteBucket(
 	ctx context.Context,
 ) (accessKeyErr error, err error) {
@@ -59,16 +55,11 @@ func (m *Manager) DeleteBucket(
 
 // CleanupCredentialsOnly deletes only this Application's Object Storage
 // access key, leaving the bucket untouched -- used when deletionPolicy is
-// Retain, which currently skips DeleteBucket (and thus this cleanup)
-// entirely, so the bucket survives but its no-longer-tracked access key
-// doesn't linger indefinitely. A later Application adopting the retained
-// bucket mints its own fresh key regardless (nothing can recover this
-// one's secret), so the old one serves no purpose once this Application is
-// gone. Deliberately independent of ownership verification -- unlike
-// DeleteBucket, which is never reached for Retain in the first place, so
-// there's no equivalent deferred cleanup to rely on here; the key's
-// identity is entirely deterministic (accessKeyLabel derives it from this
-// Application's own namespace/name) regardless.
+// Retain, which skips DeleteBucket entirely, so the bucket survives but its
+// no-longer-tracked access key doesn't linger indefinitely. Deliberately
+// independent of ownership verification: the key's identity is entirely
+// deterministic (accessKeyLabel derives it from this Application's own
+// namespace/name).
 func (m *Manager) CleanupCredentialsOnly(ctx context.Context) error {
 	return m.deleteApplicationAccessKey(ctx)
 }
@@ -101,13 +92,10 @@ func (m *Manager) verifyOwnershipAndEmptyBucket(ctx context.Context) (err error)
 	}
 
 	// If ownership ultimately can't be confirmed below, the access key just
-	// ensured above is useless -- this Application will never be permitted
-	// to touch this bucket -- so clean it up here rather than leaking it
-	// indefinitely (nothing else ever will: the finalizer never gets this
-	// far again once it knows the bucket isn't its own). Scoped to
-	// ErrBucketNotOwned specifically: any other error here (a transient
-	// lookup/verify failure) is worth retrying with this same key, not one
-	// worth discarding.
+	// ensured above is useless and would otherwise leak indefinitely, so
+	// clean it up here. Scoped to ErrBucketNotOwned specifically: any other
+	// error (a transient lookup/verify failure) is worth retrying with this
+	// same key, not discarding.
 	defer func() {
 		if errors.Is(err, ErrBucketNotOwned) {
 			if cleanupErr := m.deleteApplicationAccessKey(ctx); cleanupErr != nil {
@@ -137,7 +125,8 @@ func (m *Manager) verifyOwnershipAndEmptyBucket(ctx context.Context) (err error)
 		if readErr != nil {
 			return fmt.Errorf("failed to read ownership marker: %w", readErr)
 		}
-		if string(body) != string(m.app.UID) {
+		owner, _ := parseOwnerMarker(body)
+		if owner.UID != string(m.app.UID) {
 			return fmt.Errorf("%w: marker names a different Application", ErrBucketNotOwned)
 		}
 	}

@@ -12,8 +12,9 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/linode/linodego"
 
-	akamaiobjstr "github.com/Ningendo7/forge-operator/internal/controller/Akamai-Obj-Str"
+	"github.com/Ningendo7/forge-operator/internal/controller/akamaiobjstr"
 	s3storage "github.com/Ningendo7/forge-operator/internal/controller/s3"
+	statusmanager "github.com/Ningendo7/forge-operator/internal/controller/status"
 )
 
 // forbiddenResponseError builds the transport-level HTTP 403 shape
@@ -124,6 +125,37 @@ func TestClassifyAkamaiStorageError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := classifyAkamaiStorageError(tt.err); got != tt.want {
 				t.Errorf("classifyAkamaiStorageError() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReconcileFailureReason(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "AWS credentials secret not found",
+			err:  fmt.Errorf("wrap: %w", s3storage.ErrCredentialsSecretNotFound),
+			want: statusmanager.ReasonSecretNotFound,
+		},
+		{
+			name: "Akamai token secret not found",
+			err:  fmt.Errorf("wrap: %w", akamaiobjstr.ErrTokenSecretNotFound),
+			want: statusmanager.ReasonSecretNotFound,
+		},
+		{
+			name: "unrelated error falls through to generic reason",
+			err:  errors.New("boom"),
+			want: statusmanager.ReasonFailed,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := reconcileFailureReason(tt.err); got != tt.want {
+				t.Errorf("reconcileFailureReason() = %q, want %q", got, tt.want)
 			}
 		})
 	}
