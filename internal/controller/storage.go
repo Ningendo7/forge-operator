@@ -9,6 +9,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -218,15 +219,22 @@ func (r *ApplicationReconciler) ensureStorageOwnershipID(
 
 	ownershipID := uuid.NewString()
 
-	patch := &forgev1alpha1.Application{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       applicationKind,
-			APIVersion: forgev1alpha1.GroupVersion.String(),
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        application.Name,
-			Namespace:   application.Namespace,
-			Annotations: map[string]string{naming.StorageOwnershipIDAnnotation: ownershipID},
+	// Unstructured, not a typed *Application with only ObjectMeta set: Image
+	// has no `omitempty` (required field), so a typed patch would still
+	// serialize "spec":{"image":""} and, with ForceOwnership, clobber the
+	// real value and fail CRD validation. Unstructured has no "spec" key
+	// unless added.
+	patch := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": forgev1alpha1.GroupVersion.String(),
+			"kind":       applicationKind,
+			"metadata": map[string]interface{}{
+				"name":      application.Name,
+				"namespace": application.Namespace,
+				"annotations": map[string]interface{}{
+					naming.StorageOwnershipIDAnnotation: ownershipID,
+				},
+			},
 		},
 	}
 
