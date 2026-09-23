@@ -959,6 +959,14 @@ spec:
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "LocalStack did not become available")
 
+			By("creating the permissions-boundary policy in LocalStack -- CreateRole references it by ARN and LocalStack's IAM (moto-based) validates it actually exists")
+			_, err = runAWSCLIInCluster(localstackEndpoint, []string{
+				"iam", "create-policy",
+				"--policy-name=e2e-irsa-boundary",
+				`--policy-document={"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}`,
+			})
+			Expect(err).NotTo(HaveOccurred(), "Failed to create the permissions-boundary policy in LocalStack")
+
 			By("pointing the deployed controller-manager at LocalStack, with a short storage resync interval")
 			cmd = exec.Command("kubectl", "set", "env", "deployment/"+controllerDeploymentName, "-n", namespace,
 				"AWS_ENDPOINT_URL="+localstackEndpoint,
@@ -1051,22 +1059,13 @@ spec:
 			}()
 
 			By("waiting for the Application to report Ready with a real IRSA role provisioned through LocalStack")
-			var roleARN string
-			verifyReady := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "application", irsaAppName, "-n", lsAppNamespace,
-					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("True"))
+			Expect(waitForApplicationReadyWithDiagnostics(irsaAppName, lsAppNamespace, 2*time.Minute)).To(Succeed())
 
-				cmd = exec.Command("kubectl", "get", "application", irsaAppName, "-n", lsAppNamespace,
-					"-o", "jsonpath={.status.storage.aws.roleARN}")
-				output, err = utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).NotTo(BeEmpty())
-				roleARN = output
-			}
-			Eventually(verifyReady, 2*time.Minute, 2*time.Second).Should(Succeed())
+			cmd := exec.Command("kubectl", "get", "application", irsaAppName, "-n", lsAppNamespace,
+				"-o", "jsonpath={.status.storage.aws.roleARN}")
+			roleARN, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(roleARN).NotTo(BeEmpty())
 
 			By("reading back the trust policy LocalStack actually persisted, not just what the Go code intended to send")
 			roleName := roleARN[strings.LastIndex(roleARN, "/")+1:]
@@ -1136,14 +1135,7 @@ spec:
 			}()
 
 			By("waiting for the Application to report Ready")
-			verifyReady := func(g Gomega) {
-				cmd := exec.Command("kubectl", "get", "application", driftAppName, "-n", lsAppNamespace,
-					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("True"))
-			}
-			Eventually(verifyReady, 2*time.Minute, 2*time.Second).Should(Succeed())
+			Expect(waitForApplicationReadyWithDiagnostics(driftAppName, lsAppNamespace, 2*time.Minute)).To(Succeed())
 
 			By("deleting the bucket directly via LocalStack, out from under the operator")
 			_, err := runAWSCLIInCluster(localstackEndpoint, []string{"s3", "rb", "s3://" + bucket, "--force"})
@@ -1262,6 +1254,67 @@ func waitForStableResourceVersion(fn func() (string, error), timeout, interval t
 		last = current
 	}
 	return "", fmt.Errorf("value did not stabilize within %s (last seen: %s)", timeout, last)
+}
+
+// waitForApplicationReadyWithDiagnostics polls until getStatus reports "True"
+// or timeout elapses, returning nil on success. On timeout it dumps the
+// current leader controller pod's logs, the LocalStack pod's own logs, and
+// the Application's full status/events -- all *before* returning, so callers
+// can capture real evidence and fail immediately in the same call stack.
+// This deliberately avoids Eventually/Consistently: this Context's own
+// AfterAll reverts the controller-manager's env the moment this spec fails,
+// which triggers a new rollout and replaces the controller pods -- by the
+// time the top-level AfterEach's own log-fetch step runs, the pod named
+// there is already gone. Capturing diagnostics here, synchronously, before
+// any cleanup has a chance to run, is the only way to actually see why a
+// LocalStack-backed reconcile failed.
+func waitForApplicationReadyWithDiagnostics(appName, appNamespace string, timeout time.Duration) error {
+	getReady := func() (string, error) {
+		return utils.Run(exec.Command("kubectl", "get", "application", appName, "-n", appNamespace,
+			"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}"))
+	}
+
+	deadline := time.Now().Add(timeout)
+	var lastStatus string
+	var lastErr error
+	for time.Now().Before(deadline) {
+		lastStatus, lastErr = getReady()
+		if lastErr == nil && lastStatus == "True" {
+			return nil
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	_, _ = fmt.Fprintf(GinkgoWriter, "Application %s/%s never became Ready within %s (last status=%q, err=%v)\n",
+		appNamespace, appName, timeout, lastStatus, lastErr)
+
+	if holderIdentity, err := utils.Run(exec.Command("kubectl", "get", "lease",
+		"9429151e.ningendo7.github.io", "-n", namespace, "-o", "jsonpath={.spec.holderIdentity}")); err == nil && holderIdentity != "" {
+		leaderPod := strings.SplitN(holderIdentity, "_", 2)[0]
+		if logs, err := utils.Run(exec.Command("kubectl", "logs", leaderPod, "-n", namespace)); err == nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Leader controller pod (%s) logs:\n%s\n", leaderPod, logs)
+		} else {
+			_, _ = fmt.Fprintf(GinkgoWriter, "Failed to fetch leader pod (%s) logs: %v\n", leaderPod, err)
+		}
+	} else {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Failed to identify leader pod from Lease: %v\n", err)
+	}
+
+	if podsOut, err := utils.Run(exec.Command("kubectl", "get", "pods", "-l", "app=localstack",
+		"-n", "forge-operator-e2e-localstack", "-o", "jsonpath={.items[0].metadata.name}")); err == nil && podsOut != "" {
+		if logs, err := utils.Run(exec.Command("kubectl", "logs", podsOut, "-n", "forge-operator-e2e-localstack")); err == nil {
+			_, _ = fmt.Fprintf(GinkgoWriter, "LocalStack pod (%s) logs:\n%s\n", podsOut, logs)
+		}
+	}
+
+	if status, err := utils.Run(exec.Command("kubectl", "get", "application", appName, "-n", appNamespace, "-o", "yaml")); err == nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Application %s/%s:\n%s\n", appNamespace, appName, status)
+	}
+	if events, err := utils.Run(exec.Command("kubectl", "get", "events", "-n", appNamespace, "--sort-by=.lastTimestamp")); err == nil {
+		_, _ = fmt.Fprintf(GinkgoWriter, "Events in %s:\n%s\n", appNamespace, events)
+	}
+
+	return fmt.Errorf("Application %s/%s never became Ready within %s (last status=%q)", appNamespace, appName, timeout, lastStatus)
 }
 
 // runAWSCLIInCluster runs the AWS CLI with the given args from an ephemeral
