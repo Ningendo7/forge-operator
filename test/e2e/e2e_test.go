@@ -1037,7 +1037,13 @@ spec:
 		It("provisions IRSA through LocalStack and the persisted trust policy matches the real ServiceAccount", func() {
 			const irsaAppName = "e2e-irsa-localstack"
 
-			By("creating a real S3-backed Application with no endpoint override, so it picks up the LocalStack env")
+			// endpoint is set explicitly (not left to the global
+			// AWS_ENDPOINT_URL env var alone) because the S3 client only
+			// switches to path-style addressing when spec.storage.endpoint
+			// is set (see s3/client.go) -- without it, the SDK defaults to
+			// virtual-hosted-style (bucket.host), which LocalStack's single
+			// Service DNS name can never resolve.
+			By("creating a real S3-backed Application pointed at LocalStack")
 			manifest := fmt.Sprintf(`
 apiVersion: forge.ningendo7.github.io/v1alpha1
 kind: Application
@@ -1050,7 +1056,8 @@ spec:
     provider: AWS
     bucket: e2e-irsa-localstack-bucket
     region: us-east-1
-`, irsaAppName, lsAppNamespace, lsAppImage)
+    endpoint: %s
+`, irsaAppName, lsAppNamespace, lsAppImage, localstackEndpoint)
 			applyManifest(manifest, "e2e-irsa-localstack-app.yaml")
 			defer func() {
 				cmd := exec.Command("kubectl", "delete", "application", irsaAppName, "-n", lsAppNamespace,
@@ -1126,7 +1133,8 @@ spec:
     provider: AWS
     bucket: %s
     region: us-east-1
-`, driftAppName, lsAppNamespace, lsAppImage, bucket)
+    endpoint: %s
+`, driftAppName, lsAppNamespace, lsAppImage, bucket, localstackEndpoint)
 			applyManifest(manifest, "e2e-drift-localstack-app.yaml")
 			defer func() {
 				cmd := exec.Command("kubectl", "delete", "application", driftAppName, "-n", lsAppNamespace,

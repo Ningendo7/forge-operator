@@ -225,13 +225,13 @@ func (r *ApplicationReconciler) ensureStorageOwnershipID(
 	// real value and fail CRD validation. Unstructured has no "spec" key
 	// unless added.
 	patch := &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		Object: map[string]any{
 			"apiVersion": forgev1alpha1.GroupVersion.String(),
 			"kind":       applicationKind,
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name":      application.Name,
 				"namespace": application.Namespace,
-				"annotations": map[string]interface{}{
+				"annotations": map[string]any{
 					naming.StorageOwnershipIDAnnotation: ownershipID,
 				},
 			},
