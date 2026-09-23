@@ -182,6 +182,7 @@ func NewManager(
 		OIDCProviderARN:        oidcProviderARN,
 		OIDCProviderURL:        oidcProviderURL,
 		PermissionsBoundaryARN: permissionsBoundaryARN,
+		recordCreated:          recordCreated,
 	}, nil
 
 }

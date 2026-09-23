@@ -222,6 +222,44 @@ func TestNewManager_PropagatesServiceAccountAndOIDCFields(t *testing.T) {
 	}
 }
 
+// TestNewManager_WiresRecordCreatedCallback guards against the exact bug
+// found live: NewManager accepted recordCreated as a parameter but never
+// assigned it to the returned Manager, so every real bucket creation failed
+// at the recordBucketCreated step with "recordCreated callback not
+// configured" -- invisible to every other test here since they all pass nil
+// for recordCreated (irrelevant to what they're checking) and
+// test_helpers_test.go's newTestManager builds the struct directly,
+// bypassing this constructor entirely.
+func TestNewManager_WiresRecordCreatedCallback(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApp()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	called := false
+	recordCreated := func(ctx context.Context) error {
+		called = true
+		return nil
+	}
+
+	manager, err := NewManager(context.Background(), fakeClient, app, "custom-sa", "arn:oidc:role", "oidc.example.com/id/XYZ", "arn:boundary", recordCreated, testLimiter(), testLimiter())
+	if err != nil {
+		t.Fatalf("NewManager returned error: %v", err)
+	}
+	if manager.recordCreated == nil {
+		t.Fatalf("expected NewManager to wire recordCreated onto the Manager, got nil")
+	}
+	if err := manager.recordCreated(context.Background()); err != nil {
+		t.Fatalf("unexpected error calling the wired recordCreated: %v", err)
+	}
+	if !called {
+		t.Fatalf("expected the wired recordCreated to be the callback passed to NewManager, but it was never invoked")
+	}
+}
+
 // blockedLimiter never has a token to give (burst 0), so
 // rate.Limiter.Wait fails immediately -- deterministically, with no actual
 // waiting or network activity -- rather than proceeding. Used below to
