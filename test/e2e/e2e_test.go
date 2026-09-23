@@ -944,7 +944,11 @@ spec:
 			Expect(err).NotTo(HaveOccurred(), "Failed to create LocalStack app namespace")
 
 			By("deploying LocalStack (IAM/STS/S3 only)")
-			cmd = exec.Command("kubectl", "apply", "-n", localstackNamespace, "-f", "testdata/localstack.yaml")
+			// Relative to the project root, not this package's directory --
+			// utils.Run always os.Chdir's to the project root before running
+			// a command (see its doc comment), unlike applyManifest's own
+			// /tmp-based manifests, which sidestep this entirely.
+			cmd = exec.Command("kubectl", "apply", "-n", localstackNamespace, "-f", "test/e2e/testdata/localstack.yaml")
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to deploy LocalStack")
 
