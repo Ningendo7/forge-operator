@@ -25,7 +25,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -690,21 +689,27 @@ spec:
 			Eventually(verifyAppReady, 2*time.Minute, 2*time.Second).Should(Succeed())
 		})
 
-		// Finding #9 (chaos scenario), regression-testing the reconcile-storm
-		// fix: the primary watch on Application originally had no predicate,
-		// so every status write (done unconditionally every reconcile)
-		// re-triggered itself via that same watch -- an infinite,
-		// self-sustaining loop (~4.6 reconciles/sec observed live). Fixed
-		// with applicationChangePredicate (GenerationChanged OR
-		// deletionTimestamp set). Proven here by scraping the real
-		// controller_runtime_reconcile_total counter twice, a fixed interval
-		// apart, once the Application has settled with no storage configured
-		// (so there's no periodic resync requeue to account for either) -- a
-		// storm would show dozens of reconciles in this window; a quiesced
-		// controller shows ~0.
+		// Regression-tests the reconcile-storm fix: the primary watch on
+		// Application originally had no predicate, so every status write
+		// (done unconditionally every reconcile) re-triggered itself via
+		// that same watch -- an infinite, self-sustaining loop (~4.6
+		// reconciles/sec observed live). Fixed with applicationChangePredicate
+		// (GenerationChanged OR deletionTimestamp set).
+		//
+		// Measures the Application's own metadata.resourceVersion rather than
+		// the controller_runtime_reconcile_total metric: that metric is
+		// process-local (only the leader's count grows) but scraped through a
+		// Service backed by both controller pods, so two scrapes can silently
+		// land on different pods and produce a meaningless delta -- a strictly
+		// weaker and flakier signal than just watching whether this one
+		// object keeps getting rewritten, which is exactly what the storm
+		// bug did.
 		It("does not keep reconciling a settled Application (reconcile-storm regression)", func() {
-			token, err := serviceAccountToken()
-			Expect(err).NotTo(HaveOccurred(), "Failed to get metrics reader token")
+			getResourceVersion := func() (string, error) {
+				cmd := exec.Command("kubectl", "get", "application", appName, "-n", appNamespace,
+					"-o", "jsonpath={.metadata.resourceVersion}")
+				return utils.Run(cmd)
+			}
 
 			By("confirming the Application is currently settled (Ready)")
 			verifyAppReady := func(g Gomega) {
@@ -716,20 +721,16 @@ spec:
 			}
 			Eventually(verifyAppReady, time.Minute, 2*time.Second).Should(Succeed())
 
-			By("scraping the reconcile counter, waiting, then scraping it again")
-			before, err := scrapeReconcileTotal(token)
-			Expect(err).NotTo(HaveOccurred(), "Failed to scrape reconcile counter")
+			By("waiting for the resourceVersion to stop changing -- drains any trailing writes from the preceding tests")
+			settledRV, err := waitForStableResourceVersion(getResourceVersion, 90*time.Second, 3*time.Second)
+			Expect(err).NotTo(HaveOccurred(), "resourceVersion never stabilized")
 
-			const settleWindow = 20 * time.Second
-			time.Sleep(settleWindow)
-
-			after, err := scrapeReconcileTotal(token)
-			Expect(err).NotTo(HaveOccurred(), "Failed to scrape reconcile counter")
-
-			By("confirming the reconcile count barely moved -- a storm would show dozens of reconciles in this window")
-			Expect(after-before).To(BeNumerically("<", 5),
-				"expected at most a handful of reconciles for a settled Application over %s, got a delta of %v (before=%v, after=%v) -- possible reconcile-storm regression",
-				settleWindow, after-before, before, after)
+			By("confirming the resourceVersion stays stable once settled -- a storm would keep incrementing it via repeated self-triggered status writes")
+			Consistently(func(g Gomega) {
+				rv, err := getResourceVersion()
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(rv).To(Equal(settledRV), "Application's resourceVersion changed -- possible reconcile-storm regression")
+			}, 20*time.Second, 2*time.Second).Should(Succeed())
 		})
 
 		// Finding #9 (chaos scenario), regression-testing a real shipped fix:
@@ -1232,74 +1233,29 @@ func getMetricsOutput() (string, error) {
 	return utils.Run(cmd)
 }
 
-// scrapeReconcileTotal creates a fresh ephemeral curl pod against the
-// metrics endpoint (same auth/plumbing as the "should run successfully"
-// test's curl-metrics pod above, but under its own pod name so it can be
-// called repeatedly) and sums
-// controller_runtime_reconcile_total{controller="application"} across all of
-// its label combinations (result=success/error/requeue/...).
-func scrapeReconcileTotal(token string) (float64, error) {
-	const podName = "e2e-scrape-reconcile-total"
-	_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", podName, "-n", namespace, "--ignore-not-found"))
-	defer func() {
-		_, _ = utils.Run(exec.Command("kubectl", "delete", "pod", podName, "-n", namespace, "--ignore-not-found"))
-	}()
-
-	cmd := exec.Command("kubectl", "run", podName, "--restart=Never",
-		"--namespace", namespace,
-		"--image=curlimages/curl:latest",
-		"--overrides",
-		fmt.Sprintf(`{
-			"spec": {
-				"containers": [{
-					"name": "curl",
-					"image": "curlimages/curl:latest",
-					"command": ["/bin/sh", "-c"],
-					"args": ["curl -s -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics"],
-					"securityContext": {
-						"readOnlyRootFilesystem": true,
-						"allowPrivilegeEscalation": false,
-						"capabilities": {"drop": ["ALL"]},
-						"runAsNonRoot": true,
-						"runAsUser": 1000,
-						"seccompProfile": {"type": "RuntimeDefault"}
-					}
-				}],
-				"serviceAccountName": "%s"
-			}
-		}`, token, metricsServiceName, namespace, serviceAccountName))
-	if _, err := utils.Run(cmd); err != nil {
-		return 0, fmt.Errorf("failed to create %s pod: %w", podName, err)
-	}
-
-	Eventually(func(g Gomega) {
-		cmd := exec.Command("kubectl", "get", "pod", podName, "-n", namespace, "-o", "jsonpath={.status.phase}")
-		output, err := utils.Run(cmd)
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(output).To(Equal("Succeeded"))
-	}, 2*time.Minute, 2*time.Second).Should(Succeed())
-
-	output, err := utils.Run(exec.Command("kubectl", "logs", podName, "-n", namespace))
+// waitForStableResourceVersion polls fn every interval until two consecutive
+// reads return the same value, returning that value -- used to drain
+// trailing writes from a preceding test before asserting nothing else
+// follows. Returns an error if fn errors or the value never stabilizes
+// within timeout.
+func waitForStableResourceVersion(fn func() (string, error), timeout, interval time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	last, err := fn()
 	if err != nil {
-		return 0, err
+		return "", err
 	}
-
-	var total float64
-	for _, line := range strings.Split(output, "\n") {
-		if !strings.HasPrefix(line, "controller_runtime_reconcile_total{") || !strings.Contains(line, `controller="application"`) {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		v, err := strconv.ParseFloat(fields[len(fields)-1], 64)
+	for time.Now().Before(deadline) {
+		time.Sleep(interval)
+		current, err := fn()
 		if err != nil {
-			continue
+			return "", err
 		}
-		total += v
+		if current == last {
+			return current, nil
+		}
+		last = current
 	}
-	return total, nil
+	return "", fmt.Errorf("value did not stabilize within %s (last seen: %s)", timeout, last)
 }
 
 // runAWSCLIInCluster runs the AWS CLI with the given args from an ephemeral
