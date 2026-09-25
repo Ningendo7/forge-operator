@@ -402,14 +402,14 @@ func TestReconcileStorage_SpecRemovalAttemptsCleanupUsingStatusStorage(t *testin
 	// Spec.Storage is nil (removed), but Status.Storage still remembers a
 	// previously-provisioned bucket -- reconcileStorage must attempt real
 	// cleanup, not just silently drop the credentials Secret. The missing
-	// Secret referenced by SecretName proves the cloud cleanup path was
-	// actually entered (manager construction fails), the same technique
-	// finalizer_test.go already uses.
+	// Secret referenced by AWS.CredentialsSecretRef proves the cloud
+	// cleanup path was actually entered (manager construction fails), the
+	// same technique finalizer_test.go already uses.
 	app := newTestApplication()
 	app.Status.Storage = &forgev1alpha1.StorageStatus{
-		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     testBucket,
-		SecretName: testMissingCredsSecret,
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		AWS:      &forgev1alpha1.AWSStorageStatus{CredentialsSecretRef: testMissingCredsSecret},
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
@@ -447,7 +447,7 @@ func TestReconcileStorage_SpecRemovalWithRetainPolicySkipsCleanupAndClearsStatus
 		// A real manager would fail to construct on this missing Secret --
 		// if Retain actually skips the cloud path as intended, that failure
 		// is never reached.
-		SecretName:     testMissingCredsSecret,
+		AWS:            &forgev1alpha1.AWSStorageStatus{CredentialsSecretRef: testMissingCredsSecret},
 		DeletionPolicy: forgev1alpha1.DeletionPolicyRetain,
 	}
 	// Seeded to reproduce a real bug found live: finalizeApplication leaves
@@ -504,9 +504,9 @@ func TestReconcileStorage_BucketIdentityMismatchCleansUpOldBucketFirst(t *testin
 
 	app := newTestApplication()
 	app.Status.Storage = &forgev1alpha1.StorageStatus{
-		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     "bucket-x-old",
-		SecretName: testMissingCredsSecret,
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   "bucket-x-old",
+		AWS:      &forgev1alpha1.AWSStorageStatus{CredentialsSecretRef: testMissingCredsSecret},
 	}
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
 		Provider: forgev1alpha1.ProviderAWSS3,
@@ -651,9 +651,9 @@ func TestReconcileStorage_PropagatesAWSReconcileError(t *testing.T) {
 
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     testBucket,
-		SecretName: testMissingCredsSecret,
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		AWS:      &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: testMissingCredsSecret},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}

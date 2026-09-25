@@ -33,6 +33,7 @@ var _ = Describe("Application Webhook", func() {
 	const testWestRegion = "us-west-2"
 	const orphanConfigAppName = "orphan-config-app"
 	const orphanConfigMapName = "orphan-config-app-config"
+	const sharedSecretName = "shared-secret"
 
 	var (
 		obj       *forgev1alpha1.Application
@@ -193,8 +194,8 @@ var _ = Describe("Application Webhook", func() {
 			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
 				Provider:   forgev1alpha1.ProviderAWSS3,
 				Bucket:     testBucket,
-				SecretName: "shared-secret",
-				AWS:        &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: "shared-secret"},
+				SecretName: sharedSecretName,
+				AWS:        &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: sharedSecretName},
 			}
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).To(HaveOccurred())
@@ -357,8 +358,8 @@ var _ = Describe("Application Webhook", func() {
 			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
 				Provider:   forgev1alpha1.ProviderAkamaiObjectStorage,
 				Bucket:     testBucket,
-				SecretName: "shared-secret",
-				Akamai:     &forgev1alpha1.AkamaiStorageSpec{AccessKeySecretRef: "shared-secret"},
+				SecretName: sharedSecretName,
+				Akamai:     &forgev1alpha1.AkamaiStorageSpec{AccessKeySecretRef: sharedSecretName},
 			}
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).To(HaveOccurred())
