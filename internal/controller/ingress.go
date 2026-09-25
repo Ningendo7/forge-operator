@@ -30,7 +30,7 @@ func (r *ApplicationReconciler) desiredIngress(
 					Backend: networkingv1.IngressBackend{
 						Service: &networkingv1.IngressServiceBackend{
 							Name: naming.Service(application),
-							Port: networkingv1.ServiceBackendPort{Number: 80},
+							Port: networkingv1.ServiceBackendPort{Number: servicePortFor(application)},
 						},
 					},
 				}},

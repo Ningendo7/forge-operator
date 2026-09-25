@@ -37,6 +37,10 @@ Two things worth knowing:
   kubectl rollout restart deployment/forge-operator-controller-manager -n forge-operator-system
   ```
 
+### Static credentials instead of IRSA
+
+IRSA is the default and recommended flow, but if the cluster isn't EKS (or IRSA isn't otherwise available), set `spec.storage.aws.credentialsSecretRef` to the name of a Secret you create yourself, holding `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (and optionally `AWS_SESSION_TOKEN`). The operator only ever reads this Secret. It's unrelated to `spec.storage.secretName`, which names the operator's own generated *output* Secret — the two must not be the same Secret (the operator owns and deletes the latter, which would corrupt or destroy your credentials Secret); the admission webhook rejects that collision.
+
 ## Akamai Object Storage Flow
 
 ```mermaid

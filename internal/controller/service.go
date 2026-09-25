@@ -18,6 +18,15 @@ import (
 // only one port is ever generated per Service, so a fixed name is fine.
 const servicePortName = "http"
 
+// servicePortFor is the single source of truth for the generated Service's
+// port, shared with desiredIngress so the two can never drift apart.
+func servicePortFor(application *forgev1alpha1.Application) int32 {
+	if application.Spec.Service.Port != 0 {
+		return application.Spec.Service.Port
+	}
+	return 80
+}
+
 func (r *ApplicationReconciler) desiredService(
 	application *forgev1alpha1.Application,
 ) *corev1.Service {
@@ -31,10 +40,7 @@ func (r *ApplicationReconciler) desiredService(
 		serviceType = application.Spec.Service.Type
 	}
 
-	servicePort := int32(80)
-	if application.Spec.Service.Port != 0 {
-		servicePort = application.Spec.Service.Port
-	}
+	servicePort := servicePortFor(application)
 
 	targetPort := int32(8080)
 	if application.Spec.Container.Port != 0 {

@@ -90,14 +90,23 @@ spec:
                     description: Data stored in the ConfigMap.
                     type: object
                   name:
-                    description: Name of the ConfigMap to reconcile.
+                    description: |-
+                      Name overrides the generated ConfigMap's own name (defaults to
+                      "<application-name>-config"). The pod mounts this ConfigMap
+                      automatically under its resolved name -- spec.container.configMapName
+                      only needs setting to point at a different, externally-managed
+                      ConfigMap instead.
                     type: string
                 type: object
               container:
                 description: Container configuration.
                 properties:
                   configMapName:
-                    description: ConfigMap name to mount as configuration.
+                    description: |-
+                      ConfigMapName points the pod's config volume at an externally-managed
+                      ConfigMap instead of the one generated from spec.config. Only needed
+                      for that case -- when spec.config is set, its ConfigMap is mounted
+                      automatically without setting this.
                     type: string
                   configMountPath:
                     description: Mount path for the config volume.
@@ -1359,6 +1368,15 @@ spec:
                     description: AWS-specific configuration (populated only if Provider
                       == AWS).
                     properties:
+                      credentialsSecretRef:
+                        description: |-
+                          CredentialsSecretRef names a Secret (keys: AWS_ACCESS_KEY_ID,
+                          AWS_SECRET_ACCESS_KEY) holding static AWS credentials to use instead
+                          of IRSA. Unset (the default) means IRSA. This must name a Secret
+                          distinct from spec.storage.secretName, which is the operator's own
+                          generated output credentials Secret -- the two are not
+                          interchangeable.
+                        type: string
                       lifecycleRules:
                         description: |-
                           LifecycleRules configures S3 Object Lifecycle rules for the bucket.
@@ -1491,7 +1509,12 @@ spec:
                       (e.g. "us-iad-1"), which is deprecated on Linode's side.
                     type: string
                   secretName:
-                    description: Secret name containing access credentials.
+                    description: |-
+                      SecretName overrides the name of the operator's own generated output
+                      Secret (bucket access info, IRSA role ARN, etc.), which otherwise
+                      defaults to "<application-name>-storage". Unrelated to input
+                      credentials -- for those, see spec.storage.aws.credentialsSecretRef or
+                      spec.storage.akamai.accessKeySecretRef.
                     type: string
                 required:
                 - bucket
@@ -1604,6 +1627,14 @@ spec:
                   aws:
                     description: AWS contains AWS-specific status information.
                     properties:
+                      credentialsSecretRef:
+                        description: |-
+                          CredentialsSecretRef is spec.storage.aws.credentialsSecretRef as it
+                          stood when this bucket was last successfully reconciled, if any --
+                          same reasoning as AkamaiStorageStatus.AccessKeySecretRef: once
+                          spec.storage is removed, this is the only remaining record of which
+                          Secret cleanup should authenticate with.
+                        type: string
                       roleARN:
                         description: RoleARN is the IAM Role ARN generated for IRSA.
                         type: string

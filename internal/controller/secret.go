@@ -131,22 +131,6 @@ func (r *ApplicationReconciler) reconcileStorageSecret(
 		return r.deleteStaleSecrets(ctx, application, secretRoleStorage, "")
 	}
 
-	// AWS with an explicitly-set spec.storage.secretName means "use static
-	// credentials from this Secret instead of IRSA" (see s3storage.NewManager)
-	// -- a user-supplied input the operator only ever reads, the same role
-	// AkamaiTokenSecret's accessKeySecretRef plays for Akamai's input token.
-	// Taking ownership of it the way this function does for its own
-	// generated output Secret below would mean deleting the Application
-	// cascades into deleting the user's own credentials Secret, breaking
-	// reuse of the same credentials across a deleted-and-recreated
-	// Application (an adopt-bucket workflow). The informational fields this
-	// function would otherwise write are already readable from
-	// Application.Status.Storage directly, so skipping the write here loses
-	// nothing.
-	if application.Spec.Storage.Provider == forgev1alpha1.ProviderAWSS3 && application.Spec.Storage.SecretName != "" {
-		return r.deleteStaleSecrets(ctx, application, secretRoleStorage, "")
-	}
-
 	logger.Info("Reconciling Storage Secret")
 
 	desired := r.desiredStorage(application, akamaiCreds)
@@ -178,7 +162,11 @@ func (r *ApplicationReconciler) reconcileStorageSecret(
 	return nil
 }
 
-// findApplicationsForSecret maps a Secret event to any Application referencing it in spec.storage.secretName
+// findApplicationsForSecret maps a Secret event to any Application whose
+// storage credentials it holds -- spec.storage.aws.credentialsSecretRef (AWS
+// static creds) or the Akamai token Secret
+// (spec.storage.akamai.accessKeySecretRef, naming.AkamaiTokenSecret's
+// default).
 func (r *ApplicationReconciler) findApplicationsForSecret(
 	ctx context.Context,
 	obj client.Object,
@@ -189,7 +177,6 @@ func (r *ApplicationReconciler) findApplicationsForSecret(
 		return nil
 	}
 
-	// 1. List all Applications in the same namespace as the Secret
 	var appList forgev1alpha1.ApplicationList
 	if err := r.List(ctx, &appList, client.InNamespace(secret.Namespace)); err != nil {
 		return nil
@@ -197,9 +184,16 @@ func (r *ApplicationReconciler) findApplicationsForSecret(
 
 	var requests []reconcile.Request
 
-	// 2. Check if any Application references this Secret in its spec
 	for _, app := range appList.Items {
-		if app.Spec.Storage != nil && app.Spec.Storage.SecretName == secret.Name {
+		if app.Spec.Storage == nil {
+			continue
+		}
+		referenced := app.Spec.Storage.SecretName == secret.Name ||
+			(app.Spec.Storage.Provider == forgev1alpha1.ProviderAkamaiObjectStorage &&
+				naming.AkamaiTokenSecret(&app) == secret.Name) ||
+			(app.Spec.Storage.Provider == forgev1alpha1.ProviderAWSS3 &&
+				app.Spec.Storage.AWS != nil && app.Spec.Storage.AWS.CredentialsSecretRef == secret.Name)
+		if referenced {
 			requests = append(requests, reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Name:      app.Name,

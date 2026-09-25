@@ -198,9 +198,9 @@ func TestFinalizeApplication_UsesStatusStorageWhenSpecStorageIsNil(t *testing.T)
 	// correctly does when there's no prior status either.
 	app := newTestApplication()
 	app.Status.Storage = &forgev1alpha1.StorageStatus{
-		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     testBucket,
-		SecretName: testMissingCredsSecret,
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		AWS:      &forgev1alpha1.AWSStorageStatus{CredentialsSecretRef: testMissingCredsSecret},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -243,6 +243,39 @@ func TestStorageSpecFromStatus_PreservesCustomAkamaiAccessKeySecretRef(t *testin
 
 	if spec.Akamai == nil || spec.Akamai.AccessKeySecretRef != customTokenSecret {
 		t.Fatalf("expected AccessKeySecretRef %q to be carried forward, got %#v", customTokenSecret, spec.Akamai)
+	}
+}
+
+func TestStorageSpecFromStatus_OmitsAWSWhenNotRecorded(t *testing.T) {
+	status := &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+	}
+
+	spec := storageSpecFromStatus(status)
+
+	if spec.AWS != nil {
+		t.Fatalf("expected a nil AWS block when status never recorded a credentialsSecretRef, got %#v", spec.AWS)
+	}
+}
+
+func TestStorageSpecFromStatus_PreservesCustomAWSCredentialsSecretRef(t *testing.T) {
+	// s3storage.NewManager resolves static credentials via
+	// Spec.Storage.AWS.CredentialsSecretRef, which is empty whenever
+	// Spec.Storage.AWS is nil -- exactly what a naively-reconstructed
+	// StorageSpec (missing this field) would produce. A customized
+	// credentialsSecretRef must survive the Status round-trip intact.
+	const customCredsSecret = "my-custom-aws-creds"
+	status := &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		AWS:      &forgev1alpha1.AWSStorageStatus{CredentialsSecretRef: customCredsSecret},
+	}
+
+	spec := storageSpecFromStatus(status)
+
+	if spec.AWS == nil || spec.AWS.CredentialsSecretRef != customCredsSecret {
+		t.Fatalf("expected CredentialsSecretRef %q to be carried forward, got %#v", customCredsSecret, spec.AWS)
 	}
 }
 
@@ -293,9 +326,9 @@ func TestFinalizeApplication_ReturnsErrorWhenAWSManagerCreationFails(t *testing.
 
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     testBucket,
-		SecretName: testMissingCredsSecret,
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		AWS:      &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: testMissingCredsSecret},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -328,9 +361,9 @@ func TestFinalizeApplication_SetsStorageReadyCleanupFailedOnError(t *testing.T) 
 
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     testBucket,
-		SecretName: testMissingCredsSecret,
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		AWS:      &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: testMissingCredsSecret},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -385,11 +418,10 @@ func TestFinalizeApplication_RetainSkipsCloudCleanupForAWS(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
 		Provider:       forgev1alpha1.ProviderAWSS3,
 		Bucket:         testBucket,
-		SecretName:     testMissingCredsSecret,
 		DeletionPolicy: forgev1alpha1.DeletionPolicyRetain,
 		// A real AWS manager fails to construct on this missing Secret --
-		// deliberately deterministic, unlike an empty SecretName: that
-		// falls through to config.LoadDefaultConfig, which succeeds
+		// deliberately deterministic, unlike an unset CredentialsSecretRef:
+		// that falls through to config.LoadDefaultConfig, which succeeds
 		// regardless of environment (no error until a real API call), so
 		// whether the *subsequent* cleanupAppIRSA call inside
 		// cleanupRetainedStorageCredentials succeeds or fails would depend
@@ -404,6 +436,7 @@ func TestFinalizeApplication_RetainSkipsCloudCleanupForAWS(t *testing.T) {
 		// fails. See TestFinalizeApplication_RetainStillAttemptsCredentialCleanup
 		// below for proof that credential cleanup is actually attempted
 		// (and tolerates failure) when construction *does* succeed.
+		AWS: &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: testMissingCredsSecret},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	rec := &fakeEventRecorder{}
@@ -518,9 +551,9 @@ func TestFinalizeApplication_DeleteIsStillDefaultBehavior(t *testing.T) {
 
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     testBucket,
-		SecretName: testMissingCredsSecret,
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		AWS:      &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: testMissingCredsSecret},
 		// DeletionPolicy deliberately left unset.
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()

@@ -75,10 +75,12 @@ func (r *ApplicationReconciler) handleFinalizer(
 // which credentials to use and whether the bucket should actually be
 // deleted.
 //
-// Akamai.AccessKeySecretRef must be carried forward too: akamaiobjstr.NewManager
-// resolves the input token Secret via naming.AkamaiTokenSecret(app), which
-// falls back to a default name whenever Spec.Storage.Akamai is nil, breaking
-// cleanup for any Akamai Application using a customized accessKeySecretRef.
+// Akamai.AccessKeySecretRef and AWS.CredentialsSecretRef must be carried
+// forward too: akamaiobjstr.NewManager resolves the input token Secret via
+// naming.AkamaiTokenSecret(app), which falls back to a default name whenever
+// Spec.Storage.Akamai is nil, breaking cleanup for any Akamai Application
+// using a customized accessKeySecretRef -- s3storage.NewManager has the same
+// problem for AWS static credentials if Spec.Storage.AWS is nil.
 func storageSpecFromStatus(status *forgev1alpha1.StorageStatus) *forgev1alpha1.StorageSpec {
 	spec := &forgev1alpha1.StorageSpec{
 		Provider:       status.Provider,
@@ -89,6 +91,9 @@ func storageSpecFromStatus(status *forgev1alpha1.StorageStatus) *forgev1alpha1.S
 	}
 	if status.Akamai != nil && status.Akamai.AccessKeySecretRef != "" {
 		spec.Akamai = &forgev1alpha1.AkamaiStorageSpec{AccessKeySecretRef: status.Akamai.AccessKeySecretRef}
+	}
+	if status.AWS != nil && status.AWS.CredentialsSecretRef != "" {
+		spec.AWS = &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: status.AWS.CredentialsSecretRef}
 	}
 	return spec
 }
@@ -178,9 +183,15 @@ func (r *ApplicationReconciler) finalizeApplication(
 
 		forgemetrics.FinalizerCleanupDuration.WithLabelValues(providerStr).Observe(time.Since(start).Seconds())
 		forgemetrics.FinalizerCleanupTotal.WithLabelValues(providerStr, outcomeSuccess).Inc()
-		if irsaErr != nil && r.Recorder != nil {
-			r.Recorder.Eventf(application, nil, corev1.EventTypeWarning, "IRSACleanupFailed", "Cleanup",
-				"Bucket was deleted, but its IAM role/policy could not be cleaned up: %v", irsaErr)
+		if irsaErr != nil {
+			// Logged, not just evented -- the Application (and its Events)
+			// are about to be deleted, so the Event alone wouldn't outlive
+			// the object it's attached to.
+			logf.FromContext(ctx).Error(irsaErr, "Failed to clean up IRSA role/policy after successful bucket deletion", "application", application.Name)
+			if r.Recorder != nil {
+				r.Recorder.Eventf(application, nil, corev1.EventTypeWarning, "IRSACleanupFailed", "Cleanup",
+					"Bucket was deleted, but its IAM role/policy could not be cleaned up: %v", irsaErr)
+			}
 		}
 	case forgev1alpha1.ProviderAkamaiObjectStorage:
 		storagestatus.SetCleanupInProgress(application)
@@ -217,9 +228,12 @@ func (r *ApplicationReconciler) finalizeApplication(
 
 		forgemetrics.FinalizerCleanupDuration.WithLabelValues(providerStr).Observe(time.Since(start).Seconds())
 		forgemetrics.FinalizerCleanupTotal.WithLabelValues(providerStr, outcomeSuccess).Inc()
-		if accessKeyErr != nil && r.Recorder != nil {
-			r.Recorder.Eventf(application, nil, corev1.EventTypeWarning, "AccessKeyCleanupFailed", "Cleanup",
-				"Bucket was deleted, but its Akamai Object Storage access key could not be cleaned up: %v", accessKeyErr)
+		if accessKeyErr != nil {
+			logf.FromContext(ctx).Error(accessKeyErr, "Failed to clean up Akamai Object Storage access key after successful bucket deletion", "application", application.Name)
+			if r.Recorder != nil {
+				r.Recorder.Eventf(application, nil, corev1.EventTypeWarning, "AccessKeyCleanupFailed", "Cleanup",
+					"Bucket was deleted, but its Akamai Object Storage access key could not be cleaned up: %v", accessKeyErr)
+			}
 		}
 	}
 	return nil

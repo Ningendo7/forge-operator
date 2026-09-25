@@ -18,11 +18,14 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// configMapNameFor falls back to naming.AppConfigMap -- the same source
+// desiredConfigMap uses -- so a renamed ConfigMap is never mounted by a
+// stale default name.
 func configMapNameFor(application *forgev1alpha1.Application) string {
 	if application.Spec.Container.ConfigMapName != "" {
 		return application.Spec.Container.ConfigMapName
 	}
-	return application.Name + "-config"
+	return naming.AppConfigMap(application)
 }
 
 func secretNameFor(application *forgev1alpha1.Application) string {
@@ -53,8 +56,10 @@ func (r *ApplicationReconciler) buildVolumeAndMounts(
 	var volumes []corev1.Volume
 	var volumeMounts []corev1.VolumeMount
 
-	// ConfigMap Volume only if ConfigMapName is specified
-	if application.Spec.Container.ConfigMapName != "" {
+	// Mount whenever the operator manages a ConfigMap (spec.config) or the
+	// user pointed at an externally-managed one (container.configMapName) --
+	// spec.config alone is enough, no need to also repeat its name here.
+	if application.Spec.Container.ConfigMapName != "" || application.Spec.ConfigMap != nil {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      "config",
 			MountPath: configMountPathFor(application),

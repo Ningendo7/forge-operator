@@ -71,20 +71,15 @@ func (d *ApplicationCustomDefaulter) Default(_ context.Context, obj *forgev1alph
 		return nil
 	}
 
-	// Only Akamai's spec.storage.secretName is safe to default explicitly
-	// here: it purely names the operator's generated output Secret (see
-	// naming.StorageSecret). For AWS, spec.storage.secretName is overloaded
-	// to also mean "read static AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY from
-	// this Secret instead of using IRSA" whenever it's non-empty (see
-	// internal/controller/s3/client.go) — defaulting it unconditionally
-	// would silently break every pure-IRSA Application by making the S3
-	// manager think static credentials were requested.
-	if obj.Spec.Storage.Provider != forgev1alpha1.ProviderAkamaiObjectStorage {
-		return nil
-	}
-
+	// spec.storage.secretName purely names the operator's generated output
+	// Secret (see naming.StorageSecret) for every provider -- safe to
+	// default unconditionally.
 	if obj.Spec.Storage.SecretName == "" {
 		obj.Spec.Storage.SecretName = naming.StorageSecret(obj)
+	}
+
+	if obj.Spec.Storage.Provider != forgev1alpha1.ProviderAkamaiObjectStorage {
+		return nil
 	}
 
 	defaultToken := naming.AkamaiTokenSecret(obj)
@@ -274,24 +269,34 @@ func (v *ApplicationCustomValidator) validateAkamai(ctx context.Context, app *fo
 	return nil, nil
 }
 
-// validateAWS warns (never rejects) about the optional static-credentials
-// Secret when spec.storage.secretName is set, the same way validateAkamai
-// treats its token Secret -- see that function's comment. Unlike Akamai's
-// token Secret, AWS's spec.storage.secretName is optional (IRSA needs no
-// Secret at all), so this is a no-op unless it's actually set. Required
-// keys mirror exactly what internal/controller/s3/client.go's NewManager
-// reads.
+// validateAWS holds the AWS-specific checks, mirroring validateAkamai: a
+// hard-reject collision guard between the operator's output Secret and the
+// user-supplied credentials Secret, then a warn-only (never reject) check of
+// the credentials Secret's existence/contents. Unlike Akamai's token Secret,
+// AWS's spec.storage.aws.credentialsSecretRef is optional (IRSA needs no
+// Secret at all), so the existence/contents check is a no-op unless it's
+// actually set. Required keys mirror exactly what
+// internal/controller/s3/client.go's NewManager reads.
 func (v *ApplicationCustomValidator) validateAWS(ctx context.Context, app *forgev1alpha1.Application) (admission.Warnings, error) {
-	secretName := app.Spec.Storage.SecretName
-	if secretName == "" {
+	if app.Spec.Storage.AWS == nil || app.Spec.Storage.AWS.CredentialsSecretRef == "" {
 		return nil, nil
+	}
+	secretName := app.Spec.Storage.AWS.CredentialsSecretRef
+
+	outputSecret := naming.StorageSecret(app)
+	if outputSecret == secretName {
+		return nil, fmt.Errorf(
+			"spec.storage.secretName (%q) must not be the same Secret as spec.storage.aws.credentialsSecretRef (%q): "+
+				"the operator owns and overwrites the former (including deleting it when the Application is deleted), "+
+				"which would corrupt or destroy your AWS credentials Secret",
+			outputSecret, secretName)
 	}
 
 	secret := &corev1.Secret{}
 	err := v.Client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: app.Namespace}, secret)
 	switch {
 	case apierrors.IsNotFound(err):
-		return admission.Warnings{fmt.Sprintf("spec.storage.secretName Secret %q not found in namespace %q", secretName, app.Namespace)}, nil
+		return admission.Warnings{fmt.Sprintf("spec.storage.aws.credentialsSecretRef Secret %q not found in namespace %q", secretName, app.Namespace)}, nil
 	case err != nil:
 		return admission.Warnings{fmt.Sprintf("could not verify AWS credentials Secret %q: %v", secretName, err)}, nil
 	}
@@ -303,7 +308,7 @@ func (v *ApplicationCustomValidator) validateAWS(ctx context.Context, app *forge
 		}
 	}
 	if len(missing) > 0 {
-		return admission.Warnings{fmt.Sprintf("secret %q (spec.storage.secretName) is missing required key(s): %s", secretName, strings.Join(missing, ", "))}, nil
+		return admission.Warnings{fmt.Sprintf("secret %q (spec.storage.aws.credentialsSecretRef) is missing required key(s): %s", secretName, strings.Join(missing, ", "))}, nil
 	}
 
 	return nil, nil

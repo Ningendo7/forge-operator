@@ -273,15 +273,14 @@ func TestReconcileStorageSecret_SetsControllerReference(t *testing.T) {
 	}
 }
 
-func TestReconcileStorageSecret_DoesNotOwnAWSStaticCredentialsSecret(t *testing.T) {
-	// spec.storage.secretName, when explicitly set for AWS, means "use
-	// static credentials from this Secret instead of IRSA" -- a
-	// user-supplied input this operator only ever reads (see
-	// s3storage.NewManager), never one it should own or overwrite. Before
-	// this fix, reconcileStorageSecret treated it identically to its own
-	// generated output Secret (SetControllerReference + force-applied SSA
-	// write), so deleting the Application cascaded into deleting the user's
-	// own credentials Secret -- confirmed live against a real EKS cluster.
+func TestReconcileStorageSecret_OwnsOutputSecretEvenWithAWSStaticCredentials(t *testing.T) {
+	// spec.storage.secretName only ever names the operator's own generated
+	// output Secret; spec.storage.aws.credentialsSecretRef is the separate,
+	// user-supplied input Secret this operator only ever reads (see
+	// s3storage.NewManager). The two are distinct Secrets, so
+	// reconcileStorageSecret must own/create the output Secret exactly like
+	// it does with no static credentials configured at all, and must never
+	// touch the credentials Secret.
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)
 	_ = corev1.AddToScheme(scheme)
@@ -298,9 +297,9 @@ func TestReconcileStorageSecret_DoesNotOwnAWSStaticCredentialsSecret(t *testing.
 	app := newTestApplication()
 	app.UID = "12345"
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     testBucket,
-		SecretName: userSecretName,
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		AWS:      &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: userSecretName},
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(userSecret).Build()
@@ -310,18 +309,24 @@ func TestReconcileStorageSecret_DoesNotOwnAWSStaticCredentialsSecret(t *testing.
 		t.Fatalf("reconcileStorageSecret returned error: %v", err)
 	}
 
-	secret := &corev1.Secret{}
-	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: userSecretName, Namespace: testNamespace}, secret); err != nil {
+	outputName := naming.StorageSecret(app)
+	output := &corev1.Secret{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: outputName, Namespace: testNamespace}, output); err != nil {
+		t.Fatalf("expected operator's output Secret %q to be created: %v", outputName, err)
+	}
+	if !metav1.IsControlledBy(output, app) {
+		t.Fatalf("expected output Secret to be owned by the Application, got %#v", output.OwnerReferences)
+	}
+
+	creds := &corev1.Secret{}
+	if err := fakeClient.Get(context.Background(), client.ObjectKey{Name: userSecretName, Namespace: testNamespace}, creds); err != nil {
 		t.Fatalf("failed to get user's static-credentials Secret: %v", err)
 	}
-	if len(secret.OwnerReferences) != 0 {
-		t.Fatalf("expected no owner references on the user's own Secret (would cascade-delete it with the Application), got %#v", secret.OwnerReferences)
+	if len(creds.OwnerReferences) != 0 {
+		t.Fatalf("expected no owner references on the user's own Secret (would cascade-delete it with the Application), got %#v", creds.OwnerReferences)
 	}
-	if _, ok := secret.Data["provider"]; ok {
-		t.Fatalf("expected the user's Secret to be left untouched, but it was written with operator-informational fields: %#v", secret.Data)
-	}
-	if string(secret.Data["AWS_ACCESS_KEY_ID"]) != "AKIAEXAMPLE" {
-		t.Fatalf("expected the user's own credential data to survive unchanged, got %#v", secret.Data)
+	if string(creds.Data["AWS_ACCESS_KEY_ID"]) != "AKIAEXAMPLE" {
+		t.Fatalf("expected the user's own credential data to survive unchanged, got %#v", creds.Data)
 	}
 }
 
@@ -397,14 +402,14 @@ func TestReconcileStorage_SpecRemovalAttemptsCleanupUsingStatusStorage(t *testin
 	// Spec.Storage is nil (removed), but Status.Storage still remembers a
 	// previously-provisioned bucket -- reconcileStorage must attempt real
 	// cleanup, not just silently drop the credentials Secret. The missing
-	// Secret referenced by SecretName proves the cloud cleanup path was
-	// actually entered (manager construction fails), the same technique
-	// finalizer_test.go already uses.
+	// Secret referenced by AWS.CredentialsSecretRef proves the cloud
+	// cleanup path was actually entered (manager construction fails), the
+	// same technique finalizer_test.go already uses.
 	app := newTestApplication()
 	app.Status.Storage = &forgev1alpha1.StorageStatus{
-		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     testBucket,
-		SecretName: testMissingCredsSecret,
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		AWS:      &forgev1alpha1.AWSStorageStatus{CredentialsSecretRef: testMissingCredsSecret},
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
@@ -442,7 +447,7 @@ func TestReconcileStorage_SpecRemovalWithRetainPolicySkipsCleanupAndClearsStatus
 		// A real manager would fail to construct on this missing Secret --
 		// if Retain actually skips the cloud path as intended, that failure
 		// is never reached.
-		SecretName:     testMissingCredsSecret,
+		AWS:            &forgev1alpha1.AWSStorageStatus{CredentialsSecretRef: testMissingCredsSecret},
 		DeletionPolicy: forgev1alpha1.DeletionPolicyRetain,
 	}
 	// Seeded to reproduce a real bug found live: finalizeApplication leaves
@@ -499,9 +504,9 @@ func TestReconcileStorage_BucketIdentityMismatchCleansUpOldBucketFirst(t *testin
 
 	app := newTestApplication()
 	app.Status.Storage = &forgev1alpha1.StorageStatus{
-		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     "bucket-x-old",
-		SecretName: testMissingCredsSecret,
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   "bucket-x-old",
+		AWS:      &forgev1alpha1.AWSStorageStatus{CredentialsSecretRef: testMissingCredsSecret},
 	}
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
 		Provider: forgev1alpha1.ProviderAWSS3,
@@ -646,9 +651,9 @@ func TestReconcileStorage_PropagatesAWSReconcileError(t *testing.T) {
 
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     testBucket,
-		SecretName: testMissingCredsSecret,
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		AWS:      &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: testMissingCredsSecret},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
@@ -735,6 +740,59 @@ func TestFindApplicationsForSecret_ReturnsEmptyWhenNoApplicationReferencesSecret
 
 	if len(requests) != 0 {
 		t.Fatalf("expected no requests, got %d", len(requests))
+	}
+}
+
+// TestFindApplicationsForSecret_MatchesAkamaiTokenSecret asserts the Akamai
+// token Secret is matched, not just spec.storage.secretName.
+func TestFindApplicationsForSecret_MatchesAkamaiTokenSecret(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Provider: forgev1alpha1.ProviderAkamaiObjectStorage}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: naming.AkamaiTokenSecret(app), Namespace: testNamespace}}
+	requests := r.findApplicationsForSecret(context.Background(), secret)
+
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 matching request, got %d", len(requests))
+	}
+	if requests[0].Name != app.Name {
+		t.Errorf("expected %q to be requeued, got %q", app.Name, requests[0].Name)
+	}
+}
+
+// TestFindApplicationsForSecret_MatchesAWSCredentialsSecretRef asserts the
+// AWS static-credentials Secret is matched, not just spec.storage.secretName
+// (the operator's own, distinct output Secret).
+func TestFindApplicationsForSecret_MatchesAWSCredentialsSecretRef(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	const credsSecretName = "aws-static-creds"
+	app := newTestApplication()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		AWS:      &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: credsSecretName},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).Build()
+	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}
+
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: credsSecretName, Namespace: testNamespace}}
+	requests := r.findApplicationsForSecret(context.Background(), secret)
+
+	if len(requests) != 1 {
+		t.Fatalf("expected 1 matching request, got %d", len(requests))
+	}
+	if requests[0].Name != app.Name {
+		t.Errorf("expected %q to be requeued, got %q", app.Name, requests[0].Name)
 	}
 }
 
