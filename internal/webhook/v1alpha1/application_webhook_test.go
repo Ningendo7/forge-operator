@@ -57,15 +57,15 @@ var _ = Describe("Application Webhook", func() {
 			Expect(obj.Spec.Storage).To(BeNil())
 		})
 
-		It("leaves AWS's spec.storage.secretName untouched, since a non-empty value there also means \"use static credentials instead of IRSA\"", func() {
+		It("defaults spec.storage.secretName for AWS", func() {
 			obj.Name = "aws-app"
 			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
 				Provider: forgev1alpha1.ProviderAWSS3,
 				Bucket:   testBucket,
 			}
 			Expect(defaulter.Default(ctx, obj)).To(Succeed())
-			Expect(obj.Spec.Storage.SecretName).To(BeEmpty(),
-				"defaulting this would silently force the S3 manager into the static-credentials path")
+			Expect(obj.Spec.Storage.SecretName).To(Equal("aws-app-storage"),
+				"secretName only ever names the operator's own output Secret, so defaulting it is safe for every provider")
 		})
 
 		It("defaults spec.storage.secretName for Akamai", func() {
@@ -111,7 +111,7 @@ var _ = Describe("Application Webhook", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("admits an AWS Application with no secretName -- pure IRSA needs no Secret to check", func() {
+		It("admits an AWS Application with no credentialsSecretRef -- pure IRSA needs no Secret to check", func() {
 			obj.Name = "aws-irsa-app"
 			obj.Namespace = namespace
 			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
@@ -122,23 +122,23 @@ var _ = Describe("Application Webhook", func() {
 			Expect(err).NotTo(HaveOccurred())
 		})
 
-		It("admits, with a warning, an AWS Application whose secretName Secret doesn't exist yet", func() {
+		It("admits, with a warning, an AWS Application whose credentialsSecretRef Secret doesn't exist yet", func() {
 			// A GitOps tool may apply the Application before its Secret --
 			// rejecting here would break that ordering, and reconciliation
 			// already surfaces a missing Secret as a Degraded condition.
 			obj.Name = "aws-app"
 			obj.Namespace = namespace
 			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
-				Provider:   forgev1alpha1.ProviderAWSS3,
-				Bucket:     testBucket,
-				SecretName: "whatever",
+				Provider: forgev1alpha1.ProviderAWSS3,
+				Bucket:   testBucket,
+				AWS:      &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: "whatever"},
 			}
 			warnings, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(warnings).To(ContainElement(ContainSubstring("not found")))
 		})
 
-		It("admits, with a warning, an AWS Application whose secretName Secret is missing required keys", func() {
+		It("admits, with a warning, an AWS Application whose credentialsSecretRef Secret is missing required keys", func() {
 			secret := &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: "aws-creds-no-keys", Namespace: namespace},
 				Data:       map[string][]byte{"other-key": []byte("value")},
@@ -149,9 +149,9 @@ var _ = Describe("Application Webhook", func() {
 			obj.Name = "aws-bad-creds-app"
 			obj.Namespace = namespace
 			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
-				Provider:   forgev1alpha1.ProviderAWSS3,
-				Bucket:     testBucket,
-				SecretName: "aws-creds-no-keys",
+				Provider: forgev1alpha1.ProviderAWSS3,
+				Bucket:   testBucket,
+				AWS:      &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: "aws-creds-no-keys"},
 			}
 			warnings, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).NotTo(HaveOccurred())
@@ -175,9 +175,9 @@ var _ = Describe("Application Webhook", func() {
 			obj.Name = "valid-aws-app"
 			obj.Namespace = namespace
 			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
-				Provider:   forgev1alpha1.ProviderAWSS3,
-				Bucket:     testBucket,
-				SecretName: "valid-aws-creds",
+				Provider: forgev1alpha1.ProviderAWSS3,
+				Bucket:   testBucket,
+				AWS:      &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: "valid-aws-creds"},
 			}
 			_, err := validator.ValidateCreate(ctx, obj)
 			Expect(err).NotTo(HaveOccurred())
@@ -185,6 +185,20 @@ var _ = Describe("Application Webhook", func() {
 			By("validating updates the same way")
 			_, err = validator.ValidateUpdate(ctx, oldObj, obj)
 			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("rejects an AWS Application whose secretName collides with its credentialsSecretRef", func() {
+			obj.Name = "aws-collision-app"
+			obj.Namespace = namespace
+			obj.Spec.Storage = &forgev1alpha1.StorageSpec{
+				Provider:   forgev1alpha1.ProviderAWSS3,
+				Bucket:     testBucket,
+				SecretName: "shared-secret",
+				AWS:        &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: "shared-secret"},
+			}
+			_, err := validator.ValidateCreate(ctx, obj)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("must not be the same Secret"))
 		})
 
 		It("rejects changing spec.storage.provider on an existing Application", func() {

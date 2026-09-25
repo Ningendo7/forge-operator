@@ -26,6 +26,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -184,17 +185,14 @@ func (r *ApplicationReconciler) Reconcile(
 	forgemetrics.ApplicationReady.WithLabelValues(application.Namespace, application.Name).Set(1)
 
 	if application.Spec.Storage != nil {
-		return ctrl.Result{RequeueAfter: resolveStorageResyncInterval(r.StorageResyncInterval)}, nil
+		return ctrl.Result{RequeueAfter: jitteredStorageResyncInterval(r.StorageResyncInterval)}, nil
 	}
 
 	return ctrl.Result{}, nil
 }
 
 // defaultMaxConcurrentReconciles is resolveMaxConcurrentReconciles's
-// fallback when MaxConcurrentReconciles is left at its zero value --
-// preserves this controller's original, only-ever concurrency (a plain
-// literal here before MAX_CONCURRENT_RECONCILES existed) for any caller
-// that doesn't set the field explicitly, tests included.
+// fallback when MaxConcurrentReconciles is left at its zero value
 const defaultMaxConcurrentReconciles = 5
 
 // resolveMaxConcurrentReconciles applies defaultMaxConcurrentReconciles's
@@ -209,11 +207,15 @@ func resolveMaxConcurrentReconciles(configured int) int {
 }
 
 // defaultStorageResyncInterval is resolveStorageResyncInterval's fallback
-// when StorageResyncInterval is left at its zero value -- preserves this
-// controller's original, only-ever interval (a plain literal here before
-// STORAGE_RESYNC_INTERVAL existed) for any caller that doesn't set the field
-// explicitly, tests included.
+// when StorageResyncInterval is left at its zero value
 const defaultStorageResyncInterval = 10 * time.Minute
+
+// storageResyncJitterFactor: see docs/installation-and-configuration.md#storage-resync-jitter.
+const storageResyncJitterFactor = 0.2
+
+func jitteredStorageResyncInterval(configured time.Duration) time.Duration {
+	return wait.Jitter(resolveStorageResyncInterval(configured), storageResyncJitterFactor)
+}
 
 // resolveStorageResyncInterval applies defaultStorageResyncInterval's floor
 // to a configured value, mirroring resolveMaxConcurrentReconciles.

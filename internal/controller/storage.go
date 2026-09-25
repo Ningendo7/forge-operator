@@ -391,6 +391,9 @@ func (r *ApplicationReconciler) reconcileAWSStorage(
 			RoleARN: result.RoleARN,
 		},
 	}
+	if application.Spec.Storage.AWS != nil {
+		storageStatus.AWS.CredentialsSecretRef = application.Spec.Storage.AWS.CredentialsSecretRef
+	}
 
 	storagestatus.SetReady(application, storageStatus, "S3 bucket and IRSA role provisioned")
 

@@ -123,9 +123,21 @@ manager:
 
 Values are deliberately conservative starting points, not verified figures for any specific account tier. An unset or unparseable value falls back to its default rather than failing startup; a value `<= 0` falls back further still to an absolute floor of 1 QPS / burst 1, never to "unlimited" or "blocks forever." Watch `forge_rate_limit_wait_duration_seconds` (see [Observability](observability.md#metrics)) to see whether a given surface's defaults have headroom before tuning them.
 
+### Storage resync jitter
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `STORAGE_RESYNC_INTERVAL` | `10m` | How often a settled, storage-backed `Application` re-verifies its cloud bucket still exists. Parsed via Go's [`time.ParseDuration`](https://pkg.go.dev/time#ParseDuration) (e.g. `15s`, `10m`); unset or unparseable falls back to the default. |
+
+Each resync adds up to +20% random jitter on top of this interval, so many `Application`s created around the same time (a bulk apply, or everything created right after cluster bootstrap) don't all resync in the same narrow window every cycle — this spreads the periodic `HeadBucket`/`GetObject` load out instead of clustering it into periodic spikes, the same reasoning as the rate limiters above but for request *timing* rather than request *rate*. Jitter is additive only, so a resync is never shorter than the configured interval, only occasionally longer.
+
 ## Leader election
 
 Enabled by default in the Helm chart's `manager.args` (`--leader-elect`), so multiple replicas run active/standby safely. Runtime wiring is in [cmd/main.go](../cmd/main.go).
+
+### Rate limit ramp-up on election
+
+A freshly-elected leader can face a large backlog of `Application`s to reconcile all at once (informer cache sync, then the workqueue draining) — exactly when the rate limiters above are most likely to be hit, right after they were just recreated at full burst. On `mgr.Elected()`, each of the four limiters starts at 10% of its configured target and ramps back up to that target over 30 seconds (see [internal/controller/ratelimit/rampup.go](../internal/controller/ratelimit/rampup.go)), rather than admitting the whole backlog at full burst the instant leadership is acquired. This is local to each limiter instance — a new leader always starts its own ramp from scratch, since the token bucket itself isn't shared state carried over from whichever replica held the lease before it.
 
 # Terraform Infrastructure
 

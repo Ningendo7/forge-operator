@@ -31,6 +31,12 @@ func TestNewManager_ReturnsErrorWhenStorageSpecIsNil(t *testing.T) {
 	}
 }
 
+// noopRecordCreated stands in for a real recordCreated closure in tests that
+// need NewManager to treat the call as create-capable (non-nil recordCreated
+// is what gates the OIDC/PermissionsBoundary validation below -- see
+// NewManager's own comment).
+func noopRecordCreated(context.Context) error { return nil }
+
 func TestNewManager_ReturnsErrorWhenOIDCProviderARNMissing(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)
@@ -40,7 +46,7 @@ func TestNewManager_ReturnsErrorWhenOIDCProviderARNMissing(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "", "oidc.example.com", "arn:boundary", nil, testLimiter(), testLimiter())
+	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "", "oidc.example.com", "arn:boundary", noopRecordCreated, testLimiter(), testLimiter())
 	if err == nil {
 		t.Fatalf("expected error when OIDC_PROVIDER_ARN is empty, got nil")
 	}
@@ -58,7 +64,7 @@ func TestNewManager_ReturnsErrorWhenOIDCProviderURLMissing(t *testing.T) {
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "", "arn:boundary", nil, testLimiter(), testLimiter())
+	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "", "arn:boundary", noopRecordCreated, testLimiter(), testLimiter())
 	if err == nil {
 		t.Fatalf("expected error when OIDC_PROVIDER_URL is empty, got nil")
 	}
@@ -76,12 +82,30 @@ func TestNewManager_ReturnsErrorWhenPermissionsBoundaryARNMissing(t *testing.T) 
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", "", nil, testLimiter(), testLimiter())
+	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "arn:oidc", "oidc.example.com", "", noopRecordCreated, testLimiter(), testLimiter())
 	if err == nil {
 		t.Fatalf("expected error when APP_IRSA_PERMISSIONS_BOUNDARY_ARN is empty, got nil")
 	}
 	if !strings.Contains(err.Error(), "APP_IRSA_PERMISSIONS_BOUNDARY_ARN") {
 		t.Fatalf("expected the error to name APP_IRSA_PERMISSIONS_BOUNDARY_ARN, got: %v", err)
+	}
+}
+
+// TestNewManager_CleanupOnlySkipsIRSAConfigValidation asserts a cleanup-only
+// Manager (recordCreated == nil) never needs OIDC_PROVIDER_ARN/URL or
+// PermissionsBoundary -- only ReconcileAppIRSA does.
+func TestNewManager_CleanupOnlySkipsIRSAConfigValidation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = forgev1alpha1.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+
+	app := newTestApp()
+	app.Spec.Storage = &forgev1alpha1.StorageSpec{Bucket: testBucket}
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	_, err := NewManager(context.Background(), fakeClient, app, "demo-app-sa", "", "", "", nil, testLimiter(), testLimiter())
+	if err != nil {
+		t.Fatalf("expected cleanup-only NewManager (nil recordCreated) to succeed with no IRSA config, got: %v", err)
 	}
 }
 
@@ -131,8 +155,8 @@ func TestNewManager_ReturnsErrorWhenCredentialsSecretMissing(t *testing.T) {
 
 	app := newTestApp()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Bucket:     testBucket,
-		SecretName: "missing-secret",
+		Bucket: testBucket,
+		AWS:    &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: "missing-secret"},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
@@ -152,8 +176,8 @@ func TestNewManager_ReturnsErrorWhenCredentialsKeysMissing(t *testing.T) {
 
 	app := newTestApp()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Bucket:     testBucket,
-		SecretName: testSecretName,
+		Bucket: testBucket,
+		AWS:    &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: testSecretName},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: testSecretName, Namespace: testNamespace},
@@ -174,8 +198,8 @@ func TestNewManager_SucceedsWithCredentialsSecret(t *testing.T) {
 
 	app := newTestApp()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Bucket:     testBucket,
-		SecretName: testSecretName,
+		Bucket: testBucket,
+		AWS:    &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: testSecretName},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: testSecretName, Namespace: testNamespace},
@@ -222,14 +246,10 @@ func TestNewManager_PropagatesServiceAccountAndOIDCFields(t *testing.T) {
 	}
 }
 
-// TestNewManager_WiresRecordCreatedCallback guards against the exact bug
-// found live: NewManager accepted recordCreated as a parameter but never
-// assigned it to the returned Manager, so every real bucket creation failed
-// at the recordBucketCreated step with "recordCreated callback not
-// configured" -- invisible to every other test here since they all pass nil
-// for recordCreated (irrelevant to what they're checking) and
-// test_helpers_test.go's newTestManager builds the struct directly,
-// bypassing this constructor entirely.
+// TestNewManager_WiresRecordCreatedCallback asserts NewManager actually
+// assigns recordCreated onto the returned Manager -- other tests here pass
+// nil since it's irrelevant to what they check, and newTestManager builds
+// the struct directly, so nothing else exercises this wiring.
 func TestNewManager_WiresRecordCreatedCallback(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = forgev1alpha1.AddToScheme(scheme)

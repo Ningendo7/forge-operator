@@ -246,6 +246,39 @@ func TestStorageSpecFromStatus_PreservesCustomAkamaiAccessKeySecretRef(t *testin
 	}
 }
 
+func TestStorageSpecFromStatus_OmitsAWSWhenNotRecorded(t *testing.T) {
+	status := &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+	}
+
+	spec := storageSpecFromStatus(status)
+
+	if spec.AWS != nil {
+		t.Fatalf("expected a nil AWS block when status never recorded a credentialsSecretRef, got %#v", spec.AWS)
+	}
+}
+
+func TestStorageSpecFromStatus_PreservesCustomAWSCredentialsSecretRef(t *testing.T) {
+	// s3storage.NewManager resolves static credentials via
+	// Spec.Storage.AWS.CredentialsSecretRef, which is empty whenever
+	// Spec.Storage.AWS is nil -- exactly what a naively-reconstructed
+	// StorageSpec (missing this field) would produce. A customized
+	// credentialsSecretRef must survive the Status round-trip intact.
+	const customCredsSecret = "my-custom-aws-creds"
+	status := &forgev1alpha1.StorageStatus{
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		AWS:      &forgev1alpha1.AWSStorageStatus{CredentialsSecretRef: customCredsSecret},
+	}
+
+	spec := storageSpecFromStatus(status)
+
+	if spec.AWS == nil || spec.AWS.CredentialsSecretRef != customCredsSecret {
+		t.Fatalf("expected CredentialsSecretRef %q to be carried forward, got %#v", customCredsSecret, spec.AWS)
+	}
+}
+
 func TestFinalizeApplication_UsesCustomAkamaiAccessKeySecretRefFromStatus(t *testing.T) {
 	// End-to-end version of the same bug, at the level a real deletion
 	// actually exercises: spec.storage already removed, Status.Storage is
@@ -328,9 +361,9 @@ func TestFinalizeApplication_SetsStorageReadyCleanupFailedOnError(t *testing.T) 
 
 	app := newTestApplication()
 	app.Spec.Storage = &forgev1alpha1.StorageSpec{
-		Provider:   forgev1alpha1.ProviderAWSS3,
-		Bucket:     testBucket,
-		SecretName: testMissingCredsSecret,
+		Provider: forgev1alpha1.ProviderAWSS3,
+		Bucket:   testBucket,
+		AWS:      &forgev1alpha1.AWSStorageSpec{CredentialsSecretRef: testMissingCredsSecret},
 	}
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(app).WithStatusSubresource(app).Build()
 	r := &ApplicationReconciler{Client: fakeClient, Scheme: scheme}

@@ -94,14 +94,19 @@ func NewManager(
 	if storage == nil {
 		return nil, fmt.Errorf("storage spec is nil for application %s", app.Name)
 	}
-	if oidcProviderARN == "" {
-		return nil, fmt.Errorf("OIDC_PROVIDER_ARN is not configured, required to create IRSA roles for application %s", app.Name)
-	}
-	if oidcProviderURL == "" {
-		return nil, fmt.Errorf("OIDC_PROVIDER_URL is not configured, required to create IRSA roles for application %s", app.Name)
-	}
-	if permissionsBoundaryARN == "" {
-		return nil, fmt.Errorf("APP_IRSA_PERMISSIONS_BOUNDARY_ARN is not configured, required to create IRSA roles for application %s", app.Name)
+	// Only required for ReconcileAppIRSA -- a cleanup-only Manager
+	// (recordCreated == nil) never calls it, and requiring these
+	// unconditionally could deadlock deletion on a config change.
+	if recordCreated != nil {
+		if oidcProviderARN == "" {
+			return nil, fmt.Errorf("OIDC_PROVIDER_ARN is not configured, required to create IRSA roles for application %s", app.Name)
+		}
+		if oidcProviderURL == "" {
+			return nil, fmt.Errorf("OIDC_PROVIDER_URL is not configured, required to create IRSA roles for application %s", app.Name)
+		}
+		if permissionsBoundaryARN == "" {
+			return nil, fmt.Errorf("APP_IRSA_PERMISSIONS_BOUNDARY_ARN is not configured, required to create IRSA roles for application %s", app.Name)
+		}
 	}
 
 	region := storage.Region
@@ -113,16 +118,19 @@ func NewManager(
 		config.WithRegion(region),
 	}
 
-	// Fetch credentials from Secret if referenced in Spec
-	if storage.SecretName != "" {
+	// spec.storage.aws.credentialsSecretRef opts into static credentials
+	// instead of IRSA -- independent of spec.storage.secretName, which only
+	// names the operator's own output Secret.
+	if storage.AWS != nil && storage.AWS.CredentialsSecretRef != "" {
+		credentialsSecretRef := storage.AWS.CredentialsSecretRef
 		var secret corev1.Secret
 		secretKey := types.NamespacedName{
-			Name:      storage.SecretName,
+			Name:      credentialsSecretRef,
 			Namespace: app.Namespace,
 		}
 		if err := k8sClient.Get(ctx, secretKey, &secret); err != nil {
 			if apierrors.IsNotFound(err) {
-				return nil, fmt.Errorf("%w: %s", ErrCredentialsSecretNotFound, storage.SecretName)
+				return nil, fmt.Errorf("%w: %s", ErrCredentialsSecretNotFound, credentialsSecretRef)
 			}
 			return nil, err
 		}
@@ -130,7 +138,7 @@ func NewManager(
 		accessKeyBytes, ok1 := secret.Data["AWS_ACCESS_KEY_ID"]
 		secretKeyBytes, ok2 := secret.Data["AWS_SECRET_ACCESS_KEY"]
 		if !ok1 || !ok2 {
-			return nil, fmt.Errorf("AWS credentials not found in secret %s", storage.SecretName)
+			return nil, fmt.Errorf("AWS credentials not found in secret %s", credentialsSecretRef)
 		}
 
 		sessionToken := string(secret.Data["AWS_SESSION_TOKEN"])

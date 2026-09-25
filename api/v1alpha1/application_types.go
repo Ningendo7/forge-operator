@@ -192,6 +192,14 @@ type AWSStorageStatus struct {
 	// RoleARN is the IAM Role ARN generated for IRSA.
 	// +optional
 	RoleARN string `json:"roleARN,omitempty"`
+
+	// CredentialsSecretRef is spec.storage.aws.credentialsSecretRef as it
+	// stood when this bucket was last successfully reconciled, if any --
+	// same reasoning as AkamaiStorageStatus.AccessKeySecretRef: once
+	// spec.storage is removed, this is the only remaining record of which
+	// Secret cleanup should authenticate with.
+	// +optional
+	CredentialsSecretRef string `json:"credentialsSecretRef,omitempty"`
 }
 
 // AkamaiStorageStatus defines Akamai Object Storage status outputs.
@@ -224,7 +232,10 @@ type ContainerSpec struct {
 	// +kubebuilder:default:=8080
 	Port int32 `json:"port,omitempty"`
 
-	// ConfigMap name to mount as configuration.
+	// ConfigMapName points the pod's config volume at an externally-managed
+	// ConfigMap instead of the one generated from spec.config. Only needed
+	// for that case -- when spec.config is set, its ConfigMap is mounted
+	// automatically without setting this.
 	// +optional
 	ConfigMapName string `json:"configMapName,omitempty"`
 
@@ -259,7 +270,11 @@ type ContainerSpec struct {
 
 // ConfigSpec defines the ConfigMap data that the operator manages.
 type ConfigSpec struct {
-	// Name of the ConfigMap to reconcile.
+	// Name overrides the generated ConfigMap's own name (defaults to
+	// "<application-name>-config"). The pod mounts this ConfigMap
+	// automatically under its resolved name -- spec.container.configMapName
+	// only needs setting to point at a different, externally-managed
+	// ConfigMap instead.
 	// +optional
 	Name string `json:"name,omitempty"`
 
@@ -389,7 +404,11 @@ type StorageSpec struct {
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
-	// Secret name containing access credentials.
+	// SecretName overrides the name of the operator's own generated output
+	// Secret (bucket access info, IRSA role ARN, etc.), which otherwise
+	// defaults to "<application-name>-storage". Unrelated to input
+	// credentials -- for those, see spec.storage.aws.credentialsSecretRef or
+	// spec.storage.akamai.accessKeySecretRef.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
 
@@ -402,6 +421,15 @@ type StorageSpec struct {
 
 // AWSStorageSpec defines AWS-specific storage configuration.
 type AWSStorageSpec struct {
+
+	// CredentialsSecretRef names a Secret (keys: AWS_ACCESS_KEY_ID,
+	// AWS_SECRET_ACCESS_KEY) holding static AWS credentials to use instead
+	// of IRSA. Unset (the default) means IRSA. This must name a Secret
+	// distinct from spec.storage.secretName, which is the operator's own
+	// generated output credentials Secret -- the two are not
+	// interchangeable.
+	// +optional
+	CredentialsSecretRef string `json:"credentialsSecretRef,omitempty"`
 
 	// VersioningEnabled controls whether S3 bucket versioning is enabled.
 	// Defaults to true when unset, matching this operator's previous

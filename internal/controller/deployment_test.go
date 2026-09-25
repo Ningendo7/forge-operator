@@ -302,6 +302,27 @@ func TestBuildVolumeandMounts_ConfigMap(t *testing.T) {
 	}
 }
 
+// TestBuildVolumeAndMounts_MountsAutomaticallyWhenOnlyConfigSet asserts
+// spec.config alone is enough to get its ConfigMap mounted -- the volume
+// must not depend on also repeating its name via container.configMapName.
+func TestBuildVolumeAndMounts_MountsAutomaticallyWhenOnlyConfigSet(t *testing.T) {
+	app := newTestApplication()
+	app.Spec.ConfigMap = &forgev1alpha1.ConfigSpec{Name: testCustomConfigMapName}
+
+	r := &ApplicationReconciler{}
+	volumes, volumeMounts := r.buildVolumeAndMounts(app)
+
+	if len(volumeMounts) != 1 {
+		t.Fatalf("expected 1 volume mount, got %d", len(volumeMounts))
+	}
+	if len(volumes) != 1 {
+		t.Fatalf("expected 1 volume, got %d", len(volumes))
+	}
+	if volumes[0].ConfigMap.Name != testCustomConfigMapName {
+		t.Fatalf("expected config map volume name to be %q, got %q", testCustomConfigMapName, volumes[0].ConfigMap.Name)
+	}
+}
+
 func TestBuildVolumeandMounts_Secret(t *testing.T) {
 	app := newTestApplication()
 	app.Spec.Container = forgev1alpha1.ContainerSpec{
@@ -420,6 +441,22 @@ func TestConfigMapNameFor(t *testing.T) {
 				t.Fatalf("expected config map name to be %q, got %q", tt.expected, result)
 			}
 		})
+	}
+}
+
+// TestConfigMapNameFor_MatchesRenamedConfigMap asserts the mount name tracks
+// spec.config.name, not a hardcoded "<app>-config" default.
+func TestConfigMapNameFor_MatchesRenamedConfigMap(t *testing.T) {
+	app := &forgev1alpha1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: testAppName, Namespace: testNamespace},
+		Spec: forgev1alpha1.ApplicationSpec{
+			Image:     testImage,
+			ConfigMap: &forgev1alpha1.ConfigSpec{Name: testCustomConfigMapName},
+		},
+	}
+
+	if got := configMapNameFor(app); got != testCustomConfigMapName {
+		t.Fatalf("expected mount to follow the renamed ConfigMap %q, got %q", testCustomConfigMapName, got)
 	}
 }
 

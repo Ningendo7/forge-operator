@@ -49,6 +49,44 @@ func TestResolveMaxConcurrentReconciles_UsesConfiguredValue(t *testing.T) {
 	}
 }
 
+// --- resolveStorageResyncInterval / jitteredStorageResyncInterval ---
+
+func TestResolveStorageResyncInterval_FloorsNonPositiveValues(t *testing.T) {
+	if got := resolveStorageResyncInterval(0); got != defaultStorageResyncInterval {
+		t.Fatalf("expected zero to floor to %v, got %v", defaultStorageResyncInterval, got)
+	}
+	if got := resolveStorageResyncInterval(-time.Minute); got != defaultStorageResyncInterval {
+		t.Fatalf("expected a negative value to floor to %v, got %v", defaultStorageResyncInterval, got)
+	}
+}
+
+func TestResolveStorageResyncInterval_UsesConfiguredValue(t *testing.T) {
+	if got := resolveStorageResyncInterval(15 * time.Second); got != 15*time.Second {
+		t.Fatalf("expected the configured value 15s to pass through, got %v", got)
+	}
+}
+
+// TestJitteredStorageResyncInterval_StaysWithinBounds runs many samples
+// since jitter is randomized -- guards both directions: never below the
+// resolved interval (jitter is additive-only, so a shorter resync than
+// configured would be a real regression) and never more than
+// storageResyncJitterFactor above it (an unbounded jitter would defeat the
+// whole point of a predictable resync cadence).
+func TestJitteredStorageResyncInterval_StaysWithinBounds(t *testing.T) {
+	const configured = 100 * time.Second
+	maxAllowed := time.Duration(float64(configured) * (1 + storageResyncJitterFactor))
+
+	for range 200 {
+		got := jitteredStorageResyncInterval(configured)
+		if got < configured {
+			t.Fatalf("expected jittered interval >= %v, got %v", configured, got)
+		}
+		if got > maxAllowed {
+			t.Fatalf("expected jittered interval <= %v, got %v", maxAllowed, got)
+		}
+	}
+}
+
 func TestReconcile_ReturnsNilWhenApplicationNotFound(t *testing.T) {
 	scheme := newReconcileScheme()
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()

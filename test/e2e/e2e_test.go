@@ -889,6 +889,63 @@ spec:
 			Expect(err).To(HaveOccurred(), "the Application should not exist since admission rejected it")
 		})
 
+		// Regression test: buildVolumeAndMounts used to gate the ConfigMap
+		// volume purely on spec.container.configMapName being set, so
+		// spec.config alone (with container.configMapName left unset) got a
+		// ConfigMap created but never mounted -- silently, no error anywhere.
+		// Fixed to also mount whenever spec.config is set.
+		It("mounts the ConfigMap automatically from spec.config alone, without needing container.configMapName", func() {
+			const configAppName = "e2e-configmap-app"
+			const customConfigMapName = "e2e-configmap-app-custom-config"
+
+			By("creating an Application with spec.config set and container.configMapName left unset")
+			manifest := fmt.Sprintf(`
+apiVersion: forge.ningendo7.github.io/v1alpha1
+kind: Application
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  image: %s
+  config:
+    name: %s
+    data:
+      greeting: hello
+`, configAppName, appNamespace, appImage, customConfigMapName)
+			applyManifest(manifest, "e2e-configmap-app.yaml")
+
+			By("confirming the operator created the ConfigMap under the custom name")
+			cmd := exec.Command("kubectl", "get", "configmap", customConfigMapName, "-n", appNamespace)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "ConfigMap should have been created")
+
+			deploymentName := configAppName + "-deployment"
+			By("confirming the Deployment's pod template actually references that ConfigMap as a volume")
+			verifyVolumeWired := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", deploymentName, "-n", appNamespace,
+					"-o", "jsonpath={.spec.template.spec.volumes[*].configMap.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(customConfigMapName))
+			}
+			Eventually(verifyVolumeWired, time.Minute, 2*time.Second).Should(Succeed())
+
+			By("waiting for the pod to actually reach Running with the volume mounted")
+			verifyPodRunning := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "-n", appNamespace,
+					"-l", fmt.Sprintf("app=%s", configAppName),
+					"-o", "jsonpath={.items[0].status.phase}")
+				phase, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(phase).To(Equal("Running"))
+			}
+			Eventually(verifyPodRunning, 2*time.Minute, 2*time.Second).Should(Succeed())
+
+			By("cleaning up the ConfigMap Application")
+			cmd = exec.Command("kubectl", "delete", "application", configAppName, "-n", appNamespace, "--ignore-not-found", "--wait=false")
+			_, _ = utils.Run(cmd)
+		})
+
 		It("garbage collects owned resources via the real deployed controller when the Application is deleted", func() {
 			By("deleting the Application")
 			cmd := exec.Command("kubectl", "delete", "application", appName, "-n", appNamespace, "--timeout=60s")
