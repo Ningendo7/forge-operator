@@ -50,6 +50,23 @@ func TestDesiredIngress_UsesConfiguredValues(t *testing.T) {
 	}
 }
 
+// TestDesiredIngress_DefaultsEmptyPathToRoot asserts an unset spec.ingress.path
+// produces a valid Ingress -- the real Kubernetes API rejects an empty path
+// outright ("must be an absolute path"), and Path has no kubebuilder default,
+// so this must be defaulted here or every Application setting spec.ingress
+// without an explicit path permanently fails to reconcile.
+func TestDesiredIngress_DefaultsEmptyPathToRoot(t *testing.T) {
+	app := newTestApplication()
+	app.Spec.Ingress = &forgev1alpha1.IngressSpec{Host: testExampleHost}
+
+	r := &ApplicationReconciler{}
+	ing := r.desiredIngress(app)
+
+	if got := ing.Spec.Rules[0].IngressRuleValue.HTTP.Paths[0].Path; got != "/" {
+		t.Fatalf(`expected an unset path to default to "/", got %q`, got)
+	}
+}
+
 func TestDesiredIngress_PropagatesTLS(t *testing.T) {
 	// Guards against the TLS field being silently dropped: it's accepted
 	// by the CRD but was never read by desiredIngress, so the generated

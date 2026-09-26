@@ -20,12 +20,20 @@ func (r *ApplicationReconciler) desiredIngress(
 	labels := map[string]string{appLabelKey: application.Name}
 	ingressSpec := application.Spec.Ingress
 
+	path := ingressSpec.Path
+	if path == "" {
+		// The Kubernetes API rejects an empty path outright ("must be an
+		// absolute path"), and Path has no kubebuilder default -- unset
+		// must still produce a valid Ingress.
+		path = "/"
+	}
+
 	rule := networkingv1.IngressRule{
 		Host: ingressSpec.Host,
 		IngressRuleValue: networkingv1.IngressRuleValue{
 			HTTP: &networkingv1.HTTPIngressRuleValue{
 				Paths: []networkingv1.HTTPIngressPath{{
-					Path:     ingressSpec.Path,
+					Path:     path,
 					PathType: ingressSpec.PathType,
 					Backend: networkingv1.IngressBackend{
 						Service: &networkingv1.IngressServiceBackend{
